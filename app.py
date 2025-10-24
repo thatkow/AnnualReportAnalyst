@@ -49,66 +49,198 @@ class PDFEntry:
         return self.path.stem
 
 
-CONTROL_MASK = 0x0004
+class CollapsibleFrame(ttk.Frame):
+    def __init__(self, parent: tk.Widget, title: str, *, initially_open: bool = True) -> None:
+        super().__init__(parent)
+        self._title = title
+        self._open = initially_open
+        self._header = ttk.Button(self, text=self._formatted_title(), command=self._toggle, style="Toolbutton")
+        self._header.pack(fill=tk.X)
+        self._content = ttk.Frame(self)
+        if self._open:
+            self._content.pack(fill=tk.BOTH, expand=True)
+
+    @property
+    def content(self) -> ttk.Frame:
+        return self._content
+
+    def _formatted_title(self) -> str:
+        return ("▼ " if self._open else "► ") + self._title
+
+    def _toggle(self) -> None:
+        self._open = not self._open
+        if self._open:
+            self._content.pack(fill=tk.BOTH, expand=True)
+        else:
+            self._content.pack_forget()
+        self._header.configure(text=self._formatted_title())
 
 
-class PDFCell:
-    def __init__(self, parent: tk.Widget, app: "ReportApp", entry: PDFEntry, category: str):
+class MatchThumbnail:
+    SELECTED_COLOR = "#1E90FF"
+    UNSELECTED_COLOR = "#c3c3c3"
+
+    def __init__(self, row: "CategoryRow", match_index: int, match: Match) -> None:
+        self.row = row
+        self.app = row.app
+        self.entry = row.entry
+        self.match = match
+        self.match_index = match_index
+        self.photo: Optional[ImageTk.PhotoImage] = None
+        self.container = tk.Frame(row.inner, highlightthickness=1, highlightbackground=self.UNSELECTED_COLOR)
+        self.container.pack(side=tk.LEFT, padx=4, pady=4)
+        self.container.columnconfigure(0, weight=1)
+        self.image_label = ttk.Label(self.container)
+        self.image_label.grid(row=0, column=0, sticky="nsew")
+        self.info_label = ttk.Label(self.container, anchor="center", justify=tk.CENTER)
+        self.info_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        for widget in (self.container, self.image_label, self.info_label):
+            widget.bind("<Button-1>", self._on_click)
+            widget.bind("<Double-Button-1>", self._open_pdf)
+            widget.bind("<Button-3>", self._open_context_menu)
+        self._context_menu: Optional[tk.Menu] = None
+        self.refresh()
+
+    def refresh(self) -> None:
+        target_width = self.row.target_width
+        photo = self.app._render_page(self.entry.doc, self.match.page_index, target_width)
+        self.photo = photo
+        if photo is not None:
+            self.image_label.configure(image=photo, text="")
+        else:
+            self.image_label.configure(image="", text="Preview unavailable")
+        info_parts = [f"Page {self.match.page_index + 1}"]
+        if self.match.source == "manual":
+            info_parts.append("manual")
+        elif self.match.pattern:
+            info_parts.append(self.match.pattern)
+        self.info_label.configure(text=" | ".join(info_parts))
+        self.set_selected(self.match_index == self.entry.current_index.get(self.row.category))
+
+    def destroy(self) -> None:
+        self.container.destroy()
+
+    def set_selected(self, selected: bool) -> None:
+        color = self.SELECTED_COLOR if selected else self.UNSELECTED_COLOR
+        thickness = 3 if selected else 1
+        self.container.configure(highlightbackground=color, highlightcolor=color, highlightthickness=thickness)
+
+    def _ensure_context_menu(self) -> tk.Menu:
+        if self._context_menu is None:
+            menu = tk.Menu(self.container, tearoff=False)
+            menu.add_command(label="Open PDF", command=lambda: self.app._open_pdf(self.entry.path, self.match.page_index))
+            menu.add_command(
+                label="Select Different Page",
+                command=lambda: self.app.open_page_selection_dialog(self.entry, self.row.category),
+            )
+            menu.add_command(
+                label="Manual Entry",
+                command=lambda: self.app.manual_select(self.entry, self.row.category),
+            )
+            self._context_menu = menu
+        return self._context_menu
+
+    def _on_click(self, _: tk.Event) -> None:  # type: ignore[override]
+        self.app.select_match_index(self.entry, self.row.category, self.match_index)
+
+    def _open_pdf(self, _: tk.Event) -> None:  # type: ignore[override]
+        self.app._open_pdf(self.entry.path, self.match.page_index)
+
+    def _open_context_menu(self, event: tk.Event) -> None:  # type: ignore[override]
+        menu = self._ensure_context_menu()
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+
+class CategoryRow:
+    def __init__(self, parent: tk.Widget, app: "ReportApp", entry: PDFEntry, category: str) -> None:
         self.app = app
         self.entry = entry
         self.category = category
-        self.frame = ttk.Frame(parent, padding=4)
-        self.image_label = ttk.Label(self.frame)
-        self.info_label = ttk.Label(self.frame)
-        self.image_label.pack(expand=True, fill=tk.BOTH)
-        self.info_label.pack(fill=tk.X)
-        self.photo: Optional[ImageTk.PhotoImage] = None
-        self._right_click_job: Optional[str] = None
-        for widget in (self.image_label, self.info_label):
-            widget.bind("<Button-1>", self._next_match)
-            widget.bind("<Shift-Button-1>", self._previous_match)
-            widget.bind("<Button-3>", self._on_right_click)
-            widget.bind("<Double-Button-3>", self._manual_select)
-            widget.bind("<Alt-Button-1>", self._open_overview)
+        self.frame = ttk.Frame(parent, padding=(0, 4, 0, 4))
+        self.frame.columnconfigure(0, weight=1)
+        header = ttk.Frame(self.frame)
+        header.grid(row=0, column=0, sticky="ew")
+        ttk.Label(header, text=category, font=("TkDefaultFont", 10, "bold")).pack(side=tk.LEFT)
+        controls = ttk.Frame(header)
+        controls.pack(side=tk.RIGHT)
+        ttk.Button(
+            controls,
+            text="Browse",
+            command=lambda: self.app.open_page_selection_dialog(self.entry, self.category),
+            width=7,
+        ).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(
+            controls,
+            text="Manual",
+            command=lambda: self.app.manual_select(self.entry, self.category),
+            width=7,
+        ).pack(side=tk.RIGHT, padx=(4, 0))
+        self.canvas = tk.Canvas(self.frame, height=260)
+        self.canvas.grid(row=1, column=0, sticky="ew")
+        self.scrollbar = ttk.Scrollbar(self.frame, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        self.scrollbar.grid(row=2, column=0, sticky="ew")
+        self.canvas.configure(xscrollcommand=self.scrollbar.set)
+        self.inner = ttk.Frame(self.canvas)
+        self.window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", self._on_inner_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<Shift-MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Shift-Button-4>", self._on_mousewheel)
+        self.canvas.bind("<Shift-Button-5>", self._on_mousewheel)
+        self.thumbnails: List[MatchThumbnail] = []
+        self.empty_label: Optional[ttk.Label] = None
+        self.target_width = 220
 
-    def _next_match(self, event: tk.Event) -> None:  # type: ignore[override]
-        self.app.cycle_match(self.entry, self.category, forward=True)
-
-    def _previous_match(self, event: tk.Event) -> None:  # type: ignore[override]
-        self.app.cycle_match(self.entry, self.category, forward=False)
-
-    def _on_right_click(self, event: tk.Event) -> None:  # type: ignore[override]
-        if self._right_click_job is not None:
-            self.frame.after_cancel(self._right_click_job)
-            self._right_click_job = None
-
-        if event.state & CONTROL_MASK:
-            self.app.open_page_selection_dialog(self.entry, self.category)
-            return
-
-        def _open() -> None:
-            self._right_click_job = None
-            self.app.open_current_match(self.entry, self.category)
-
-        self._right_click_job = self.frame.after(200, _open)
-
-    def _manual_select(self, event: tk.Event) -> None:  # type: ignore[override]
-        if self._right_click_job is not None:
-            self.frame.after_cancel(self._right_click_job)
-            self._right_click_job = None
-        self.app.manual_select(self.entry, self.category)
-
-    def update_display(self, photo: Optional[ImageTk.PhotoImage], info_text: str) -> None:
-        self.photo = photo
-        if photo is not None:
-            self.image_label.configure(image=photo)
+    def refresh(self) -> None:
+        for thumb in self.thumbnails:
+            thumb.destroy()
+        self.thumbnails.clear()
+        if self.empty_label is not None:
+            self.empty_label.destroy()
+            self.empty_label = None
+        matches = self.entry.matches.get(self.category, [])
+        if not matches:
+            self.empty_label = ttk.Label(self.inner, text="No matches found", foreground="#666666")
+            self.empty_label.pack(side=tk.LEFT, padx=8, pady=16)
         else:
-            self.image_label.configure(image="")
-        self.info_label.configure(text=info_text)
+            for idx, match in enumerate(matches):
+                thumbnail = MatchThumbnail(self, idx, match)
+                self.thumbnails.append(thumbnail)
+        self.update_selection()
+        self.frame.after_idle(self._update_scrollbar_visibility)
 
-    def _open_overview(self, event: tk.Event) -> str:  # type: ignore[override]
-        self.app.open_entry_overview(self.entry)
-        return "break"
+    def update_selection(self) -> None:
+        current_index = self.entry.current_index.get(self.category)
+        for thumb in self.thumbnails:
+            thumb.set_selected(current_index == thumb.match_index)
+
+    def _on_inner_configure(self, _: tk.Event) -> None:  # type: ignore[override]
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:  # type: ignore[override]
+        self.canvas.itemconfigure(self.window, height=event.height)
+
+    def _on_mousewheel(self, event: tk.Event) -> None:  # type: ignore[override]
+        if getattr(event, "delta", 0):
+            step = -1 if event.delta > 0 else 1
+        else:
+            step = -1 if event.num == 4 else 1
+        self.canvas.xview_scroll(step, "units")
+
+    def _update_scrollbar_visibility(self) -> None:
+        bbox = self.canvas.bbox("all")
+        if bbox is None:
+            self.scrollbar.grid_remove()
+            return
+        content_width = bbox[2] - bbox[0]
+        canvas_width = self.canvas.winfo_width()
+        if content_width <= canvas_width:
+            self.scrollbar.grid_remove()
+        else:
+            self.scrollbar.grid()
 
 
 class ReportApp:
@@ -122,7 +254,7 @@ class ReportApp:
         self.case_insensitive_vars: Dict[str, tk.BooleanVar] = {}
         self.whitespace_as_space_vars: Dict[str, tk.BooleanVar] = {}
         self.pdf_entries: List[PDFEntry] = []
-        self.cells: Dict[tuple[Path, str], PDFCell] = {}
+        self.category_rows: Dict[tuple[Path, str], CategoryRow] = {}
         self.year_vars: Dict[Path, tk.StringVar] = {}
         self.year_pattern_text: Optional[tk.Text] = None
         self.year_case_insensitive_var = tk.BooleanVar(master=self.root, value=True)
@@ -168,8 +300,11 @@ class ReportApp:
         review_container = ttk.Frame(notebook)
         notebook.add(review_container, text="Review")
 
-        pattern_frame = ttk.LabelFrame(review_container, text="Regex patterns (one per line)", padding=8)
-        pattern_frame.pack(fill=tk.X, padx=8, pady=4)
+        pattern_section = CollapsibleFrame(review_container, "Regex patterns (one per line)")
+        pattern_section.pack(fill=tk.X, padx=8, pady=4)
+
+        pattern_frame = ttk.Frame(pattern_section.content, padding=8)
+        pattern_frame.pack(fill=tk.X)
 
         for idx, column in enumerate(COLUMNS):
             column_frame = ttk.Frame(pattern_frame)
@@ -191,11 +326,11 @@ class ReportApp:
                 variable=whitespace_var,
             ).pack(anchor="w")
 
-        update_button = ttk.Button(pattern_frame, text="Apply Patterns", command=self.apply_patterns)
-        update_button.grid(row=1, column=0, columnspan=len(COLUMNS), pady=4)
+        update_button = ttk.Button(pattern_section.content, text="Apply Patterns", command=self.apply_patterns)
+        update_button.pack(pady=4)
 
-        year_frame = ttk.Frame(pattern_frame)
-        year_frame.grid(row=2, column=0, columnspan=len(COLUMNS), sticky="ew", pady=(8, 0))
+        year_frame = ttk.Frame(pattern_section.content)
+        year_frame.pack(fill=tk.X, pady=(8, 0))
         ttk.Label(year_frame, text="Year pattern").pack(anchor="w")
         year_text = tk.Text(year_frame, height=2, width=30)
         year_text.pack(fill=tk.BOTH, expand=True)
@@ -494,7 +629,7 @@ class ReportApp:
             except Exception:
                 pass
         self.pdf_entries.clear()
-        self.cells.clear()
+        self.category_rows.clear()
         self.year_vars.clear()
         for child in self.inner_frame.winfo_children():
             child.destroy()
@@ -502,65 +637,64 @@ class ReportApp:
     def _rebuild_grid(self) -> None:
         for child in self.inner_frame.winfo_children():
             child.destroy()
-        self.cells.clear()
+        self.category_rows.clear()
 
-        header = ttk.Frame(self.inner_frame)
-        header.grid(row=0, column=0, columnspan=4, sticky="ew")
-        ttk.Label(header, text="PDF", anchor="w").grid(row=0, column=0, padx=4, sticky="ew")
-        for idx, column in enumerate(COLUMNS, start=1):
-            ttk.Label(header, text=column, anchor="center").grid(row=0, column=idx, padx=4, sticky="ew")
-        for idx in range(len(COLUMNS) + 1):
-            header.columnconfigure(idx, weight=1)
+        if not self.pdf_entries:
+            ttk.Label(self.inner_frame, text="Load PDFs to begin reviewing assignments.").grid(
+                row=0, column=0, padx=16, pady=16, sticky="nw"
+            )
+            return
 
-        for row_index, entry in enumerate(self.pdf_entries, start=1):
-            relative_path = entry.path.relative_to(Path(self.folder_path.get())) if self.folder_path.get() else entry.path.name
-            info_frame = ttk.Frame(self.inner_frame)
-            info_frame.grid(row=row_index, column=0, sticky="nw", padx=4, pady=4)
+        for row_index, entry in enumerate(self.pdf_entries):
+            container = ttk.Frame(self.inner_frame, padding=8)
+            container.grid(row=row_index, column=0, sticky="ew", padx=4, pady=4)
+            container.columnconfigure(1, weight=1)
+
+            relative_path = (
+                entry.path.relative_to(Path(self.folder_path.get())) if self.folder_path.get() else entry.path.name
+            )
+            info_frame = ttk.Frame(container)
+            info_frame.grid(row=0, column=0, sticky="nw", padx=(0, 12))
             name_label = ttk.Label(info_frame, text=relative_path, anchor="w", width=30, wraplength=200)
             name_label.pack(anchor="w")
             name_label.bind("<Alt-Button-1>", lambda _e, ent=entry: self.open_entry_overview(ent))
             year_var = tk.StringVar(value=entry.year)
             self.year_vars[entry.path] = year_var
             year_var.trace_add("write", lambda *_args, e=entry, v=year_var: setattr(e, "year", v.get()))
-            year_entry = ttk.Entry(info_frame, textvariable=year_var, width=30)
-            year_entry.pack(fill=tk.X, pady=(4, 0))
-            for col_index, column in enumerate(COLUMNS, start=1):
-                cell = PDFCell(self.inner_frame, self, entry, column)
-                cell.frame.grid(row=row_index, column=col_index, padx=4, pady=4, sticky="nsew")
-                self.cells[(entry.path, column)] = cell
-                self._update_cell(entry, column)
+            ttk.Entry(info_frame, textvariable=year_var, width=30).pack(fill=tk.X, pady=(4, 0))
 
-        for idx in range(len(COLUMNS) + 1):
-            self.inner_frame.columnconfigure(idx, weight=1)
+            types_frame = ttk.Frame(container)
+            types_frame.grid(row=0, column=1, sticky="ew")
+            types_frame.columnconfigure(0, weight=1)
 
-    def _update_cell(self, entry: PDFEntry, category: str) -> None:
-        cell = self.cells.get((entry.path, category))
-        if cell is None:
+            for idx, column in enumerate(COLUMNS):
+                row = CategoryRow(types_frame, self, entry, column)
+                row.frame.grid(row=idx, column=0, sticky="ew")
+                if idx:
+                    row.frame.grid_configure(pady=(8, 0))
+                self.category_rows[(entry.path, column)] = row
+                row.refresh()
+
+        self.inner_frame.columnconfigure(0, weight=1)
+
+    def _refresh_category_row(self, entry: PDFEntry, category: str, *, rebuild: bool) -> None:
+        row = self.category_rows.get((entry.path, category))
+        if row is None:
             return
+        if rebuild:
+            row.refresh()
+        else:
+            row.update_selection()
 
-        matches = entry.matches[category]
-        current_index = entry.current_index.get(category)
-        if current_index is None or not matches:
-            cell.update_display(None, "No matches found")
+    def select_match_index(self, entry: PDFEntry, category: str, index: int) -> None:
+        matches = entry.matches.get(category, [])
+        if not matches:
             return
-
-        current_index = max(0, min(current_index, len(matches) - 1))
-        entry.current_index[category] = current_index
-        match = matches[current_index]
-        total_width = self.canvas.winfo_width()
-        if total_width <= 1:
-            self.root.update_idletasks()
-            total_width = self.canvas.winfo_width()
-        if total_width <= 1:
-            total_width = self.root.winfo_width()
-        if total_width <= 1:
-            total_width = 900
-        target_width = max(50, total_width // len(COLUMNS))
-        photo = self._render_page(entry.doc, match.page_index, target_width)
-        info_parts = [f"Match {current_index + 1}/{len(matches)}", f"Page {match.page_index + 1}"]
-        if match.source == "manual":
-            info_parts.append("(manual)")
-        cell.update_display(photo, " | ".join(info_parts))
+        index = max(0, min(index, len(matches) - 1))
+        entry.current_index[category] = index
+        self._refresh_category_row(entry, category, rebuild=False)
+        page_index = matches[index].page_index
+        self._update_assigned_entry(entry, category, page_index, persist=False)
 
     def _rescan_entries(
         self,
@@ -631,7 +765,7 @@ class ReportApp:
                 else:
                     entry.current_index[column] = None
 
-                self._update_cell(entry, column)
+                self._refresh_category_row(entry, column, rebuild=True)
 
             if year_changed:
                 if detected_year is not None:
@@ -677,7 +811,7 @@ class ReportApp:
                 messagebox.showinfo("Start of Matches", "Reached the first matched page.")
                 return
             entry.current_index[category] = current_index - 1
-        self._update_cell(entry, category)
+        self._refresh_category_row(entry, category, rebuild=False)
         page_index = self._get_selected_page_index(entry, category)
         if page_index is not None:
             self._update_assigned_entry(entry, category, page_index, persist=False)
@@ -865,13 +999,13 @@ class ReportApp:
         for idx, match in enumerate(matches):
             if match.page_index == page_index:
                 entry.current_index[category] = idx
-                self._update_cell(entry, category)
+                self._refresh_category_row(entry, category, rebuild=False)
                 self._update_assigned_entry(entry, category, page_index, persist=False)
                 return
 
         matches.append(Match(page_index=page_index, source="manual"))
         entry.current_index[category] = len(matches) - 1
-        self._update_cell(entry, category)
+        self._refresh_category_row(entry, category, rebuild=True)
         self._update_assigned_entry(entry, category, page_index, persist=False)
 
     def _get_selected_page_index(self, entry: PDFEntry, category: str) -> Optional[int]:
