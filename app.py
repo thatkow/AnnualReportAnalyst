@@ -162,6 +162,12 @@ class ReportApp:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.canvas.configure(yscrollcommand=scrollbar.set)
 
+        self.canvas.bind("<Enter>", self._bind_mousewheel)
+        self.canvas.bind("<Leave>", self._unbind_mousewheel)
+        # Linux scroll events
+        self.canvas.bind("<Button-4>", self._on_mousewheel)
+        self.canvas.bind("<Button-5>", self._on_mousewheel)
+
         self.inner_frame = ttk.Frame(self.canvas)
         self.canvas_window = self.canvas.create_window((0, 0), window=self.inner_frame, anchor="nw")
         self.inner_frame.bind("<Configure>", self._on_frame_configure)
@@ -175,6 +181,18 @@ class ReportApp:
 
     def _on_canvas_configure(self, event: tk.Event) -> None:  # type: ignore[override]
         self.canvas.itemconfigure(self.canvas_window, width=event.width)
+
+    def _bind_mousewheel(self, _: tk.Event) -> None:  # type: ignore[override]
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _unbind_mousewheel(self, _: tk.Event) -> None:  # type: ignore[override]
+        self.canvas.unbind_all("<MouseWheel>")
+
+    def _on_mousewheel(self, event: tk.Event) -> None:  # type: ignore[override]
+        if event.num == 4 or event.delta > 0:
+            self.canvas.yview_scroll(-1, "units")
+        elif event.num == 5 or event.delta < 0:
+            self.canvas.yview_scroll(1, "units")
 
     def _refresh_company_options(self) -> None:
         if not self.companies_dir.exists():
