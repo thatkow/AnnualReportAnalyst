@@ -76,6 +76,9 @@ class CollapsibleFrame(ttk.Frame):
         self._header.configure(text=self._formatted_title())
 
 
+SHIFT_MASK = 0x0001
+
+
 class MatchThumbnail:
     SELECTED_COLOR = "#1E90FF"
     UNSELECTED_COLOR = "#c3c3c3"
@@ -137,7 +140,8 @@ class MatchThumbnail:
         return self._context_menu
 
     def _on_click(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
-        if event.state & tk.SHIFT:
+        state = getattr(event, "state", 0)
+        if state & SHIFT_MASK:
             self.app.open_thumbnail_zoom(self.entry, self.match.page_index)
             return "break"
         self.app.select_match_index(self.entry, self.row.category, self.match_index)
@@ -1609,10 +1613,11 @@ class ReportApp:
         scrape_root.mkdir(parents=True, exist_ok=True)
 
         errors: List[str] = []
-        pending: Dict[PDFEntry, List[Tuple[str, int]]] = {}
+        pending: List[Tuple[PDFEntry, List[Tuple[str, int]]]] = []
         metadata_cache: Dict[Path, Dict[str, Any]] = {}
 
         for entry in self.pdf_entries:
+            entry_tasks: List[Tuple[str, int]] = []
             doc_dir = scrape_root / entry.stem
             doc_dir.mkdir(parents=True, exist_ok=True)
             metadata = self._load_doc_metadata(doc_dir)
@@ -1637,9 +1642,12 @@ class ReportApp:
                         txt_exists = (doc_dir / txt_name).exists()
                 if csv_exists and txt_exists:
                     continue
-                pending.setdefault(entry, []).append((category, page_index))
+                entry_tasks.append((category, page_index))
 
-        total_tasks = sum(len(items) for items in pending.values())
+            if entry_tasks:
+                pending.append((entry, entry_tasks))
+
+        total_tasks = sum(len(items) for _, items in pending)
         if not total_tasks:
             messagebox.showinfo("AIScrape", "All selected sections already have scraped files.")
             return
@@ -1653,7 +1661,7 @@ class ReportApp:
         attempted = 0
 
         try:
-            for entry, tasks in pending.items():
+            for entry, tasks in pending:
                 doc_dir = scrape_root / entry.stem
                 metadata = metadata_cache.get(entry.path, {})
                 if not isinstance(metadata, dict):
