@@ -24,6 +24,9 @@ DEFAULT_PATTERNS = {
 YEAR_DEFAULT_PATTERNS = [r"(\d{4})\s+Annual\s+Report"]
 
 
+SHIFT_MASK = 0x0001
+
+
 @dataclass
 class Match:
     page_index: int
@@ -137,7 +140,7 @@ class MatchThumbnail:
         return self._context_menu
 
     def _on_click(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
-        if event.state & tk.SHIFT:
+        if event.state & SHIFT_MASK:
             self.app.open_thumbnail_zoom(self.entry, self.match.page_index)
             return "break"
         self.app.select_match_index(self.entry, self.row.category, self.match_index)
