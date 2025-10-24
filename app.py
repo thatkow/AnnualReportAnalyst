@@ -1148,10 +1148,16 @@ class ReportApp:
                 ).grid(row=0, column=0, sticky="w")
                 ttk.Button(
                     header_frame,
+                    text="View Prompt",
+                    command=lambda c=category: self._show_prompt_preview(c),
+                    width=12,
+                ).grid(row=0, column=1, sticky="e", padx=(0, 4))
+                ttk.Button(
+                    header_frame,
                     text="Delete",
                     command=lambda d=doc_dir, c=category: self._delete_scrape_output(d, c),
                     width=10,
-                ).grid(row=0, column=1, sticky="e")
+                ).grid(row=0, column=2, sticky="e")
                 row_index += 1
 
                 image_frame = ttk.Frame(self.scraped_inner, padding=8)
@@ -1209,6 +1215,44 @@ class ReportApp:
                     tree.pack(expand=True, fill=tk.BOTH)
 
                 row_index += 1
+
+    def _show_prompt_preview(self, category: str) -> None:
+        company = self.company_var.get()
+        if not company:
+            messagebox.showinfo("Prompt Preview", "Select a company to view its prompts.")
+            return
+        prompt_text = self._get_prompt_text(company, category)
+        if prompt_text is None:
+            messagebox.showerror(
+                "Prompt Preview",
+                f"No prompt file found for the '{category}' category.",
+            )
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"{category} Prompt Preview")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        content_frame = ttk.Frame(dialog, padding=(12, 12, 12, 0))
+        content_frame.pack(fill=tk.BOTH, expand=True)
+
+        text_widget = tk.Text(content_frame, wrap="word", width=80, height=25)
+        text_widget.insert("1.0", prompt_text)
+        text_widget.configure(state="disabled")
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(content_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        button_frame = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        button_frame.pack(fill=tk.X)
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.wait_visibility()
+        dialog.focus_set()
 
     def _load_doc_metadata(self, doc_dir: Path) -> Dict[str, Any]:
         metadata_path = doc_dir / "metadata.json"
