@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import re
@@ -10,8 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
 from PIL import Image, ImageTk
-from PyPDF2 import PdfReader, PdfWriter
 import webbrowser
+import requests
 
 
 COLUMNS = ["Financial", "Income", "Shares"]
@@ -111,6 +112,7 @@ class ReportApp:
         self.root.title("Annual Report Analyst")
         self.folder_path = tk.StringVar()
         self.company_var = tk.StringVar()
+        self.api_key_var = tk.StringVar()
         self.pattern_texts: Dict[str, tk.Text] = {}
         self.case_insensitive_vars: Dict[str, tk.BooleanVar] = {}
         self.whitespace_as_space_vars: Dict[str, tk.BooleanVar] = {}
@@ -121,10 +123,14 @@ class ReportApp:
         self.year_case_insensitive_var = tk.BooleanVar(master=self.root, value=True)
         self.year_whitespace_as_space_var = tk.BooleanVar(master=self.root, value=True)
         self.companies_dir = Path(__file__).resolve().parent / "companies"
+        self.prompts_dir = Path(__file__).resolve().parent / "prompts"
         self.pattern_config_path = Path(__file__).resolve().parent / "pattern_config.json"
         self.config_data: Dict[str, Any] = {}
         self.last_company_preference: str = ""
         self._config_loaded = False
+        self.assigned_pages: Dict[str, Dict[str, Any]] = {}
+        self.assigned_pages_path: Optional[Path] = None
+        self.scraped_images: List[ImageTk.PhotoImage] = []
 
         self._build_ui()
         self._load_pattern_config()
@@ -141,6 +147,11 @@ class ReportApp:
         self.company_combo = ttk.Combobox(top_frame, textvariable=self.company_var, state="readonly", width=30)
         self.company_combo.pack(side=tk.LEFT, padx=4)
         self.company_combo.bind("<<ComboboxSelected>>", self._on_company_selected)
+
+        ttk.Label(top_frame, text="API key:").pack(side=tk.LEFT)
+        self.api_key_entry = ttk.Entry(top_frame, textvariable=self.api_key_var, width=40)
+        self.api_key_entry.pack(side=tk.LEFT, padx=4)
+        self.api_key_entry.bind("<Return>", self._on_api_key_enter)
 
         folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=60, state="readonly")
         folder_entry.pack(side=tk.LEFT, padx=4)
@@ -190,8 +201,15 @@ class ReportApp:
             variable=self.year_whitespace_as_space_var,
         ).pack(anchor="w")
 
-        grid_container = ttk.Frame(self.root)
-        grid_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        self.notebook = notebook
+
+        review_container = ttk.Frame(notebook)
+        notebook.add(review_container, text="Review")
+
+        grid_container = ttk.Frame(review_container)
+        grid_container.pack(fill=tk.BOTH, expand=True)
 
         self.canvas = tk.Canvas(grid_container)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -211,7 +229,27 @@ class ReportApp:
         self.inner_frame.bind("<Configure>", self._on_frame_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
-        self.confirm_button = ttk.Button(self.root, text="Confirm", command=self.confirm_selections)
+        scraped_container = ttk.Frame(notebook)
+        self.scraped_frame = scraped_container
+        notebook.add(scraped_container, text="Scraped")
+
+        self.scraped_canvas = tk.Canvas(scraped_container)
+        self.scraped_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scraped_scrollbar = ttk.Scrollbar(scraped_container, orient=tk.VERTICAL, command=self.scraped_canvas.yview)
+        scraped_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.scraped_canvas.configure(yscrollcommand=scraped_scrollbar.set)
+
+        self.scraped_inner = ttk.Frame(self.scraped_canvas)
+        self.scraped_window = self.scraped_canvas.create_window((0, 0), window=self.scraped_inner, anchor="nw")
+        self.scraped_inner.bind(
+            "<Configure>", lambda _e: self.scraped_canvas.configure(scrollregion=self.scraped_canvas.bbox("all"))
+        )
+        self.scraped_canvas.bind(
+            "<Configure>", lambda e: self.scraped_canvas.itemconfigure(self.scraped_window, width=e.width)
+        )
+
+        self.confirm_button = ttk.Button(self.root, text="AIScrape", command=self.scrape_selections)
         self.confirm_button.pack(pady=8)
 
     def _on_frame_configure(self, _: tk.Event) -> None:  # type: ignore[override]
@@ -254,11 +292,23 @@ class ReportApp:
     def _set_folder_from_company(self, company: str) -> None:
         if not company:
             self.folder_path.set("")
+            self.assigned_pages = {}
+            self.assigned_pages_path = None
             return
         folder = self.companies_dir / company / "raw"
         self.folder_path.set(str(folder))
+        self._load_assigned_pages(company)
+        self._refresh_scraped_tab()
         if self._config_loaded:
             self._update_last_company(company)
+
+    def _on_api_key_enter(self, _: tk.Event) -> None:  # type: ignore[override]
+        self._save_api_key()
+
+    def _save_api_key(self) -> None:
+        api_key = self.api_key_var.get().strip()
+        self.config_data["api_key"] = api_key
+        self._write_config()
 
     def _load_pdfs_on_start(self) -> None:
         if self.folder_path.get():
@@ -364,9 +414,66 @@ class ReportApp:
             # Reset current indices based on available matches
             for column in COLUMNS:
                 entry.current_index[column] = 0 if entry.matches[column] else None
+            self._apply_saved_selection(entry)
             self.pdf_entries.append(entry)
 
         self._rebuild_grid()
+        self._refresh_scraped_tab()
+
+    def _load_assigned_pages(self, company: str) -> None:
+        company_dir = self.companies_dir / company
+        self.assigned_pages_path = company_dir / "assigned.json"
+        if not self.assigned_pages_path.exists():
+            self.assigned_pages = {}
+            return
+        try:
+            with self.assigned_pages_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            self.assigned_pages = {}
+            return
+
+        parsed: Dict[str, Dict[str, Any]] = {}
+        for pdf_name, value in data.items():
+            if isinstance(value, dict) and "selections" in value:
+                selections = value.get("selections")
+                if isinstance(selections, dict):
+                    parsed[pdf_name] = {
+                        "selections": {k: int(v) for k, v in selections.items() if isinstance(v, (int, float))},
+                        "year": value.get("year", ""),
+                    }
+            elif isinstance(value, dict):
+                parsed[pdf_name] = {
+                    "selections": {k: int(v) for k, v in value.items() if isinstance(v, (int, float))},
+                    "year": value.get("year", ""),
+                }
+        self.assigned_pages = parsed
+
+    def _apply_saved_selection(self, entry: PDFEntry) -> None:
+        key = entry.path.name
+        saved = self.assigned_pages.get(key)
+        if not saved:
+            return
+        selections = saved.get("selections") if isinstance(saved, dict) else None
+        if selections is None:
+            selections = saved
+        for category, page_index in selections.items():
+            if category not in entry.matches:
+                continue
+            page_int = int(page_index)
+            found = False
+            for idx, match in enumerate(entry.matches[category]):
+                if match.page_index == page_int:
+                    entry.current_index[category] = idx
+                    found = True
+                    break
+            if not found:
+                entry.matches[category].append(Match(page_index=page_int, source="manual"))
+                entry.current_index[category] = len(entry.matches[category]) - 1
+        if not entry.year and isinstance(saved, dict):
+            stored_year = saved.get("year")
+            if isinstance(stored_year, str):
+                entry.year = stored_year
 
     def _clear_entries(self) -> None:
         for entry in self.pdf_entries:
@@ -555,6 +662,9 @@ class ReportApp:
                 return
             entry.current_index[category] = current_index - 1
         self._update_cell(entry, category)
+        page_index = self._get_selected_page_index(entry, category)
+        if page_index is not None:
+            self._update_assigned_entry(entry, category, page_index, persist=True)
 
     def manual_select(self, entry: PDFEntry, category: str) -> None:
         pdf_path = entry.path
@@ -669,11 +779,235 @@ class ReportApp:
             if match.page_index == page_index:
                 entry.current_index[category] = idx
                 self._update_cell(entry, category)
+                self._update_assigned_entry(entry, category, page_index, persist=True)
                 return
 
         matches.append(Match(page_index=page_index, source="manual"))
         entry.current_index[category] = len(matches) - 1
         self._update_cell(entry, category)
+        self._update_assigned_entry(entry, category, page_index, persist=True)
+
+    def _get_selected_page_index(self, entry: PDFEntry, category: str) -> Optional[int]:
+        matches = entry.matches.get(category, [])
+        if not matches:
+            return None
+        index = entry.current_index.get(category)
+        if index is None or not (0 <= index < len(matches)):
+            return None
+        return matches[index].page_index
+
+    def _update_assigned_entry(
+        self, entry: PDFEntry, category: str, page_index: int, *, persist: bool
+    ) -> None:
+        key = entry.path.name
+        record = self.assigned_pages.setdefault(key, {"selections": {}, "year": entry.year})
+        selections = record.setdefault("selections", {})
+        selections[category] = int(page_index)
+        if entry.year:
+            record["year"] = entry.year
+        if persist:
+            self._write_assigned_pages()
+
+    def _write_assigned_pages(self) -> None:
+        if self.assigned_pages_path is None:
+            return
+        self.assigned_pages_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with self.assigned_pages_path.open("w", encoding="utf-8") as fh:
+                json.dump(self.assigned_pages, fh, indent=2)
+        except Exception as exc:
+            messagebox.showwarning("Save Assignments", f"Could not save assigned pages: {exc}")
+
+    def _refresh_scraped_tab(self) -> None:
+        if not hasattr(self, "scraped_inner"):
+            return
+        for child in self.scraped_inner.winfo_children():
+            child.destroy()
+        self.scraped_images.clear()
+        company = self.company_var.get()
+        if not company:
+            return
+        scrape_root = self.companies_dir / company / "openapiscrape"
+        if not scrape_root.exists():
+            return
+
+        self.scraped_inner.columnconfigure(0, weight=1)
+        self.scraped_inner.columnconfigure(1, weight=1)
+        row_index = 0
+        for entry in self.pdf_entries:
+            doc_dir = scrape_root / entry.stem
+            metadata = self._load_doc_metadata(doc_dir)
+            if not metadata:
+                continue
+            for category in COLUMNS:
+                meta = metadata.get(category)
+                if not isinstance(meta, dict):
+                    continue
+                csv_name = meta.get("csv")
+                page_index = meta.get("page_index")
+                if csv_name is None or page_index is None:
+                    continue
+                csv_path = doc_dir / csv_name
+                if not csv_path.exists():
+                    continue
+                header = ttk.Label(
+                    self.scraped_inner,
+                    text=f"{entry.path.name} - {category} (Page {int(page_index) + 1})",
+                    font=("TkDefaultFont", 10, "bold"),
+                )
+                header.grid(row=row_index, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 0))
+                row_index += 1
+
+                image_frame = ttk.Frame(self.scraped_inner, padding=8)
+                image_frame.grid(row=row_index, column=0, sticky="nsew", padx=4)
+                table_frame = ttk.Frame(self.scraped_inner, padding=8)
+                table_frame.grid(row=row_index, column=1, sticky="nsew", padx=4)
+                self.scraped_inner.rowconfigure(row_index, weight=1)
+
+                photo = self._render_page(entry.doc, int(page_index), 350)
+                if photo is not None:
+                    self.scraped_images.append(photo)
+                    ttk.Label(image_frame, image=photo).pack(expand=True, fill=tk.BOTH)
+                else:
+                    ttk.Label(image_frame, text="Preview unavailable").pack(expand=True, fill=tk.BOTH)
+
+                rows = self._read_csv_rows(csv_path)
+                if not rows:
+                    ttk.Label(table_frame, text="CSV file is empty").pack(expand=True, fill=tk.BOTH)
+                else:
+                    headings = rows[0]
+                    data_rows = rows[1:] if len(rows) > 1 else []
+                    columns = [f"col_{idx}" for idx in range(len(headings))]
+                    tree = ttk.Treeview(
+                        table_frame,
+                        columns=columns,
+                        show="headings",
+                        height=min(15, max(3, len(data_rows))),
+                    )
+                    for col, heading in zip(columns, headings):
+                        tree.heading(col, text=heading)
+                        tree.column(col, anchor="center")
+                    if data_rows:
+                        for data in data_rows:
+                            values = list(data)
+                            if len(values) < len(columns):
+                                values.extend([""] * (len(columns) - len(values)))
+                            tree.insert("", tk.END, values=values)
+                    tree.pack(expand=True, fill=tk.BOTH)
+
+                row_index += 1
+
+    def _load_doc_metadata(self, doc_dir: Path) -> Dict[str, Any]:
+        metadata_path = doc_dir / "metadata.json"
+        if not metadata_path.exists():
+            return {}
+        try:
+            with metadata_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_doc_metadata(self, doc_dir: Path, data: Dict[str, Any]) -> None:
+        metadata_path = doc_dir / "metadata.json"
+        try:
+            with metadata_path.open("w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+        except Exception as exc:
+            messagebox.showwarning("Save Metadata", f"Could not save scrape metadata: {exc}")
+
+    def _read_csv_rows(self, csv_path: Path) -> List[List[str]]:
+        try:
+            with csv_path.open("r", encoding="utf-8", newline="") as fh:
+                reader = csv.reader(fh)
+                return [list(row) for row in reader]
+        except Exception:
+            return []
+
+    def _get_prompt_text(self, company: str, category: str) -> Optional[str]:
+        candidate_paths: List[Path] = []
+        if company:
+            company_dir = self.companies_dir / company
+            candidate_paths.extend(
+                [
+                    company_dir / "prompts" / f"{category}.txt",
+                    company_dir / "prompt" / f"{category}.txt",
+                ]
+            )
+        candidate_paths.append(self.prompts_dir / f"{category}.txt")
+        for path in candidate_paths:
+            if path.exists():
+                try:
+                    return path.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+        return None
+
+    def _call_openai(self, api_key: str, prompt: str, page_text: str) -> str:
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": page_text},
+            ],
+        }
+        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        response.raise_for_status()
+        data = response.json()
+        choices = data.get("choices")
+        if not choices:
+            raise ValueError("No choices returned from OpenAI API")
+        message = choices[0].get("message", {})
+        content = message.get("content")
+        if not content:
+            raise ValueError("Empty response from OpenAI API")
+        return str(content)
+
+    def _convert_response_to_rows(self, response: str) -> List[List[str]]:
+        lines = [line.strip() for line in response.splitlines() if line.strip()]
+        if not lines:
+            return [["response"], [""]]
+
+        if all(
+            line.startswith("|") and line.endswith("|") and "|" in line.strip("|") for line in lines
+        ):
+            rows: List[List[str]] = []
+            for idx, line in enumerate(lines):
+                segments = [segment.strip() for segment in line.strip("|").split("|")]
+                if idx == 1 and all(set(seg) <= {"-", ":"} for seg in segments):
+                    continue
+                rows.append(segments)
+            if rows:
+                return rows
+
+        if any(
+            "," in line and not line.startswith("#") for line in lines
+        ):
+            rows = [[segment.strip() for segment in line.split(",")] for line in lines]
+            return rows
+
+        return [["response"], *[[line] for line in lines]]
+
+    def _write_csv_rows(self, rows: List[List[str]], csv_path: Path) -> None:
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with csv_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.writer(fh)
+            for row in rows:
+                writer.writerow(row)
+
+    def _ensure_unique_path(self, path: Path) -> Path:
+        if not path.exists():
+            return path
+        counter = 2
+        stem = path.stem
+        suffix = path.suffix
+        while True:
+            candidate = path.with_name(f"{stem}_{counter}{suffix}")
+            if not candidate.exists():
+                return candidate
+            counter += 1
 
     def _gather_patterns(self) -> Tuple[Dict[str, List[re.Pattern[str]]], List[re.Pattern[str]]]:
         pattern_map: Dict[str, List[re.Pattern[str]]] = {}
@@ -787,6 +1121,8 @@ class ReportApp:
         if "year_space_as_whitespace" in data:
             self.year_whitespace_as_space_var.set(bool(data["year_space_as_whitespace"]))
         self.last_company_preference = data.get("last_company", "")
+        if "api_key" in data:
+            self.api_key_var.set(str(data.get("api_key", "")))
         self._apply_last_company_selection()
         self._config_loaded = True
 
@@ -836,33 +1172,104 @@ class ReportApp:
         except Exception as exc:  # pragma: no cover - guard for IO issues
             messagebox.showwarning("Save Patterns", f"Could not save pattern configuration: {exc}")
 
-    def confirm_selections(self) -> None:
+    def scrape_selections(self) -> None:
         if not self.pdf_entries:
-            messagebox.showinfo("No PDFs", "Load PDFs before confirming selections.")
+            messagebox.showinfo("No PDFs", "Load PDFs before running AIScrape.")
             return
 
-        folder = Path(self.folder_path.get())
-        output_dir = folder / "cut"
-        output_dir.mkdir(parents=True, exist_ok=True)
+        company = self.company_var.get()
+        if not company:
+            messagebox.showinfo("Select Company", "Please choose a company before running AIScrape.")
+            return
+
+        api_key = self.api_key_var.get().strip()
+        if not api_key:
+            messagebox.showwarning("API Key Required", "Enter an API key and press Enter before running AIScrape.")
+            self.api_key_entry.focus_set()
+            return
+
+        prompts: Dict[str, str] = {}
+        missing_prompts: List[str] = []
+        for category in COLUMNS:
+            prompt_text = self._get_prompt_text(company, category)
+            if prompt_text is None:
+                missing_prompts.append(category)
+            else:
+                prompts[category] = prompt_text
+        if missing_prompts:
+            messagebox.showerror(
+                "Missing Prompts",
+                "Prompt files not found for: " + ", ".join(missing_prompts),
+            )
+            return
+
+        self._save_api_key()
+
+        scrape_root = self.companies_dir / company / "openapiscrape"
+        scrape_root.mkdir(parents=True, exist_ok=True)
+
+        errors: List[str] = []
+        completed = 0
 
         for entry in self.pdf_entries:
-            reader = PdfReader(str(entry.path))
+            doc_dir = scrape_root / entry.stem
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            metadata = self._load_doc_metadata(doc_dir)
             for category in COLUMNS:
-                index = entry.current_index.get(category)
-                matches = entry.matches.get(category, [])
-                if index is None or not matches:
+                page_index = self._get_selected_page_index(entry, category)
+                if page_index is None:
                     continue
-                index = max(0, min(index, len(matches) - 1))
-                match = matches[index]
-                if match.page_index >= len(reader.pages):
+                prompt_text = prompts.get(category)
+                if not prompt_text:
                     continue
-                writer = PdfWriter()
-                writer.add_page(reader.pages[match.page_index])
-                output_path = output_dir / f"{entry.stem}_{category}.pdf"
-                with output_path.open("wb") as fh:
-                    writer.write(fh)
+                try:
+                    page = entry.doc.load_page(page_index)
+                    page_text = page.get_text("text")
+                except Exception as exc:
+                    errors.append(f"{entry.path.name} - {category}: Could not read page ({exc})")
+                    continue
 
-        messagebox.showinfo("Pages Saved", f"Selected pages have been saved to '{output_dir}'.")
+                try:
+                    response_text = self._call_openai(api_key, prompt_text, page_text)
+                except requests.RequestException as exc:
+                    errors.append(f"{entry.path.name} - {category}: API request failed ({exc})")
+                    continue
+                except Exception as exc:
+                    errors.append(f"{entry.path.name} - {category}: {exc}")
+                    continue
+
+                base_name = f"{entry.year or 'unknown'}_{category}"
+                txt_path = self._ensure_unique_path(doc_dir / f"{base_name}.txt")
+                try:
+                    txt_path.write_text(response_text, encoding="utf-8")
+                except Exception as exc:
+                    errors.append(f"{entry.path.name} - {category}: Could not save response ({exc})")
+                    continue
+
+                csv_path = txt_path.with_suffix(".csv")
+                rows = self._convert_response_to_rows(response_text)
+                try:
+                    self._write_csv_rows(rows, csv_path)
+                except Exception as exc:
+                    errors.append(f"{entry.path.name} - {category}: Could not write CSV ({exc})")
+                    continue
+
+                metadata[category] = {
+                    "csv": csv_path.name,
+                    "txt": txt_path.name,
+                    "page_index": page_index,
+                    "year": entry.year,
+                }
+                completed += 1
+            self._write_doc_metadata(doc_dir, metadata)
+
+        self._refresh_scraped_tab()
+        if completed:
+            if hasattr(self, "notebook") and hasattr(self, "scraped_frame"):
+                self.notebook.select(self.scraped_frame)
+            messagebox.showinfo("AIScrape Complete", f"Saved {completed} OpenAI responses to 'openapiscrape'.")
+        if errors:
+            messagebox.showerror("AIScrape Issues", "\n".join(errors))
 
 
 def main() -> None:
