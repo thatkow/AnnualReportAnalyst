@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import re
+import subprocess
 import sys
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -325,6 +326,9 @@ class ReportApp:
         load_button = ttk.Button(top_frame, text="Load PDFs", command=self.load_pdfs)
         load_button.pack(side=tk.LEFT, padx=4)
 
+        new_company_button = ttk.Button(top_frame, text="New Company", command=self.create_company)
+        new_company_button.pack(side=tk.LEFT, padx=(0, 4))
+
         self._refresh_company_options()
 
         notebook = ttk.Notebook(self.root)
@@ -507,11 +511,13 @@ class ReportApp:
             self.folder_path.set("")
             self.assigned_pages = {}
             self.assigned_pages_path = None
+            self._reset_review_scroll()
             return
         folder = self.companies_dir / company / "raw"
         self.folder_path.set(str(folder))
         self._load_assigned_pages(company)
         self._refresh_scraped_tab()
+        self._reset_review_scroll()
         if self._config_loaded:
             self._update_last_company(company)
 
@@ -633,6 +639,72 @@ class ReportApp:
 
         self._rebuild_grid()
         self._refresh_scraped_tab()
+        self._reset_review_scroll()
+
+    def _reset_review_scroll(self) -> None:
+        if not hasattr(self, "canvas"):
+            return
+
+        def _scroll() -> None:
+            try:
+                self.canvas.yview_moveto(0)
+                self.canvas.xview_moveto(0)
+            except tk.TclError:
+                pass
+
+        self.root.after_idle(_scroll)
+
+    def create_company(self) -> None:
+        name = simpledialog.askstring("New Company", "Enter a name for the new company:", parent=self.root)
+        if name is None:
+            return
+
+        normalized = name.strip()
+        if not normalized:
+            messagebox.showwarning("Invalid Name", "Company name cannot be empty.")
+            return
+
+        safe_name = re.sub(r"[\\/:*?\"<>|]", "_", normalized).strip().strip(".")
+        if not safe_name:
+            messagebox.showwarning(
+                "Invalid Name",
+                "Company name contains only unsupported characters. Please choose a different name.",
+            )
+            return
+
+        if safe_name != normalized:
+            messagebox.showinfo(
+                "Company Name Adjusted",
+                f"Using '{safe_name}' as the folder name due to unsupported characters.",
+            )
+
+        company_dir = self.companies_dir / safe_name
+        raw_dir = company_dir / "raw"
+        try:
+            raw_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror("Create Company", f"Could not create folders for '{safe_name}': {exc}")
+            return
+
+        self._refresh_company_options()
+        self.company_combo.set(safe_name)
+        self.company_var.set(safe_name)
+        self._set_folder_from_company(safe_name)
+        if self._config_loaded:
+            self._update_last_company(safe_name)
+
+        self._open_in_file_manager(raw_dir)
+
+    def _open_in_file_manager(self, path: Path) -> None:
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as exc:
+            messagebox.showwarning("Open Folder", f"Could not open file browser: {exc}")
 
     def _load_assigned_pages(self, company: str) -> None:
         company_dir = self.companies_dir / company
