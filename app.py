@@ -199,6 +199,7 @@ class CategoryRow:
         self.window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<MouseWheel>", self._on_generic_mousewheel)
         self.canvas.bind("<Shift-MouseWheel>", self._on_mousewheel)
         self.canvas.bind("<Shift-Button-4>", self._on_mousewheel)
         self.canvas.bind("<Shift-Button-5>", self._on_mousewheel)
@@ -245,6 +246,14 @@ class CategoryRow:
 
     def _on_canvas_configure(self, event: tk.Event) -> None:  # type: ignore[override]
         self.canvas.itemconfigure(self.window, height=event.height)
+
+    def _on_generic_mousewheel(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
+        state = getattr(event, "state", 0)
+        # Only translate generic mouse wheel events into horizontal scrolling when Shift is held.
+        if state & SHIFT_MASK:
+            self._on_mousewheel(event)
+            return "break"
+        return None
 
     def _on_mousewheel(self, event: tk.Event) -> None:  # type: ignore[override]
         if getattr(event, "delta", 0):
@@ -1015,6 +1024,17 @@ class ReportApp:
 
         container = ttk.Frame(dialog, padding=8)
         container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(container, highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=canvas.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        canvas.configure(xscrollcommand=x_scroll.set, yscrollcommand=y_scroll.set)
 
         available_width = dialog.winfo_width()
         if available_width <= 1:
@@ -1023,15 +1043,48 @@ class ReportApp:
         photo = self._render_page(entry.doc, page_index, target_width)
 
         if photo is not None:
-            label = ttk.Label(container, image=photo)
-            label.pack(expand=True, fill=tk.BOTH)
+            canvas.create_image(0, 0, anchor="nw", image=photo)
             dialog._photo = photo  # type: ignore[attr-defined]
         else:
-            label = ttk.Label(container, text="Preview unavailable")
-            label.pack(expand=True, fill=tk.BOTH)
+            canvas.create_text(
+                canvas.winfo_reqwidth() // 2,
+                canvas.winfo_reqheight() // 2,
+                text="Preview unavailable",
+                anchor="center",
+            )
 
-        label.bind("<Button-1>", lambda _e: _close())
-        container.bind("<Button-1>", lambda _e: _close())
+        bbox = canvas.bbox("all")
+        if bbox:
+            canvas.configure(scrollregion=bbox)
+
+        def _on_mousewheel(event: tk.Event) -> str:  # type: ignore[override]
+            delta = getattr(event, "delta", 0)
+            if delta == 0:
+                button = getattr(event, "num", 0)
+                if button in (4, 6):
+                    delta = 120
+                elif button in (5, 7):
+                    delta = -120
+                else:
+                    delta = -120
+            if getattr(event, "state", 0) & SHIFT_MASK:
+                canvas.xview_scroll(-1 if delta > 0 else 1, "units")
+            else:
+                canvas.yview_scroll(-1 if delta > 0 else 1, "units")
+            return "break"
+
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        canvas.bind("<Shift-MouseWheel>", _on_mousewheel)
+        canvas.bind("<Button-4>", _on_mousewheel)
+        canvas.bind("<Button-5>", _on_mousewheel)
+        canvas.bind("<Button-6>", _on_mousewheel)
+        canvas.bind("<Button-7>", _on_mousewheel)
+        canvas.bind("<Shift-Button-4>", _on_mousewheel)
+        canvas.bind("<Shift-Button-5>", _on_mousewheel)
+        canvas.bind("<Shift-Button-6>", _on_mousewheel)
+        canvas.bind("<Shift-Button-7>", _on_mousewheel)
+
+        canvas.bind("<Button-1>", lambda _e: _close())
 
     def _set_selected_page(self, entry: PDFEntry, category: str, page_index: int) -> None:
         matches = entry.matches[category]
