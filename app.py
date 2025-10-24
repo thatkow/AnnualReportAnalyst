@@ -2,7 +2,7 @@ import os
 import sys
 import re
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import messagebox, simpledialog, ttk
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -83,9 +83,11 @@ class ReportApp:
         self.root = root
         self.root.title("Annual Report Analyst")
         self.folder_path = tk.StringVar()
+        self.company_var = tk.StringVar()
         self.pattern_texts: Dict[str, tk.Text] = {}
         self.pdf_entries: List[PDFEntry] = []
-        self.cells: Dict[tuple[PDFEntry, str], PDFCell] = {}
+        self.cells: Dict[tuple[Path, str], PDFCell] = {}
+        self.companies_dir = Path(__file__).resolve().parent / "companies"
 
         self._build_ui()
 
@@ -93,16 +95,20 @@ class ReportApp:
         top_frame = ttk.Frame(self.root, padding=8)
         top_frame.pack(fill=tk.X)
 
-        folder_label = ttk.Label(top_frame, text="Folder:")
-        folder_label.pack(side=tk.LEFT)
-        folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=60)
-        folder_entry.pack(side=tk.LEFT, padx=4)
+        company_label = ttk.Label(top_frame, text="Company:")
+        company_label.pack(side=tk.LEFT)
 
-        browse_button = ttk.Button(top_frame, text="Browse", command=self.select_folder)
-        browse_button.pack(side=tk.LEFT)
+        self.company_combo = ttk.Combobox(top_frame, textvariable=self.company_var, state="readonly", width=30)
+        self.company_combo.pack(side=tk.LEFT, padx=4)
+        self.company_combo.bind("<<ComboboxSelected>>", self._on_company_selected)
+
+        folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=60, state="readonly")
+        folder_entry.pack(side=tk.LEFT, padx=4)
 
         load_button = ttk.Button(top_frame, text="Load PDFs", command=self.load_pdfs)
         load_button.pack(side=tk.LEFT, padx=4)
+
+        self._refresh_company_options()
 
         pattern_frame = ttk.LabelFrame(self.root, text="Regex patterns (one per line)", padding=8)
         pattern_frame.pack(fill=tk.X, padx=8, pady=4)
@@ -144,10 +150,26 @@ class ReportApp:
     def _on_canvas_configure(self, event: tk.Event) -> None:  # type: ignore[override]
         self.canvas.itemconfigure(self.canvas_window, width=event.width)
 
-    def select_folder(self) -> None:
-        selected = filedialog.askdirectory()
-        if selected:
-            self.folder_path.set(selected)
+    def _refresh_company_options(self) -> None:
+        if not self.companies_dir.exists():
+            self.company_combo.configure(values=[])
+            return
+        companies = sorted([d.name for d in self.companies_dir.iterdir() if d.is_dir()])
+        self.company_combo.configure(values=companies)
+        if companies and not self.company_var.get():
+            self.company_combo.current(0)
+            self._set_folder_from_company(companies[0])
+
+    def _on_company_selected(self, _: tk.Event) -> None:  # type: ignore[override]
+        company = self.company_var.get()
+        self._set_folder_from_company(company)
+
+    def _set_folder_from_company(self, company: str) -> None:
+        if not company:
+            self.folder_path.set("")
+            return
+        folder = self.companies_dir / company / "raw"
+        self.folder_path.set(str(folder))
 
     def apply_patterns(self) -> None:
         if not self.folder_path.get():
@@ -241,18 +263,19 @@ class ReportApp:
             ttk.Label(header, text=column, anchor="center").grid(row=0, column=idx, padx=4)
 
         for row_index, entry in enumerate(self.pdf_entries, start=1):
-            ttk.Label(self.inner_frame, text=entry.path.relative_to(Path(self.folder_path.get())), anchor="w", width=30, wraplength=200).grid(row=row_index, column=0, sticky="nw", padx=4, pady=4)
+            relative_path = entry.path.relative_to(Path(self.folder_path.get())) if self.folder_path.get() else entry.path.name
+            ttk.Label(self.inner_frame, text=relative_path, anchor="w", width=30, wraplength=200).grid(row=row_index, column=0, sticky="nw", padx=4, pady=4)
             for col_index, column in enumerate(COLUMNS, start=1):
                 cell = PDFCell(self.inner_frame, self, entry, column)
                 cell.frame.grid(row=row_index, column=col_index, padx=4, pady=4, sticky="nsew")
-                self.cells[(entry, column)] = cell
+                self.cells[(entry.path, column)] = cell
                 self._update_cell(entry, column)
 
         for idx in range(len(COLUMNS) + 1):
             self.inner_frame.columnconfigure(idx, weight=1)
 
     def _update_cell(self, entry: PDFEntry, category: str) -> None:
-        cell = self.cells.get((entry, category))
+        cell = self.cells.get((entry.path, category))
         if cell is None:
             return
 
