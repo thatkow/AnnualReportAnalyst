@@ -244,6 +244,7 @@ class ReportApp:
         self.api_key_entry = ttk.Entry(scraped_controls, textvariable=self.api_key_var, width=40)
         self.api_key_entry.pack(side=tk.LEFT, padx=4)
         self.api_key_entry.bind("<Return>", self._on_api_key_enter)
+        self.api_key_entry.bind("<KP_Enter>", self._on_api_key_enter)
         ttk.Button(scraped_controls, text="AIScrape", command=self.scrape_selections).pack(side=tk.LEFT, padx=(8, 0))
 
         self.scraped_canvas = tk.Canvas(scraped_container)
@@ -312,8 +313,9 @@ class ReportApp:
         if self._config_loaded:
             self._update_last_company(company)
 
-    def _on_api_key_enter(self, _: tk.Event) -> None:  # type: ignore[override]
+    def _on_api_key_enter(self, _: tk.Event) -> str:  # type: ignore[override]
         self._save_api_key()
+        return "break"
 
     def _save_api_key(self) -> None:
         api_key = self.api_key_var.get().strip()
@@ -1315,7 +1317,8 @@ class ReportApp:
             messagebox.showwarning("API Key Required", "Enter an API key and press Enter before running AIScrape.")
             self.api_key_entry.focus_set()
             return
-
+        if api_key != self.api_key_var.get():
+            self.api_key_var.set(api_key)
         prompts: Dict[str, str] = {}
         missing_prompts: List[str] = []
         for category in COLUMNS:
