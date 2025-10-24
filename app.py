@@ -1079,6 +1079,7 @@ class ReportApp:
 
         self.scraped_inner.columnconfigure(0, weight=1)
         self.scraped_inner.columnconfigure(1, weight=1)
+        self.scraped_inner.columnconfigure(2, weight=1)
         row_index = 0
         header_added = False
         for entry in self.pdf_entries:
@@ -1099,7 +1100,7 @@ class ReportApp:
                     continue
                 if not header_added:
                     header_frame = ttk.Frame(self.scraped_inner)
-                    header_frame.grid(row=row_index, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 0))
+                    header_frame.grid(row=row_index, column=0, columnspan=3, sticky="ew", padx=8, pady=(8, 0))
                     ttk.Label(
                         header_frame,
                         text="Original PDF Page",
@@ -1107,11 +1108,17 @@ class ReportApp:
                     ).grid(row=0, column=0, sticky="w")
                     ttk.Label(
                         header_frame,
-                        text="Converted CSV",
+                        text="Raw Text",
                         font=("TkDefaultFont", 10, "bold"),
                     ).grid(row=0, column=1, sticky="w")
+                    ttk.Label(
+                        header_frame,
+                        text="Converted CSV",
+                        font=("TkDefaultFont", 10, "bold"),
+                    ).grid(row=0, column=2, sticky="w")
                     header_frame.columnconfigure(0, weight=1)
                     header_frame.columnconfigure(1, weight=1)
+                    header_frame.columnconfigure(2, weight=1)
                     row_index += 1
                     header_added = True
                 header = ttk.Label(
@@ -1119,13 +1126,15 @@ class ReportApp:
                     text=f"{entry.path.name} - {category} (Page {int(page_index) + 1})",
                     font=("TkDefaultFont", 10, "bold"),
                 )
-                header.grid(row=row_index, column=0, columnspan=2, sticky="w", padx=8, pady=(8, 0))
+                header.grid(row=row_index, column=0, columnspan=3, sticky="w", padx=8, pady=(8, 0))
                 row_index += 1
 
                 image_frame = ttk.Frame(self.scraped_inner, padding=8)
                 image_frame.grid(row=row_index, column=0, sticky="nsew", padx=4)
+                text_frame = ttk.Frame(self.scraped_inner, padding=8)
+                text_frame.grid(row=row_index, column=1, sticky="nsew", padx=4)
                 table_frame = ttk.Frame(self.scraped_inner, padding=8)
-                table_frame.grid(row=row_index, column=1, sticky="nsew", padx=4)
+                table_frame.grid(row=row_index, column=2, sticky="nsew", padx=4)
                 self.scraped_inner.rowconfigure(row_index, weight=1)
 
                 photo = self._render_page(entry.doc, int(page_index), 350)
@@ -1134,6 +1143,21 @@ class ReportApp:
                     ttk.Label(image_frame, image=photo).pack(expand=True, fill=tk.BOTH)
                 else:
                     ttk.Label(image_frame, text="Preview unavailable").pack(expand=True, fill=tk.BOTH)
+
+                raw_text = ""
+                try:
+                    page = entry.doc.load_page(int(page_index))
+                    raw_text = page.get_text("text")
+                except Exception:
+                    raw_text = "Could not load page text."
+
+                text_container = tk.Text(text_frame, wrap="word", height=25)
+                text_container.insert("1.0", raw_text)
+                text_container.configure(state="disabled")
+                text_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_container.yview)
+                text_container.configure(yscrollcommand=text_scroll.set)
+                text_container.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+                text_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
                 rows = self._read_csv_rows(csv_path)
                 if not rows:
@@ -1229,8 +1253,15 @@ class ReportApp:
             raise ValueError("Empty response from OpenAI API")
         return str(content)
 
+    def _strip_code_fence(self, text: str) -> str:
+        fence_match = re.search(r"```(?:[^`\n]*)\n([\s\S]*?)```", text)
+        if fence_match:
+            return fence_match.group(1)
+        return text
+
     def _convert_response_to_rows(self, response: str) -> List[List[str]]:
-        lines = [line.strip() for line in response.splitlines() if line.strip()]
+        cleaned = self._strip_code_fence(response)
+        lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
         if not lines:
             return [["response"], [""]]
 
