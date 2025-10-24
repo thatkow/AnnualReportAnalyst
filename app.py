@@ -981,6 +981,10 @@ class ReportApp:
         dialog.grab_set()
         dialog.focus_set()
 
+        # Ensure the zoom dialog opens maximized so reviewers can inspect the page comfortably.
+        self._maximize_window(dialog)
+        dialog.update_idletasks()
+
         def _close() -> None:
             try:
                 dialog.grab_release()
@@ -999,7 +1003,10 @@ class ReportApp:
         container = ttk.Frame(dialog, padding=8)
         container.pack(fill=tk.BOTH, expand=True)
 
-        target_width = max(480, self.thumbnail_width_var.get() * 2)
+        available_width = dialog.winfo_width()
+        if available_width <= 1:
+            available_width = dialog.winfo_screenwidth()
+        target_width = max(480, available_width - 64, self.thumbnail_width_var.get() * 2)
         photo = self._render_page(entry.doc, page_index, target_width)
 
         if photo is not None:
