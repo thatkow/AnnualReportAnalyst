@@ -69,6 +69,7 @@ class PDFCell:
             widget.bind("<Shift-Button-1>", self._previous_match)
             widget.bind("<Button-3>", self._on_right_click)
             widget.bind("<Double-Button-3>", self._manual_select)
+            widget.bind("<Alt-Button-1>", self._open_overview)
 
     def _next_match(self, event: tk.Event) -> None:  # type: ignore[override]
         self.app.cycle_match(self.entry, self.category, forward=True)
@@ -104,6 +105,10 @@ class PDFCell:
         else:
             self.image_label.configure(image="")
         self.info_label.configure(text=info_text)
+
+    def _open_overview(self, event: tk.Event) -> str:  # type: ignore[override]
+        self.app.open_entry_overview(self.entry)
+        return "break"
 
 
 class ReportApp:
@@ -161,7 +166,14 @@ class ReportApp:
 
         self._refresh_company_options()
 
-        pattern_frame = ttk.LabelFrame(self.root, text="Regex patterns (one per line)", padding=8)
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        self.notebook = notebook
+
+        review_container = ttk.Frame(notebook)
+        notebook.add(review_container, text="Review")
+
+        pattern_frame = ttk.LabelFrame(review_container, text="Regex patterns (one per line)", padding=8)
         pattern_frame.pack(fill=tk.X, padx=8, pady=4)
 
         for idx, column in enumerate(COLUMNS):
@@ -201,15 +213,8 @@ class ReportApp:
             variable=self.year_whitespace_as_space_var,
         ).pack(anchor="w")
 
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-        self.notebook = notebook
-
-        review_container = ttk.Frame(notebook)
-        notebook.add(review_container, text="Review")
-
         grid_container = ttk.Frame(review_container)
-        grid_container.pack(fill=tk.BOTH, expand=True)
+        grid_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
 
         self.canvas = tk.Canvas(grid_container)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -494,15 +499,19 @@ class ReportApp:
 
         header = ttk.Frame(self.inner_frame)
         header.grid(row=0, column=0, columnspan=4, sticky="ew")
-        ttk.Label(header, text="PDF", width=30, anchor="w").grid(row=0, column=0, padx=4)
+        ttk.Label(header, text="PDF", anchor="w").grid(row=0, column=0, padx=4, sticky="ew")
         for idx, column in enumerate(COLUMNS, start=1):
-            ttk.Label(header, text=column, anchor="center").grid(row=0, column=idx, padx=4)
+            ttk.Label(header, text=column, anchor="center").grid(row=0, column=idx, padx=4, sticky="ew")
+        for idx in range(len(COLUMNS) + 1):
+            header.columnconfigure(idx, weight=1)
 
         for row_index, entry in enumerate(self.pdf_entries, start=1):
             relative_path = entry.path.relative_to(Path(self.folder_path.get())) if self.folder_path.get() else entry.path.name
             info_frame = ttk.Frame(self.inner_frame)
             info_frame.grid(row=row_index, column=0, sticky="nw", padx=4, pady=4)
-            ttk.Label(info_frame, text=relative_path, anchor="w", width=30, wraplength=200).pack(anchor="w")
+            name_label = ttk.Label(info_frame, text=relative_path, anchor="w", width=30, wraplength=200)
+            name_label.pack(anchor="w")
+            name_label.bind("<Alt-Button-1>", lambda _e, ent=entry: self.open_entry_overview(ent))
             year_var = tk.StringVar(value=entry.year)
             self.year_vars[entry.path] = year_var
             year_var.trace_add("write", lambda *_args, e=entry, v=year_var: setattr(e, "year", v.get()))
@@ -773,6 +782,77 @@ class ReportApp:
         except Exception as exc:
             messagebox.showwarning("Open PDF", f"Could not open PDF: {exc}")
 
+    def open_entry_overview(self, entry: PDFEntry) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Overview - {entry.path.name}")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.focus_set()
+
+        def _close() -> None:
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", _close)
+
+        def _on_escape(_: tk.Event) -> str:  # type: ignore[override]
+            _close()
+            return "break"
+
+        dialog.bind("<Escape>", _on_escape)
+
+        container = ttk.Frame(dialog)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(container)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        inner = ttk.Frame(canvas)
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _update_scroll(_: tk.Event) -> None:  # type: ignore[override]
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _resize(event: tk.Event) -> None:  # type: ignore[override]
+            canvas.itemconfigure(window, width=event.width)
+
+        inner.bind("<Configure>", _update_scroll)
+        canvas.bind("<Configure>", _resize)
+
+        thumbnails: List[ImageTk.PhotoImage] = []
+        for idx, column in enumerate(COLUMNS):
+            frame = ttk.LabelFrame(inner, text=column, padding=8)
+            row = idx // 2
+            col = idx % 2
+            frame.grid(row=row, column=col, padx=8, pady=8, sticky="nsew")
+            inner.columnconfigure(col, weight=1)
+            inner.rowconfigure(row, weight=1)
+            page_index = self._get_selected_page_index(entry, column)
+            if page_index is None:
+                ttk.Label(frame, text="No page selected").pack(expand=True, fill=tk.BOTH)
+                continue
+            photo = self._render_page(entry.doc, page_index, 420)
+            if photo is not None:
+                thumbnails.append(photo)
+                ttk.Label(frame, image=photo).pack(expand=True, fill=tk.BOTH)
+            else:
+                ttk.Label(frame, text="Preview unavailable").pack(expand=True, fill=tk.BOTH)
+            ttk.Label(frame, text=f"Page {page_index + 1}").pack(anchor="w", pady=(4, 0))
+
+        if len(COLUMNS) % 2:
+            inner.columnconfigure(1, weight=1)
+
+        if not thumbnails and not any(self._get_selected_page_index(entry, column) is not None for column in COLUMNS):
+            ttk.Label(inner, text="No selections available for this PDF.").grid(row=0, column=0, padx=16, pady=16, sticky="nsew")
+
+        dialog._thumbnails = thumbnails  # type: ignore[attr-defined]
+
     def _set_selected_page(self, entry: PDFEntry, category: str, page_index: int) -> None:
         matches = entry.matches[category]
         for idx, match in enumerate(matches):
@@ -834,6 +914,7 @@ class ReportApp:
         self.scraped_inner.columnconfigure(0, weight=1)
         self.scraped_inner.columnconfigure(1, weight=1)
         row_index = 0
+        header_added = False
         for entry in self.pdf_entries:
             doc_dir = scrape_root / entry.stem
             metadata = self._load_doc_metadata(doc_dir)
@@ -850,6 +931,23 @@ class ReportApp:
                 csv_path = doc_dir / csv_name
                 if not csv_path.exists():
                     continue
+                if not header_added:
+                    header_frame = ttk.Frame(self.scraped_inner)
+                    header_frame.grid(row=row_index, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 0))
+                    ttk.Label(
+                        header_frame,
+                        text="Original PDF Page",
+                        font=("TkDefaultFont", 10, "bold"),
+                    ).grid(row=0, column=0, sticky="w")
+                    ttk.Label(
+                        header_frame,
+                        text="Converted CSV",
+                        font=("TkDefaultFont", 10, "bold"),
+                    ).grid(row=0, column=1, sticky="w")
+                    header_frame.columnconfigure(0, weight=1)
+                    header_frame.columnconfigure(1, weight=1)
+                    row_index += 1
+                    header_added = True
                 header = ttk.Label(
                     self.scraped_inner,
                     text=f"{entry.path.name} - {category} (Page {int(page_index) + 1})",
