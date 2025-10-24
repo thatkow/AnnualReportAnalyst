@@ -130,18 +130,18 @@ class MatchThumbnail:
             menu = tk.Menu(self.container, tearoff=False)
             menu.add_command(label="Open PDF", command=lambda: self.app._open_pdf(self.entry.path, self.match.page_index))
             menu.add_command(
-                label="Select Different Page",
-                command=lambda: self.app.open_page_selection_dialog(self.entry, self.row.category),
-            )
-            menu.add_command(
                 label="Manual Entry",
                 command=lambda: self.app.manual_select(self.entry, self.row.category),
             )
             self._context_menu = menu
         return self._context_menu
 
-    def _on_click(self, _: tk.Event) -> None:  # type: ignore[override]
+    def _on_click(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
+        if event.state & tk.SHIFT:
+            self.app.open_thumbnail_zoom(self.entry, self.match.page_index)
+            return "break"
         self.app.select_match_index(self.entry, self.row.category, self.match_index)
+        return None
 
     def _open_pdf(self, _: tk.Event) -> None:  # type: ignore[override]
         self.app._open_pdf(self.entry.path, self.match.page_index)
@@ -168,17 +168,12 @@ class CategoryRow:
         controls.pack(side=tk.RIGHT)
         ttk.Button(
             controls,
-            text="Browse",
-            command=lambda: self.app.open_page_selection_dialog(self.entry, self.category),
-            width=7,
-        ).pack(side=tk.RIGHT, padx=(4, 0))
-        ttk.Button(
-            controls,
             text="Manual",
             command=lambda: self.app.manual_select(self.entry, self.category),
             width=7,
         ).pack(side=tk.RIGHT, padx=(4, 0))
-        self.canvas = tk.Canvas(self.frame, height=260)
+        self.target_width = self.app.thumbnail_width_var.get()
+        self.canvas = tk.Canvas(self.frame, height=self._compute_canvas_height())
         self.canvas.grid(row=1, column=0, sticky="ew")
         self.scrollbar = ttk.Scrollbar(self.frame, orient=tk.HORIZONTAL, command=self.canvas.xview)
         self.scrollbar.grid(row=2, column=0, sticky="ew")
@@ -192,7 +187,6 @@ class CategoryRow:
         self.canvas.bind("<Shift-Button-5>", self._on_mousewheel)
         self.thumbnails: List[MatchThumbnail] = []
         self.empty_label: Optional[ttk.Label] = None
-        self.target_width = 220
 
     def refresh(self) -> None:
         for thumb in self.thumbnails:
@@ -216,6 +210,18 @@ class CategoryRow:
         current_index = self.entry.current_index.get(self.category)
         for thumb in self.thumbnails:
             thumb.set_selected(current_index == thumb.match_index)
+
+    def set_thumbnail_width(self, width: int) -> None:
+        if width == self.target_width:
+            return
+        self.target_width = max(80, width)
+        self.canvas.configure(height=self._compute_canvas_height())
+        for thumb in self.thumbnails:
+            thumb.refresh()
+        self.frame.after_idle(self._update_scrollbar_visibility)
+
+    def _compute_canvas_height(self) -> int:
+        return max(160, int(self.target_width * 1.2))
 
     def _on_inner_configure(self, _: tk.Event) -> None:  # type: ignore[override]
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -250,6 +256,7 @@ class ReportApp:
         self.folder_path = tk.StringVar()
         self.company_var = tk.StringVar()
         self.api_key_var = tk.StringVar()
+        self.thumbnail_width_var = tk.IntVar(value=220)
         self.pattern_texts: Dict[str, tk.Text] = {}
         self.case_insensitive_vars: Dict[str, tk.BooleanVar] = {}
         self.whitespace_as_space_vars: Dict[str, tk.BooleanVar] = {}
@@ -268,6 +275,7 @@ class ReportApp:
         self.assigned_pages: Dict[str, Dict[str, Any]] = {}
         self.assigned_pages_path: Optional[Path] = None
         self.scraped_images: List[ImageTk.PhotoImage] = []
+        self._thumbnail_resize_job: Optional[str] = None
 
         self._build_ui()
         self._load_pattern_config()
@@ -343,6 +351,20 @@ class ReportApp:
             variable=self.year_whitespace_as_space_var,
         ).pack(anchor="w")
 
+        size_frame = ttk.Frame(review_container, padding=(8, 0))
+        size_frame.pack(fill=tk.X, padx=0, pady=(0, 4))
+        ttk.Label(size_frame, text="Thumbnail width:").pack(side=tk.LEFT)
+        self.thumbnail_scale = ttk.Scale(
+            size_frame,
+            from_=160,
+            to=420,
+            orient=tk.HORIZONTAL,
+            command=self._on_thumbnail_scale,
+        )
+        self.thumbnail_scale.set(self.thumbnail_width_var.get())
+        self.thumbnail_scale.pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
+        ttk.Label(size_frame, textvariable=self.thumbnail_width_var).pack(side=tk.LEFT)
+
         grid_container = ttk.Frame(review_container)
         grid_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
 
@@ -380,7 +402,10 @@ class ReportApp:
         self.api_key_entry.pack(side=tk.LEFT, padx=4)
         self.api_key_entry.bind("<Return>", self._on_api_key_enter)
         self.api_key_entry.bind("<KP_Enter>", self._on_api_key_enter)
-        ttk.Button(scraped_controls, text="AIScrape", command=self.scrape_selections).pack(side=tk.LEFT, padx=(8, 0))
+        self.scrape_button = ttk.Button(scraped_controls, text="AIScrape", command=self.scrape_selections)
+        self.scrape_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.scrape_progress = ttk.Progressbar(scraped_controls, orient=tk.HORIZONTAL, mode="determinate", length=200)
+        self.scrape_progress.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
 
         self.scraped_canvas = tk.Canvas(scraped_container)
         self.scraped_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -415,6 +440,22 @@ class ReportApp:
             self.canvas.yview_scroll(-1, "units")
         elif event.num == 5 or event.delta < 0:
             self.canvas.yview_scroll(1, "units")
+
+    def _on_thumbnail_scale(self, value: str) -> None:
+        try:
+            width = int(float(value))
+        except (TypeError, ValueError):
+            return
+        self.thumbnail_width_var.set(width)
+        if self._thumbnail_resize_job is not None:
+            self.root.after_cancel(self._thumbnail_resize_job)
+        self._thumbnail_resize_job = self.root.after(120, self._apply_thumbnail_width)
+
+    def _apply_thumbnail_width(self) -> None:
+        self._thumbnail_resize_job = None
+        width = self.thumbnail_width_var.get()
+        for row in self.category_rows.values():
+            row.set_thumbnail_width(width)
 
     def _refresh_company_options(self) -> None:
         if not self.companies_dir.exists():
@@ -832,71 +873,6 @@ class ReportApp:
         page_index = page_number - 1
         self._set_selected_page(entry, category, page_index)
 
-    def open_page_selection_dialog(self, entry: PDFEntry, category: str) -> None:
-        dialog = tk.Toplevel(self.root)
-        dialog.title(f"Select Page - {entry.path.name}")
-        dialog.transient(self.root)
-        dialog.update_idletasks()
-        self._maximize_window(dialog)
-        dialog.grab_set()
-        dialog.focus_set()
-
-        canvas = tk.Canvas(dialog)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar = ttk.Scrollbar(dialog, orient=tk.VERTICAL, command=canvas.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        content = ttk.Frame(canvas)
-        canvas_window = canvas.create_window((0, 0), window=content, anchor="nw")
-
-        def _on_content_configure(_: tk.Event) -> None:  # type: ignore[override]
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def _on_canvas_configure(event: tk.Event) -> None:  # type: ignore[override]
-            canvas.itemconfigure(canvas_window, width=event.width)
-
-        content.bind("<Configure>", _on_content_configure)
-        canvas.bind("<Configure>", _on_canvas_configure)
-
-        screen_width = dialog.winfo_screenwidth() or self.root.winfo_screenwidth()
-        target_width = max(150, (screen_width // 3) - 40)
-        thumbnails: List[ImageTk.PhotoImage] = []
-
-        def _close_dialog() -> None:
-            try:
-                dialog.grab_release()
-            except tk.TclError:
-                pass
-            dialog.destroy()
-
-        dialog.protocol("WM_DELETE_WINDOW", _close_dialog)
-
-        def _select(page_idx: int) -> None:
-            self._set_selected_page(entry, category, page_idx)
-            _close_dialog()
-
-        for page_idx in range(len(entry.doc)):
-            photo = self._render_page(entry.doc, page_idx, target_width)
-            frame = ttk.Frame(content, padding=8)
-            row = page_idx // 3
-            col = page_idx % 3
-            frame.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
-            content.columnconfigure(col, weight=1)
-            content.rowconfigure(row, weight=1)
-            if photo is not None:
-                thumbnails.append(photo)
-                label = ttk.Label(frame, image=photo)
-                label.pack(expand=True, fill=tk.BOTH)
-                label.bind("<Button-1>", lambda _e, idx=page_idx: _select(idx))
-            else:
-                fallback = ttk.Label(frame, text=f"Page {page_idx + 1}")
-                fallback.pack(expand=True, fill=tk.BOTH)
-                fallback.bind("<Button-1>", lambda _e, idx=page_idx: _select(idx))
-            ttk.Label(frame, text=f"Page {page_idx + 1}").pack(pady=(4, 0))
-
-        dialog._thumbnails = thumbnails  # type: ignore[attr-defined]
-
     def open_current_match(self, entry: PDFEntry, category: str) -> None:
         matches = entry.matches.get(category, [])
         if not matches:
@@ -994,6 +970,45 @@ class ReportApp:
 
         dialog._thumbnails = thumbnails  # type: ignore[attr-defined]
 
+    def open_thumbnail_zoom(self, entry: PDFEntry, page_index: int) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"{entry.path.name} - Page {page_index + 1}")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.focus_set()
+
+        def _close() -> None:
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", _close)
+
+        def _on_escape(_: tk.Event) -> str:  # type: ignore[override]
+            _close()
+            return "break"
+
+        dialog.bind("<Escape>", _on_escape)
+
+        container = ttk.Frame(dialog, padding=8)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        target_width = max(480, self.thumbnail_width_var.get() * 2)
+        photo = self._render_page(entry.doc, page_index, target_width)
+
+        if photo is not None:
+            label = ttk.Label(container, image=photo)
+            label.pack(expand=True, fill=tk.BOTH)
+            dialog._photo = photo  # type: ignore[attr-defined]
+        else:
+            label = ttk.Label(container, text="Preview unavailable")
+            label.pack(expand=True, fill=tk.BOTH)
+
+        label.bind("<Button-1>", lambda _e: _close())
+        container.bind("<Button-1>", lambda _e: _close())
+
     def _set_selected_page(self, entry: PDFEntry, category: str, page_index: int) -> None:
         matches = entry.matches[category]
         for idx, match in enumerate(matches):
@@ -1070,6 +1085,8 @@ class ReportApp:
         for child in self.scraped_inner.winfo_children():
             child.destroy()
         self.scraped_images.clear()
+        if hasattr(self, "scrape_progress"):
+            self.scrape_progress["value"] = 0
         company = self.company_var.get()
         if not company:
             return
@@ -1121,12 +1138,20 @@ class ReportApp:
                     header_frame.columnconfigure(2, weight=1)
                     row_index += 1
                     header_added = True
-                header = ttk.Label(
-                    self.scraped_inner,
+                header_frame = ttk.Frame(self.scraped_inner)
+                header_frame.grid(row=row_index, column=0, columnspan=3, sticky="ew", padx=8, pady=(8, 0))
+                header_frame.columnconfigure(0, weight=1)
+                ttk.Label(
+                    header_frame,
                     text=f"{entry.path.name} - {category} (Page {int(page_index) + 1})",
                     font=("TkDefaultFont", 10, "bold"),
-                )
-                header.grid(row=row_index, column=0, columnspan=3, sticky="w", padx=8, pady=(8, 0))
+                ).grid(row=0, column=0, sticky="w")
+                ttk.Button(
+                    header_frame,
+                    text="Delete",
+                    command=lambda d=doc_dir, c=category: self._delete_scrape_output(d, c),
+                    width=10,
+                ).grid(row=0, column=1, sticky="e")
                 row_index += 1
 
                 image_frame = ttk.Frame(self.scraped_inner, padding=8)
@@ -1203,6 +1228,38 @@ class ReportApp:
                 json.dump(data, fh, indent=2)
         except Exception as exc:
             messagebox.showwarning("Save Metadata", f"Could not save scrape metadata: {exc}")
+
+    def _delete_scrape_output(self, doc_dir: Path, category: str) -> None:
+        metadata = self._load_doc_metadata(doc_dir)
+        if not metadata:
+            return
+        meta = metadata.get(category)
+        errors: List[str] = []
+        if isinstance(meta, dict):
+            for key in ("csv", "txt"):
+                name = meta.get(key)
+                if not isinstance(name, str) or not name:
+                    continue
+                path = doc_dir / name
+                try:
+                    path.unlink(missing_ok=True)
+                except TypeError:
+                    try:
+                        if path.exists():
+                            path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except Exception as exc:
+                        errors.append(f"Could not delete {name}: {exc}")
+                except FileNotFoundError:
+                    pass
+                except Exception as exc:
+                    errors.append(f"Could not delete {name}: {exc}")
+        metadata.pop(category, None)
+        self._write_doc_metadata(doc_dir, metadata)
+        self._refresh_scraped_tab()
+        if errors:
+            messagebox.showwarning("Delete Output", "\n".join(errors))
 
     def _read_csv_rows(self, csv_path: Path) -> List[List[str]]:
         try:
@@ -1477,6 +1534,9 @@ class ReportApp:
             messagebox.showinfo("Select Company", "Please choose a company before running AIScrape.")
             return
 
+        if hasattr(self, "scrape_progress"):
+            self.scrape_progress["value"] = 0
+
         api_key = self.api_key_var.get().strip()
         if not api_key:
             messagebox.showwarning("API Key Required", "Enter an API key and press Enter before running AIScrape.")
@@ -1505,65 +1565,133 @@ class ReportApp:
         scrape_root.mkdir(parents=True, exist_ok=True)
 
         errors: List[str] = []
-        completed = 0
+        pending: Dict[PDFEntry, List[Tuple[str, int]]] = {}
+        metadata_cache: Dict[Path, Dict[str, Any]] = {}
 
         for entry in self.pdf_entries:
             doc_dir = scrape_root / entry.stem
             doc_dir.mkdir(parents=True, exist_ok=True)
             metadata = self._load_doc_metadata(doc_dir)
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata_cache[entry.path] = metadata
             for category in COLUMNS:
                 page_index = self._get_selected_page_index(entry, category)
                 if page_index is None:
                     continue
-                prompt_text = prompts.get(category)
-                if not prompt_text:
+                if not prompts.get(category):
                     continue
-                try:
-                    page = entry.doc.load_page(page_index)
-                    page_text = page.get_text("text")
-                except Exception as exc:
-                    errors.append(f"{entry.path.name} - {category}: Could not read page ({exc})")
+                existing = metadata.get(category)
+                csv_exists = False
+                txt_exists = False
+                if isinstance(existing, dict):
+                    csv_name = existing.get("csv")
+                    txt_name = existing.get("txt")
+                    if isinstance(csv_name, str) and csv_name:
+                        csv_exists = (doc_dir / csv_name).exists()
+                    if isinstance(txt_name, str) and txt_name:
+                        txt_exists = (doc_dir / txt_name).exists()
+                if csv_exists and txt_exists:
                     continue
+                pending.setdefault(entry, []).append((category, page_index))
 
-                try:
-                    response_text = self._call_openai(api_key, prompt_text, page_text)
-                except requests.RequestException as exc:
-                    errors.append(f"{entry.path.name} - {category}: API request failed ({exc})")
-                    continue
-                except Exception as exc:
-                    errors.append(f"{entry.path.name} - {category}: {exc}")
-                    continue
+        total_tasks = sum(len(items) for items in pending.values())
+        if not total_tasks:
+            messagebox.showinfo("AIScrape", "All selected sections already have scraped files.")
+            return
 
-                base_name = f"{entry.year or 'unknown'}_{category}"
-                txt_path = self._ensure_unique_path(doc_dir / f"{base_name}.txt")
-                try:
-                    txt_path.write_text(response_text, encoding="utf-8")
-                except Exception as exc:
-                    errors.append(f"{entry.path.name} - {category}: Could not save response ({exc})")
-                    continue
+        if hasattr(self, "scrape_button"):
+            self.scrape_button.state(["disabled"])
+        if hasattr(self, "scrape_progress"):
+            self.scrape_progress.configure(maximum=total_tasks, value=0)
 
-                csv_path = txt_path.with_suffix(".csv")
-                rows = self._convert_response_to_rows(response_text)
-                try:
-                    self._write_csv_rows(rows, csv_path)
-                except Exception as exc:
-                    errors.append(f"{entry.path.name} - {category}: Could not write CSV ({exc})")
-                    continue
+        successful = 0
+        attempted = 0
 
-                metadata[category] = {
-                    "csv": csv_path.name,
-                    "txt": txt_path.name,
-                    "page_index": page_index,
-                    "year": entry.year,
-                }
-                completed += 1
-            self._write_doc_metadata(doc_dir, metadata)
+        try:
+            for entry, tasks in pending.items():
+                doc_dir = scrape_root / entry.stem
+                metadata = metadata_cache.get(entry.path, {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                metadata_changed = False
+                for category, page_index in tasks:
+                    removed = metadata.pop(category, None)
+                    if removed is not None:
+                        metadata_changed = True
+                    prompt_text = prompts.get(category)
+                    if not prompt_text:
+                        attempted += 1
+                        if hasattr(self, "scrape_progress"):
+                            self.scrape_progress["value"] = attempted
+                            self.root.update_idletasks()
+                        continue
+                    try:
+                        page = entry.doc.load_page(page_index)
+                        page_text = page.get_text("text")
+                    except Exception as exc:
+                        errors.append(f"{entry.path.name} - {category}: Could not read page ({exc})")
+                    else:
+                        try:
+                            response_text = self._call_openai(api_key, prompt_text, page_text)
+                        except requests.RequestException as exc:
+                            errors.append(f"{entry.path.name} - {category}: API request failed ({exc})")
+                        except Exception as exc:
+                            errors.append(f"{entry.path.name} - {category}: {exc}")
+                        else:
+                            base_name = f"{entry.year or 'unknown'}_{category}"
+                            txt_path = self._ensure_unique_path(doc_dir / f"{base_name}.txt")
+                            write_failed = False
+                            try:
+                                txt_path.write_text(response_text, encoding="utf-8")
+                            except Exception as exc:
+                                errors.append(f"{entry.path.name} - {category}: Could not save response ({exc})")
+                                write_failed = True
+                            if not write_failed:
+                                csv_path = txt_path.with_suffix(".csv")
+                                rows = self._convert_response_to_rows(response_text)
+                                try:
+                                    self._write_csv_rows(rows, csv_path)
+                                except Exception as exc:
+                                    errors.append(f"{entry.path.name} - {category}: Could not write CSV ({exc})")
+                                    try:
+                                        txt_path.unlink(missing_ok=True)
+                                    except TypeError:
+                                        try:
+                                            if txt_path.exists():
+                                                txt_path.unlink()
+                                        except FileNotFoundError:
+                                            pass
+                                        except Exception:
+                                            pass
+                                else:
+                                    metadata[category] = {
+                                        "csv": csv_path.name,
+                                        "txt": txt_path.name,
+                                        "page_index": page_index,
+                                        "year": entry.year,
+                                    }
+                                    metadata_changed = True
+                                    successful += 1
+                    finally:
+                        attempted += 1
+                        if hasattr(self, "scrape_progress"):
+                            self.scrape_progress["value"] = attempted
+                            self.root.update_idletasks()
+                if metadata_changed:
+                    metadata_cache[entry.path] = metadata
+                    self._write_doc_metadata(doc_dir, metadata)
+        finally:
+            if hasattr(self, "scrape_button"):
+                self.scrape_button.state(["!disabled"])
+            if hasattr(self, "scrape_progress"):
+                self.scrape_progress["value"] = 0
 
         self._refresh_scraped_tab()
-        if completed:
+        if successful:
             if hasattr(self, "notebook") and hasattr(self, "scraped_frame"):
                 self.notebook.select(self.scraped_frame)
-            messagebox.showinfo("AIScrape Complete", f"Saved {completed} OpenAI responses to 'openapiscrape'.")
+            messagebox.showinfo("AIScrape Complete", f"Saved {successful} OpenAI responses to 'openapiscrape'.")
         if errors:
             messagebox.showerror("AIScrape Issues", "\n".join(errors))
 
