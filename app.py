@@ -106,11 +106,13 @@ class ReportApp:
         self.company_var = tk.StringVar()
         self.pattern_texts: Dict[str, tk.Text] = {}
         self.case_insensitive_vars: Dict[str, tk.BooleanVar] = {}
+        self.whitespace_as_space_vars: Dict[str, tk.BooleanVar] = {}
         self.pdf_entries: List[PDFEntry] = []
         self.cells: Dict[tuple[Path, str], PDFCell] = {}
         self.year_vars: Dict[Path, tk.StringVar] = {}
         self.year_pattern_text: Optional[tk.Text] = None
         self.year_case_insensitive_var = tk.BooleanVar(master=self.root, value=True)
+        self.year_whitespace_as_space_var = tk.BooleanVar(master=self.root, value=False)
         self.companies_dir = Path(__file__).resolve().parent / "companies"
         self.pattern_config_path = Path(__file__).resolve().parent / "pattern_config.json"
         self.config_data: Dict[str, Any] = {}
@@ -119,6 +121,8 @@ class ReportApp:
 
         self._build_ui()
         self._load_pattern_config()
+        self._maximize_window()
+        self.root.after(0, self._load_pdfs_on_start)
 
     def _build_ui(self) -> None:
         top_frame = ttk.Frame(self.root, padding=8)
@@ -154,6 +158,13 @@ class ReportApp:
             var = tk.BooleanVar(master=self.root, value=True)
             self.case_insensitive_vars[column] = var
             ttk.Checkbutton(column_frame, text="Case-insensitive", variable=var).pack(anchor="w", pady=(4, 0))
+            whitespace_var = tk.BooleanVar(master=self.root, value=False)
+            self.whitespace_as_space_vars[column] = whitespace_var
+            ttk.Checkbutton(
+                column_frame,
+                text="Treat spaces as any whitespace",
+                variable=whitespace_var,
+            ).pack(anchor="w")
 
         update_button = ttk.Button(pattern_frame, text="Apply Patterns", command=self.apply_patterns)
         update_button.grid(row=1, column=0, columnspan=len(COLUMNS), pady=4)
@@ -166,6 +177,11 @@ class ReportApp:
         year_text.insert("1.0", "\n".join(YEAR_DEFAULT_PATTERNS))
         self.year_pattern_text = year_text
         ttk.Checkbutton(year_frame, text="Case-insensitive", variable=self.year_case_insensitive_var).pack(anchor="w", pady=(4, 0))
+        ttk.Checkbutton(
+            year_frame,
+            text="Treat spaces as any whitespace",
+            variable=self.year_whitespace_as_space_var,
+        ).pack(anchor="w")
 
         grid_container = ttk.Frame(self.root)
         grid_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
@@ -236,6 +252,10 @@ class ReportApp:
         self.folder_path.set(str(folder))
         if self._config_loaded:
             self._update_last_company(company)
+
+    def _load_pdfs_on_start(self) -> None:
+        if self.folder_path.get():
+            self.load_pdfs()
 
     def apply_patterns(self) -> None:
         if not self.folder_path.get():
@@ -458,6 +478,7 @@ class ReportApp:
         pattern_map: Dict[str, List[re.Pattern[str]]] = {}
         raw_map: Dict[str, List[str]] = {}
         case_flags: Dict[str, bool] = {}
+        whitespace_flags: Dict[str, bool] = {}
         for column in COLUMNS:
             text_widget = self.pattern_texts[column]
             raw_text = text_widget.get("1.0", tk.END)
@@ -470,12 +491,14 @@ class ReportApp:
             flags = re.IGNORECASE if self.case_insensitive_vars[column].get() else 0
             for pattern in patterns:
                 try:
-                    compiled.append(re.compile(pattern, flags))
+                    compiled_pattern = self._apply_whitespace_option(pattern, self.whitespace_as_space_vars[column].get())
+                    compiled.append(re.compile(compiled_pattern, flags))
                 except re.error as exc:
                     messagebox.showerror("Invalid Pattern", f"Invalid regex '{pattern}' for {column}: {exc}")
             pattern_map[column] = compiled
             raw_map[column] = patterns
             case_flags[column] = self.case_insensitive_vars[column].get()
+            whitespace_flags[column] = self.whitespace_as_space_vars[column].get()
 
         year_patterns: List[str] = []
         year_compiled: List[re.Pattern[str]] = []
@@ -490,10 +513,18 @@ class ReportApp:
         year_flags = re.IGNORECASE if self.year_case_insensitive_var.get() else 0
         for pattern in year_patterns:
             try:
-                year_compiled.append(re.compile(pattern, year_flags))
+                compiled_pattern = self._apply_whitespace_option(pattern, self.year_whitespace_as_space_var.get())
+                year_compiled.append(re.compile(compiled_pattern, year_flags))
             except re.error as exc:
                 messagebox.showerror("Invalid Pattern", f"Invalid year regex '{pattern}': {exc}")
-        self._save_pattern_config(raw_map, year_patterns, case_flags, self.year_case_insensitive_var.get())
+        self._save_pattern_config(
+            raw_map,
+            year_patterns,
+            case_flags,
+            self.year_case_insensitive_var.get(),
+            whitespace_flags,
+            self.year_whitespace_as_space_var.get(),
+        )
         return pattern_map, year_compiled
 
     def _save_pattern_config(
@@ -502,6 +533,8 @@ class ReportApp:
         year_patterns: List[str],
         case_flags: Dict[str, bool],
         year_case_flag: bool,
+        whitespace_flags: Dict[str, bool],
+        year_whitespace_flag: bool,
     ) -> None:
         self.config_data.update(
             {
@@ -509,6 +542,8 @@ class ReportApp:
                 "case_insensitive": case_flags,
                 "year_patterns": year_patterns,
                 "year_case_insensitive": year_case_flag,
+                "space_as_whitespace": whitespace_flags,
+                "year_space_as_whitespace": year_whitespace_flag,
             }
         )
         current_company = self.company_var.get()
@@ -531,6 +566,7 @@ class ReportApp:
 
         patterns = data.get("patterns", {})
         case_flags = data.get("case_insensitive", {})
+        whitespace_flags = data.get("space_as_whitespace", {})
         for column, text_widget in self.pattern_texts.items():
             column_patterns = patterns.get(column)
             if column_patterns:
@@ -538,6 +574,8 @@ class ReportApp:
                 text_widget.insert("1.0", "\n".join(column_patterns))
             if column in case_flags and column in self.case_insensitive_vars:
                 self.case_insensitive_vars[column].set(bool(case_flags[column]))
+            if column in whitespace_flags and column in self.whitespace_as_space_vars:
+                self.whitespace_as_space_vars[column].set(bool(whitespace_flags[column]))
 
         year_patterns = data.get("year_patterns")
         if year_patterns and self.year_pattern_text is not None:
@@ -545,9 +583,31 @@ class ReportApp:
             self.year_pattern_text.insert("1.0", "\n".join(year_patterns))
         if "year_case_insensitive" in data:
             self.year_case_insensitive_var.set(bool(data["year_case_insensitive"]))
+        if "year_space_as_whitespace" in data:
+            self.year_whitespace_as_space_var.set(bool(data["year_space_as_whitespace"]))
         self.last_company_preference = data.get("last_company", "")
         self._apply_last_company_selection()
         self._config_loaded = True
+
+    def _apply_whitespace_option(self, pattern: str, enabled: bool) -> str:
+        if not enabled:
+            return pattern
+        return pattern.replace(" ", r"\s+")
+
+    def _maximize_window(self) -> None:
+        try:
+            self.root.state("zoomed")
+            return
+        except tk.TclError:
+            pass
+        try:
+            self.root.attributes("-zoomed", True)
+            return
+        except tk.TclError:
+            pass
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        self.root.geometry(f"{screen_width}x{screen_height}+0+0")
 
     def _apply_last_company_selection(self) -> None:
         if not self.last_company_preference:
