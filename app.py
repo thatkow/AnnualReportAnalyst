@@ -1149,12 +1149,22 @@ class ReportApp:
         canvas.bind("<Shift-MouseWheel>", _on_mousewheel)
         canvas.bind("<Button-4>", _on_mousewheel)
         canvas.bind("<Button-5>", _on_mousewheel)
-        canvas.bind("<Button-6>", _on_mousewheel)
-        canvas.bind("<Button-7>", _on_mousewheel)
         canvas.bind("<Shift-Button-4>", _on_mousewheel)
         canvas.bind("<Shift-Button-5>", _on_mousewheel)
-        canvas.bind("<Shift-Button-6>", _on_mousewheel)
-        canvas.bind("<Shift-Button-7>", _on_mousewheel)
+
+        windowing_system = str(self.root.tk.call("tk", "windowingsystem")).lower()
+        if windowing_system == "x11":
+            for sequence in (
+                "<Button-6>",
+                "<Button-7>",
+                "<Shift-Button-6>",
+                "<Shift-Button-7>",
+            ):
+                try:
+                    canvas.bind(sequence, _on_mousewheel)
+                except tk.TclError:
+                    # Some Tk builds may omit extended button bindings; ignore failures.
+                    pass
 
         canvas.bind("<Button-1>", lambda _e: _close())
 
