@@ -1630,10 +1630,12 @@ class ReportApp:
         scrape_root.mkdir(parents=True, exist_ok=True)
 
         errors: List[str] = []
-        pending: Dict[PDFEntry, List[Tuple[str, int]]] = {}
+        pending: Dict[Path, List[Tuple[str, int]]] = {}
+        entry_lookup: Dict[Path, PDFEntry] = {}
         metadata_cache: Dict[Path, Dict[str, Any]] = {}
 
         for entry in self.pdf_entries:
+            entry_lookup[entry.path] = entry
             doc_dir = scrape_root / entry.stem
             doc_dir.mkdir(parents=True, exist_ok=True)
             metadata = self._load_doc_metadata(doc_dir)
@@ -1658,7 +1660,7 @@ class ReportApp:
                         txt_exists = (doc_dir / txt_name).exists()
                 if csv_exists and txt_exists:
                     continue
-                pending.setdefault(entry, []).append((category, page_index))
+                pending.setdefault(entry.path, []).append((category, page_index))
 
         total_tasks = sum(len(items) for items in pending.values())
         if not total_tasks:
@@ -1674,7 +1676,10 @@ class ReportApp:
         attempted = 0
 
         try:
-            for entry, tasks in pending.items():
+            for entry_path, tasks in pending.items():
+                entry = entry_lookup.get(entry_path)
+                if entry is None:
+                    continue
                 doc_dir = scrape_root / entry.stem
                 metadata = metadata_cache.get(entry.path, {})
                 if not isinstance(metadata, dict):
