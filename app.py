@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
 from PIL import Image, ImageTk
@@ -59,11 +59,12 @@ class PDFCell:
         self.image_label.pack(expand=True, fill=tk.BOTH)
         self.info_label.pack(fill=tk.X)
         self.photo: Optional[ImageTk.PhotoImage] = None
+        self._right_click_job: Optional[str] = None
         for widget in (self.image_label, self.info_label):
             widget.bind("<Button-1>", self._next_match)
             widget.bind("<Shift-Button-1>", self._previous_match)
-            widget.bind("<Double-Button-1>", self._manual_select)
-            widget.bind("<Button-3>", self._open_current_match)
+            widget.bind("<Button-3>", self._on_right_click)
+            widget.bind("<Double-Button-3>", self._manual_select)
 
     def _next_match(self, event: tk.Event) -> None:  # type: ignore[override]
         self.app.cycle_match(self.entry, self.category, forward=True)
@@ -71,11 +72,22 @@ class PDFCell:
     def _previous_match(self, event: tk.Event) -> None:  # type: ignore[override]
         self.app.cycle_match(self.entry, self.category, forward=False)
 
-    def _manual_select(self, event: tk.Event) -> None:  # type: ignore[override]
-        self.app.manual_select(self.entry, self.category)
+    def _on_right_click(self, event: tk.Event) -> None:  # type: ignore[override]
+        if self._right_click_job is not None:
+            self.frame.after_cancel(self._right_click_job)
+            self._right_click_job = None
 
-    def _open_current_match(self, event: tk.Event) -> None:  # type: ignore[override]
-        self.app.open_current_match(self.entry, self.category)
+        def _open() -> None:
+            self._right_click_job = None
+            self.app.open_current_match(self.entry, self.category)
+
+        self._right_click_job = self.frame.after(200, _open)
+
+    def _manual_select(self, event: tk.Event) -> None:  # type: ignore[override]
+        if self._right_click_job is not None:
+            self.frame.after_cancel(self._right_click_job)
+            self._right_click_job = None
+        self.app.manual_select(self.entry, self.category)
 
     def update_display(self, photo: Optional[ImageTk.PhotoImage], info_text: str) -> None:
         self.photo = photo
@@ -101,6 +113,9 @@ class ReportApp:
         self.year_case_insensitive_var = tk.BooleanVar(master=self.root, value=True)
         self.companies_dir = Path(__file__).resolve().parent / "companies"
         self.pattern_config_path = Path(__file__).resolve().parent / "pattern_config.json"
+        self.config_data: Dict[str, Any] = {}
+        self.last_company_preference: str = ""
+        self._config_loaded = False
 
         self._build_ui()
         self._load_pattern_config()
@@ -200,7 +215,12 @@ class ReportApp:
             return
         companies = sorted([d.name for d in self.companies_dir.iterdir() if d.is_dir()])
         self.company_combo.configure(values=companies)
-        if companies and not self.company_var.get():
+        preferred = self.last_company_preference or self.company_var.get()
+        if preferred and preferred in companies:
+            self.company_combo.set(preferred)
+            self.company_var.set(preferred)
+            self._set_folder_from_company(preferred)
+        elif companies and not self.company_var.get():
             self.company_combo.current(0)
             self._set_folder_from_company(companies[0])
 
@@ -214,6 +234,8 @@ class ReportApp:
             return
         folder = self.companies_dir / company / "raw"
         self.folder_path.set(str(folder))
+        if self._config_loaded:
+            self._update_last_company(company)
 
     def apply_patterns(self) -> None:
         if not self.folder_path.get():
@@ -481,26 +503,30 @@ class ReportApp:
         case_flags: Dict[str, bool],
         year_case_flag: bool,
     ) -> None:
-        data = {
-            "patterns": patterns,
-            "case_insensitive": case_flags,
-            "year_patterns": year_patterns,
-            "year_case_insensitive": year_case_flag,
-        }
-        try:
-            with self.pattern_config_path.open("w", encoding="utf-8") as fh:
-                json.dump(data, fh, indent=2)
-        except Exception as exc:  # pragma: no cover - guard for IO issues
-            messagebox.showwarning("Save Patterns", f"Could not save pattern configuration: {exc}")
+        self.config_data.update(
+            {
+                "patterns": patterns,
+                "case_insensitive": case_flags,
+                "year_patterns": year_patterns,
+                "year_case_insensitive": year_case_flag,
+            }
+        )
+        current_company = self.company_var.get()
+        if current_company:
+            self.config_data["last_company"] = current_company
+        self._write_config()
 
     def _load_pattern_config(self) -> None:
         if not self.pattern_config_path.exists():
+            self._config_loaded = True
             return
         try:
             with self.pattern_config_path.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
+                self.config_data = data
         except Exception as exc:  # pragma: no cover - guard for IO issues
             messagebox.showwarning("Load Patterns", f"Could not load pattern configuration: {exc}")
+            self._config_loaded = True
             return
 
         patterns = data.get("patterns", {})
@@ -519,6 +545,34 @@ class ReportApp:
             self.year_pattern_text.insert("1.0", "\n".join(year_patterns))
         if "year_case_insensitive" in data:
             self.year_case_insensitive_var.set(bool(data["year_case_insensitive"]))
+        self.last_company_preference = data.get("last_company", "")
+        self._apply_last_company_selection()
+        self._config_loaded = True
+
+    def _apply_last_company_selection(self) -> None:
+        if not self.last_company_preference:
+            return
+        companies = list(self.company_combo["values"])
+        if self.last_company_preference in companies:
+            self.company_combo.set(self.last_company_preference)
+            self.company_var.set(self.last_company_preference)
+            self._set_folder_from_company(self.last_company_preference)
+
+    def _update_last_company(self, company: str) -> None:
+        if not company:
+            return
+        if self.config_data.get("last_company") == company:
+            return
+        self.config_data["last_company"] = company
+        self.last_company_preference = company
+        self._write_config()
+
+    def _write_config(self) -> None:
+        try:
+            with self.pattern_config_path.open("w", encoding="utf-8") as fh:
+                json.dump(self.config_data, fh, indent=2)
+        except Exception as exc:  # pragma: no cover - guard for IO issues
+            messagebox.showwarning("Save Patterns", f"Could not save pattern configuration: {exc}")
 
     def confirm_selections(self) -> None:
         if not self.pdf_entries:
