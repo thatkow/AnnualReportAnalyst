@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tkinter import messagebox, simpledialog, ttk
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +48,18 @@ class PDFEntry:
     @property
     def stem(self) -> str:
         return self.path.stem
+
+
+@dataclass(frozen=True)
+class ScrapeTask:
+    entry_path: Path
+    entry_name: str
+    entry_year: str
+    category: str
+    page_index: int
+    prompt_text: str
+    page_text: str
+    doc_dir: Path
 
 
 class CollapsibleFrame(ttk.Frame):
@@ -1182,7 +1195,12 @@ class ReportApp:
                 photo = self._render_page(entry.doc, int(page_index), 350)
                 if photo is not None:
                     self.scraped_images.append(photo)
-                    ttk.Label(image_frame, image=photo).pack(expand=True, fill=tk.BOTH)
+                    image_label = ttk.Label(image_frame, image=photo, cursor="hand2")
+                    image_label.pack(expand=True, fill=tk.BOTH)
+                    image_label.bind(
+                        "<Button-1>",
+                        lambda _e, e=entry, p=int(page_index): self.open_thumbnail_zoom(e, p),
+                    )
                 else:
                     ttk.Label(image_frame, text="Preview unavailable").pack(expand=True, fill=tk.BOTH)
 
@@ -1622,6 +1640,7 @@ class ReportApp:
         errors: List[str] = []
         pending: List[Tuple[PDFEntry, List[Tuple[str, int]]]] = []
         metadata_cache: Dict[Path, Dict[str, Any]] = {}
+        doc_dir_map: Dict[Path, Path] = {}
 
         for entry in self.pdf_entries:
             entry_tasks: List[Tuple[str, int]] = []
@@ -1630,7 +1649,10 @@ class ReportApp:
             metadata = self._load_doc_metadata(doc_dir)
             if not isinstance(metadata, dict):
                 metadata = {}
+            else:
+                metadata = dict(metadata)
             metadata_cache[entry.path] = metadata
+            doc_dir_map[entry.path] = doc_dir
             for category in COLUMNS:
                 page_index = self._get_selected_page_index(entry, category)
                 if page_index is None:
@@ -1667,17 +1689,63 @@ class ReportApp:
         successful = 0
         attempted = 0
 
+        metadata_changed: Dict[Path, bool] = {}
+        jobs: List[ScrapeTask] = []
+
+        def _run_job(job: ScrapeTask) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+            try:
+                response_text = self._call_openai(api_key, job.prompt_text, job.page_text)
+            except requests.RequestException as exc:
+                return False, None, f"{job.entry_name} - {job.category}: API request failed ({exc})"
+            except Exception as exc:
+                return False, None, f"{job.entry_name} - {job.category}: {exc}"
+
+            base_name = f"{job.entry_year or 'unknown'}_{job.category}"
+            txt_path = self._ensure_unique_path(job.doc_dir / f"{base_name}.txt")
+
+            try:
+                txt_path.write_text(response_text, encoding="utf-8")
+            except Exception as exc:
+                return False, None, f"{job.entry_name} - {job.category}: Could not save response ({exc})"
+
+            rows = self._convert_response_to_rows(response_text)
+            csv_path = txt_path.with_suffix(".csv")
+
+            try:
+                self._write_csv_rows(rows, csv_path)
+            except Exception as exc:
+                try:
+                    txt_path.unlink(missing_ok=True)
+                except TypeError:
+                    try:
+                        if txt_path.exists():
+                            txt_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except Exception:
+                        pass
+                return False, None, f"{job.entry_name} - {job.category}: Could not write CSV ({exc})"
+
+            metadata_entry = {
+                "csv": csv_path.name,
+                "txt": txt_path.name,
+                "page_index": job.page_index,
+                "year": job.entry_year,
+            }
+            return True, metadata_entry, None
+
         try:
             for entry, tasks in pending:
-                doc_dir = scrape_root / entry.stem
                 metadata = metadata_cache.get(entry.path, {})
                 if not isinstance(metadata, dict):
                     metadata = {}
-                metadata_changed = False
+                metadata = dict(metadata)
+                metadata_cache[entry.path] = metadata
+                metadata_changed.setdefault(entry.path, False)
                 for category, page_index in tasks:
                     removed = metadata.pop(category, None)
                     if removed is not None:
-                        metadata_changed = True
+                        metadata_changed[entry.path] = True
                     prompt_text = prompts.get(category)
                     if not prompt_text:
                         attempted += 1
@@ -1690,56 +1758,66 @@ class ReportApp:
                         page_text = page.get_text("text")
                     except Exception as exc:
                         errors.append(f"{entry.path.name} - {category}: Could not read page ({exc})")
-                    else:
-                        try:
-                            response_text = self._call_openai(api_key, prompt_text, page_text)
-                        except requests.RequestException as exc:
-                            errors.append(f"{entry.path.name} - {category}: API request failed ({exc})")
-                        except Exception as exc:
-                            errors.append(f"{entry.path.name} - {category}: {exc}")
-                        else:
-                            base_name = f"{entry.year or 'unknown'}_{category}"
-                            txt_path = self._ensure_unique_path(doc_dir / f"{base_name}.txt")
-                            write_failed = False
-                            try:
-                                txt_path.write_text(response_text, encoding="utf-8")
-                            except Exception as exc:
-                                errors.append(f"{entry.path.name} - {category}: Could not save response ({exc})")
-                                write_failed = True
-                            if not write_failed:
-                                csv_path = txt_path.with_suffix(".csv")
-                                rows = self._convert_response_to_rows(response_text)
-                                try:
-                                    self._write_csv_rows(rows, csv_path)
-                                except Exception as exc:
-                                    errors.append(f"{entry.path.name} - {category}: Could not write CSV ({exc})")
-                                    try:
-                                        txt_path.unlink(missing_ok=True)
-                                    except TypeError:
-                                        try:
-                                            if txt_path.exists():
-                                                txt_path.unlink()
-                                        except FileNotFoundError:
-                                            pass
-                                        except Exception:
-                                            pass
-                                else:
-                                    metadata[category] = {
-                                        "csv": csv_path.name,
-                                        "txt": txt_path.name,
-                                        "page_index": page_index,
-                                        "year": entry.year,
-                                    }
-                                    metadata_changed = True
-                                    successful += 1
-                    finally:
                         attempted += 1
                         if hasattr(self, "scrape_progress"):
                             self.scrape_progress["value"] = attempted
                             self.root.update_idletasks()
-                if metadata_changed:
-                    metadata_cache[entry.path] = metadata
-                    self._write_doc_metadata(doc_dir, metadata)
+                        continue
+
+                    jobs.append(
+                        ScrapeTask(
+                            entry_path=entry.path,
+                            entry_name=entry.path.name,
+                            entry_year=entry.year,
+                            category=category,
+                            page_index=page_index,
+                            prompt_text=prompt_text,
+                            page_text=page_text,
+                            doc_dir=doc_dir_map.get(entry.path, scrape_root / entry.stem),
+                        )
+                    )
+
+            if jobs:
+                max_workers = min(8, max(2, os.cpu_count() or 4))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_map = {executor.submit(_run_job, job): job for job in jobs}
+                    for future in as_completed(future_map):
+                        job = future_map[future]
+                        success = False
+                        metadata_entry: Optional[Dict[str, Any]] = None
+                        error_message: Optional[str] = None
+                        try:
+                            success, metadata_entry, error_message = future.result()
+                        except Exception as exc:
+                            error_message = f"{job.entry_name} - {job.category}: {exc}"
+
+                        attempted += 1
+
+                        if success and metadata_entry is not None:
+                            metadata = metadata_cache.get(job.entry_path, {})
+                            if not isinstance(metadata, dict):
+                                metadata = {}
+                                metadata_cache[job.entry_path] = metadata
+                            metadata[job.category] = metadata_entry
+                            metadata_changed[job.entry_path] = True
+                            successful += 1
+                        elif error_message:
+                            errors.append(error_message)
+
+                        if hasattr(self, "scrape_progress"):
+                            self.scrape_progress["value"] = attempted
+                            self.root.update_idletasks()
+
+            for entry_path, changed in metadata_changed.items():
+                if not changed:
+                    continue
+                metadata = metadata_cache.get(entry_path, {})
+                if not isinstance(metadata, dict):
+                    continue
+                doc_dir = doc_dir_map.get(entry_path)
+                if doc_dir is None:
+                    continue
+                self._write_doc_metadata(doc_dir, metadata)
         finally:
             if hasattr(self, "scrape_button"):
                 self.scrape_button.state(["!disabled"])
