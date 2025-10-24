@@ -48,6 +48,9 @@ class PDFEntry:
         return self.path.stem
 
 
+CONTROL_MASK = 0x0004
+
+
 class PDFCell:
     def __init__(self, parent: tk.Widget, app: "ReportApp", entry: PDFEntry, category: str):
         self.app = app
@@ -76,6 +79,10 @@ class PDFCell:
         if self._right_click_job is not None:
             self.frame.after_cancel(self._right_click_job)
             self._right_click_job = None
+
+        if event.state & CONTROL_MASK:
+            self.app.open_page_selection_dialog(self.entry, self.category)
+            return
 
         def _open() -> None:
             self._right_click_job = None
@@ -112,7 +119,7 @@ class ReportApp:
         self.year_vars: Dict[Path, tk.StringVar] = {}
         self.year_pattern_text: Optional[tk.Text] = None
         self.year_case_insensitive_var = tk.BooleanVar(master=self.root, value=True)
-        self.year_whitespace_as_space_var = tk.BooleanVar(master=self.root, value=False)
+        self.year_whitespace_as_space_var = tk.BooleanVar(master=self.root, value=True)
         self.companies_dir = Path(__file__).resolve().parent / "companies"
         self.pattern_config_path = Path(__file__).resolve().parent / "pattern_config.json"
         self.config_data: Dict[str, Any] = {}
@@ -158,7 +165,7 @@ class ReportApp:
             var = tk.BooleanVar(master=self.root, value=True)
             self.case_insensitive_vars[column] = var
             ttk.Checkbutton(column_frame, text="Case-insensitive", variable=var).pack(anchor="w", pady=(4, 0))
-            whitespace_var = tk.BooleanVar(master=self.root, value=False)
+            whitespace_var = tk.BooleanVar(master=self.root, value=True)
             self.whitespace_as_space_vars[column] = whitespace_var
             ttk.Checkbutton(
                 column_frame,
@@ -270,7 +277,7 @@ class ReportApp:
         prev_whitespace = {key: bool(value) for key, value in self.config_data.get("space_as_whitespace", {}).items()}
         prev_year_patterns = list(self.config_data.get("year_patterns", YEAR_DEFAULT_PATTERNS))
         prev_year_case = bool(self.config_data.get("year_case_insensitive", True))
-        prev_year_whitespace = bool(self.config_data.get("year_space_as_whitespace", False))
+        prev_year_whitespace = bool(self.config_data.get("year_space_as_whitespace", True))
 
         pattern_map, year_patterns = self._gather_patterns()
 
@@ -287,14 +294,14 @@ class ReportApp:
                 continue
             old_case = prev_case.get(column, True)
             new_case_flag = bool(new_case.get(column, True))
-            old_whitespace = prev_whitespace.get(column, False)
-            new_whitespace_flag = bool(new_whitespace.get(column, False))
+            old_whitespace = prev_whitespace.get(column, True)
+            new_whitespace_flag = bool(new_whitespace.get(column, True))
             if old_case != new_case_flag or old_whitespace != new_whitespace_flag:
                 changed_columns.add(column)
 
         new_year_patterns = list(self.config_data.get("year_patterns", YEAR_DEFAULT_PATTERNS))
         new_year_case = bool(self.config_data.get("year_case_insensitive", True))
-        new_year_whitespace = bool(self.config_data.get("year_space_as_whitespace", False))
+        new_year_whitespace = bool(self.config_data.get("year_space_as_whitespace", True))
 
         year_changed = (
             prev_year_patterns != new_year_patterns
@@ -563,16 +570,72 @@ class ReportApp:
             return
 
         page_index = page_number - 1
-        matches = entry.matches[category]
-        for idx, match in enumerate(matches):
-            if match.page_index == page_index:
-                entry.current_index[category] = idx
-                self._update_cell(entry, category)
-                return
+        self._set_selected_page(entry, category, page_index)
 
-        matches.append(Match(page_index=page_index, source="manual"))
-        entry.current_index[category] = len(matches) - 1
-        self._update_cell(entry, category)
+    def open_page_selection_dialog(self, entry: PDFEntry, category: str) -> None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Select Page - {entry.path.name}")
+        dialog.transient(self.root)
+        dialog.update_idletasks()
+        self._maximize_window(dialog)
+        dialog.grab_set()
+        dialog.focus_set()
+
+        canvas = tk.Canvas(dialog)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(dialog, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        content = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def _on_content_configure(_: tk.Event) -> None:  # type: ignore[override]
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: tk.Event) -> None:  # type: ignore[override]
+            canvas.itemconfigure(canvas_window, width=event.width)
+
+        content.bind("<Configure>", _on_content_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        screen_width = dialog.winfo_screenwidth() or self.root.winfo_screenwidth()
+        target_width = max(150, (screen_width // 3) - 40)
+        thumbnails: List[ImageTk.PhotoImage] = []
+
+        def _close_dialog() -> None:
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", _close_dialog)
+
+        def _select(page_idx: int) -> None:
+            self._set_selected_page(entry, category, page_idx)
+            _close_dialog()
+
+        for page_idx in range(len(entry.doc)):
+            photo = self._render_page(entry.doc, page_idx, target_width)
+            frame = ttk.Frame(content, padding=8)
+            row = page_idx // 3
+            col = page_idx % 3
+            frame.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+            content.columnconfigure(col, weight=1)
+            content.rowconfigure(row, weight=1)
+            if photo is not None:
+                thumbnails.append(photo)
+                label = ttk.Label(frame, image=photo)
+                label.pack(expand=True, fill=tk.BOTH)
+                label.bind("<Button-1>", lambda _e, idx=page_idx: _select(idx))
+            else:
+                fallback = ttk.Label(frame, text=f"Page {page_idx + 1}")
+                fallback.pack(expand=True, fill=tk.BOTH)
+                fallback.bind("<Button-1>", lambda _e, idx=page_idx: _select(idx))
+            ttk.Label(frame, text=f"Page {page_idx + 1}").pack(pady=(4, 0))
+
+        dialog._thumbnails = thumbnails  # type: ignore[attr-defined]
 
     def open_current_match(self, entry: PDFEntry, category: str) -> None:
         matches = entry.matches.get(category, [])
@@ -599,6 +662,18 @@ class ReportApp:
                 os.system(f"xdg-open '{pdf_path}' >/dev/null 2>&1 &")
         except Exception as exc:
             messagebox.showwarning("Open PDF", f"Could not open PDF: {exc}")
+
+    def _set_selected_page(self, entry: PDFEntry, category: str, page_index: int) -> None:
+        matches = entry.matches[category]
+        for idx, match in enumerate(matches):
+            if match.page_index == page_index:
+                entry.current_index[category] = idx
+                self._update_cell(entry, category)
+                return
+
+        matches.append(Match(page_index=page_index, source="manual"))
+        entry.current_index[category] = len(matches) - 1
+        self._update_cell(entry, category)
 
     def _gather_patterns(self) -> Tuple[Dict[str, List[re.Pattern[str]]], List[re.Pattern[str]]]:
         pattern_map: Dict[str, List[re.Pattern[str]]] = {}
@@ -720,20 +795,21 @@ class ReportApp:
             return pattern
         return pattern.replace(" ", r"\s+")
 
-    def _maximize_window(self) -> None:
+    def _maximize_window(self, window: Optional[tk.Misc] = None) -> None:
+        target = window or self.root
         try:
-            self.root.state("zoomed")
+            target.state("zoomed")
             return
         except tk.TclError:
             pass
         try:
-            self.root.attributes("-zoomed", True)
+            target.attributes("-zoomed", True)
             return
         except tk.TclError:
             pass
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        self.root.geometry(f"{screen_width}x{screen_height}+0+0")
+        screen_width = target.winfo_screenwidth()
+        screen_height = target.winfo_screenheight()
+        target.geometry(f"{screen_width}x{screen_height}+0+0")
 
     def _apply_last_company_selection(self) -> None:
         if not self.last_company_preference:
