@@ -153,11 +153,6 @@ class ReportApp:
         self.company_combo.pack(side=tk.LEFT, padx=4)
         self.company_combo.bind("<<ComboboxSelected>>", self._on_company_selected)
 
-        ttk.Label(top_frame, text="API key:").pack(side=tk.LEFT)
-        self.api_key_entry = ttk.Entry(top_frame, textvariable=self.api_key_var, width=40)
-        self.api_key_entry.pack(side=tk.LEFT, padx=4)
-        self.api_key_entry.bind("<Return>", self._on_api_key_enter)
-
         folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=60, state="readonly")
         folder_entry.pack(side=tk.LEFT, padx=4)
 
@@ -234,9 +229,22 @@ class ReportApp:
         self.inner_frame.bind("<Configure>", self._on_frame_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
 
+        action_frame = ttk.Frame(review_container, padding=8)
+        action_frame.pack(fill=tk.X, pady=(0, 8))
+        self.commit_button = ttk.Button(action_frame, text="Commit", command=self.commit_assignments)
+        self.commit_button.pack(side=tk.RIGHT)
+
         scraped_container = ttk.Frame(notebook)
         self.scraped_frame = scraped_container
         notebook.add(scraped_container, text="Scraped")
+
+        scraped_controls = ttk.Frame(scraped_container, padding=8)
+        scraped_controls.pack(fill=tk.X)
+        ttk.Label(scraped_controls, text="API key:").pack(side=tk.LEFT)
+        self.api_key_entry = ttk.Entry(scraped_controls, textvariable=self.api_key_var, width=40)
+        self.api_key_entry.pack(side=tk.LEFT, padx=4)
+        self.api_key_entry.bind("<Return>", self._on_api_key_enter)
+        ttk.Button(scraped_controls, text="AIScrape", command=self.scrape_selections).pack(side=tk.LEFT, padx=(8, 0))
 
         self.scraped_canvas = tk.Canvas(scraped_container)
         self.scraped_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -253,9 +261,6 @@ class ReportApp:
         self.scraped_canvas.bind(
             "<Configure>", lambda e: self.scraped_canvas.itemconfigure(self.scraped_window, width=e.width)
         )
-
-        self.confirm_button = ttk.Button(self.root, text="AIScrape", command=self.scrape_selections)
-        self.confirm_button.pack(pady=8)
 
     def _on_frame_configure(self, _: tk.Event) -> None:  # type: ignore[override]
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -673,7 +678,7 @@ class ReportApp:
         self._update_cell(entry, category)
         page_index = self._get_selected_page_index(entry, category)
         if page_index is not None:
-            self._update_assigned_entry(entry, category, page_index, persist=True)
+            self._update_assigned_entry(entry, category, page_index, persist=False)
 
     def manual_select(self, entry: PDFEntry, category: str) -> None:
         pdf_path = entry.path
@@ -859,13 +864,13 @@ class ReportApp:
             if match.page_index == page_index:
                 entry.current_index[category] = idx
                 self._update_cell(entry, category)
-                self._update_assigned_entry(entry, category, page_index, persist=True)
+                self._update_assigned_entry(entry, category, page_index, persist=False)
                 return
 
         matches.append(Match(page_index=page_index, source="manual"))
         entry.current_index[category] = len(matches) - 1
         self._update_cell(entry, category)
-        self._update_assigned_entry(entry, category, page_index, persist=True)
+        self._update_assigned_entry(entry, category, page_index, persist=False)
 
     def _get_selected_page_index(self, entry: PDFEntry, category: str) -> Optional[int]:
         matches = entry.matches.get(category, [])
@@ -877,7 +882,7 @@ class ReportApp:
         return matches[index].page_index
 
     def _update_assigned_entry(
-        self, entry: PDFEntry, category: str, page_index: int, *, persist: bool
+        self, entry: PDFEntry, category: str, page_index: int, *, persist: bool = False
     ) -> None:
         key = entry.path.name
         record = self.assigned_pages.setdefault(key, {"selections": {}, "year": entry.year})
@@ -897,6 +902,31 @@ class ReportApp:
                 json.dump(self.assigned_pages, fh, indent=2)
         except Exception as exc:
             messagebox.showwarning("Save Assignments", f"Could not save assigned pages: {exc}")
+
+    def commit_assignments(self) -> None:
+        company = self.company_var.get()
+        if not company:
+            messagebox.showinfo("Select Company", "Please choose a company before committing assignments.")
+            return
+        if self.assigned_pages_path is None:
+            self.assigned_pages_path = self.companies_dir / company / "assigned.json"
+
+        if self.pdf_entries:
+            for entry in self.pdf_entries:
+                record = self.assigned_pages.setdefault(
+                    entry.path.name, {"selections": {}, "year": entry.year}
+                )
+                record["year"] = entry.year
+                selections = record.setdefault("selections", {})
+                for category in COLUMNS:
+                    page_index = self._get_selected_page_index(entry, category)
+                    if page_index is None:
+                        selections.pop(category, None)
+                    else:
+                        selections[category] = int(page_index)
+
+        self._write_assigned_pages()
+        messagebox.showinfo("Assignments Saved", "Assignments have been committed to assigned.json.")
 
     def _refresh_scraped_tab(self) -> None:
         if not hasattr(self, "scraped_inner"):
