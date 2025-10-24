@@ -1,3 +1,4 @@
 PyMuPDF
 PyPDF2
 Pillow
+dash

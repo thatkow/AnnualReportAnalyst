@@ -1,15 +1,16 @@
-import os
-import sys
+import base64
+import io
 import re
-import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
-from PIL import Image, ImageTk
+from PIL import Image
 from PyPDF2 import PdfReader, PdfWriter
+from dash import ALL, Dash, Input, Output, State, callback_context, dcc, html, no_update
+from flask import abort, send_file
 
 
 COLUMNS = ["Financial", "Income", "Shares"]
@@ -18,388 +19,488 @@ DEFAULT_PATTERNS = {
     "Income": ["statement of profit or loss"],
     "Shares": ["Movements in issued capital"],
 }
+BASE_DIR = Path(__file__).resolve().parent
+COMPANIES_DIR = BASE_DIR / "companies"
 
 
 @dataclass
-class Match:
+class MatchRecord:
     page_index: int
     source: str
-    pattern: Optional[str] = None
+    pattern: Optional[str]
+    image_b64: str
+
+    def to_dict(self) -> Dict[str, Optional[str]]:
+        return {
+            "page_index": self.page_index,
+            "source": self.source,
+            "pattern": self.pattern,
+            "image": self.image_b64,
+        }
 
 
-@dataclass
-class PDFEntry:
-    path: Path
-    doc: fitz.Document
-    matches: Dict[str, List[Match]] = field(default_factory=dict)
-    current_index: Dict[str, Optional[int]] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        for column in COLUMNS:
-            self.matches.setdefault(column, [])
-            self.current_index.setdefault(column, 0 if self.matches[column] else None)
-
-    @property
-    def stem(self) -> str:
-        return self.path.stem
+def _render_page_base64(doc: fitz.Document, page_index: int, *, max_width: int = 420) -> str:
+    page = doc.load_page(page_index)
+    pix = page.get_pixmap(matrix=fitz.Matrix(1.6, 1.6))
+    mode = "RGBA" if pix.alpha else "RGB"
+    image = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+    if image.width > max_width:
+        ratio = max_width / image.width
+        new_size = (int(image.width * ratio), int(image.height * ratio))
+        image = image.resize(new_size, Image.LANCZOS)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return encoded
 
 
-class PDFCell:
-    def __init__(self, parent: tk.Widget, app: "ReportApp", entry: PDFEntry, category: str):
-        self.app = app
-        self.entry = entry
-        self.category = category
-        self.frame = ttk.Frame(parent, padding=4)
-        self.image_label = ttk.Label(self.frame)
-        self.info_label = ttk.Label(self.frame)
-        self.image_label.pack(expand=True, fill=tk.BOTH)
-        self.info_label.pack(fill=tk.X)
-        self.photo: Optional[ImageTk.PhotoImage] = None
-        for widget in (self.image_label, self.info_label):
-            widget.bind("<Button-1>", self._next_match)
-            widget.bind("<Shift-Button-1>", self._previous_match)
-            widget.bind("<Button-3>", self._manual_select)
-
-    def _next_match(self, event: tk.Event) -> None:  # type: ignore[override]
-        self.app.cycle_match(self.entry, self.category, forward=True)
-
-    def _previous_match(self, event: tk.Event) -> None:  # type: ignore[override]
-        self.app.cycle_match(self.entry, self.category, forward=False)
-
-    def _manual_select(self, event: tk.Event) -> None:  # type: ignore[override]
-        self.app.manual_select(self.entry, self.category)
-
-    def update_display(self, photo: Optional[ImageTk.PhotoImage], info_text: str) -> None:
-        self.photo = photo
-        if photo is not None:
-            self.image_label.configure(image=photo)
-        else:
-            self.image_label.configure(image="")
-        self.info_label.configure(text=info_text)
+def _render_page_base64_from_path(pdf_path: Path, page_index: int) -> str:
+    with fitz.open(pdf_path) as doc:
+        return _render_page_base64(doc, page_index)
 
 
-class ReportApp:
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.root.title("Annual Report Analyst")
-        self.folder_path = tk.StringVar()
-        self.company_var = tk.StringVar()
-        self.pattern_texts: Dict[str, tk.Text] = {}
-        self.pdf_entries: List[PDFEntry] = []
-        self.cells: Dict[tuple[Path, str], PDFCell] = {}
-        self.companies_dir = Path(__file__).resolve().parent / "companies"
-
-        self._build_ui()
-
-    def _build_ui(self) -> None:
-        top_frame = ttk.Frame(self.root, padding=8)
-        top_frame.pack(fill=tk.X)
-
-        company_label = ttk.Label(top_frame, text="Company:")
-        company_label.pack(side=tk.LEFT)
-
-        self.company_combo = ttk.Combobox(top_frame, textvariable=self.company_var, state="readonly", width=30)
-        self.company_combo.pack(side=tk.LEFT, padx=4)
-        self.company_combo.bind("<<ComboboxSelected>>", self._on_company_selected)
-
-        folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=60, state="readonly")
-        folder_entry.pack(side=tk.LEFT, padx=4)
-
-        load_button = ttk.Button(top_frame, text="Load PDFs", command=self.load_pdfs)
-        load_button.pack(side=tk.LEFT, padx=4)
-
-        self._refresh_company_options()
-
-        pattern_frame = ttk.LabelFrame(self.root, text="Regex patterns (one per line)", padding=8)
-        pattern_frame.pack(fill=tk.X, padx=8, pady=4)
-
-        for idx, column in enumerate(COLUMNS):
-            column_frame = ttk.Frame(pattern_frame)
-            column_frame.grid(row=0, column=idx, padx=4, sticky="nsew")
-            pattern_frame.columnconfigure(idx, weight=1)
-            ttk.Label(column_frame, text=column).pack(anchor="w")
-            text_widget = tk.Text(column_frame, height=4, width=30)
-            text_widget.pack(fill=tk.BOTH, expand=True)
-            text_widget.insert("1.0", "\n".join(DEFAULT_PATTERNS[column]))
-            self.pattern_texts[column] = text_widget
-
-        update_button = ttk.Button(pattern_frame, text="Apply Patterns", command=self.apply_patterns)
-        update_button.grid(row=1, column=0, columnspan=len(COLUMNS), pady=4)
-
-        grid_container = ttk.Frame(self.root)
-        grid_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
-
-        self.canvas = tk.Canvas(grid_container)
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        scrollbar = ttk.Scrollbar(grid_container, orient=tk.VERTICAL, command=self.canvas.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.canvas.configure(yscrollcommand=scrollbar.set)
-
-        self.inner_frame = ttk.Frame(self.canvas)
-        self.canvas_window = self.canvas.create_window((0, 0), window=self.inner_frame, anchor="nw")
-        self.inner_frame.bind("<Configure>", self._on_frame_configure)
-        self.canvas.bind("<Configure>", self._on_canvas_configure)
-
-        self.confirm_button = ttk.Button(self.root, text="Confirm", command=self.confirm_selections)
-        self.confirm_button.pack(pady=8)
-
-    def _on_frame_configure(self, _: tk.Event) -> None:  # type: ignore[override]
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
-    def _on_canvas_configure(self, event: tk.Event) -> None:  # type: ignore[override]
-        self.canvas.itemconfigure(self.canvas_window, width=event.width)
-
-    def _refresh_company_options(self) -> None:
-        if not self.companies_dir.exists():
-            self.company_combo.configure(values=[])
-            return
-        companies = sorted([d.name for d in self.companies_dir.iterdir() if d.is_dir()])
-        self.company_combo.configure(values=companies)
-        if companies and not self.company_var.get():
-            self.company_combo.current(0)
-            self._set_folder_from_company(companies[0])
-
-    def _on_company_selected(self, _: tk.Event) -> None:  # type: ignore[override]
-        company = self.company_var.get()
-        self._set_folder_from_company(company)
-
-    def _set_folder_from_company(self, company: str) -> None:
-        if not company:
-            self.folder_path.set("")
-            return
-        folder = self.companies_dir / company / "raw"
-        self.folder_path.set(str(folder))
-
-    def apply_patterns(self) -> None:
-        if not self.folder_path.get():
-            messagebox.showinfo("Select Folder", "Please select a folder before applying patterns.")
-            return
-        self.load_pdfs()
-
-    def load_pdfs(self) -> None:
-        folder = self.folder_path.get()
-        if not folder:
-            messagebox.showinfo("Select Folder", "Please select a folder containing PDFs.")
-            return
-
-        folder_path = Path(folder)
-        if not folder_path.exists():
-            messagebox.showerror("Folder Not Found", f"The folder '{folder}' does not exist.")
-            return
-
-        self._clear_entries()
-        pattern_map = self._gather_patterns()
-        pdf_paths = sorted(folder_path.rglob("*.pdf"))
-        if not pdf_paths:
-            messagebox.showinfo("No PDFs", "No PDF files were found in the selected folder.")
-            self._rebuild_grid()
-            return
-
-        for pdf_path in pdf_paths:
+def _gather_patterns(pattern_inputs: Dict[str, str]) -> Tuple[Optional[Dict[str, List[re.Pattern[str]]]], Optional[str]]:
+    compiled: Dict[str, List[re.Pattern[str]]] = {}
+    for column in COLUMNS:
+        raw = pattern_inputs.get(column, "")
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        if not lines:
+            lines = DEFAULT_PATTERNS[column]
+        column_patterns: List[re.Pattern[str]] = []
+        for value in lines:
             try:
-                doc = fitz.open(pdf_path)
-            except Exception as exc:  # pragma: no cover - guard for invalid PDFs
-                messagebox.showwarning("PDF Error", f"Could not open '{pdf_path}': {exc}")
-                continue
+                column_patterns.append(re.compile(value, re.IGNORECASE))
+            except re.error as exc:
+                return None, f"Invalid regex '{value}' for {column}: {exc}"
+        compiled[column] = column_patterns
+    return compiled, None
 
-            matches: Dict[str, List[Match]] = {column: [] for column in COLUMNS}
+
+def _load_company_data(company: str, pattern_inputs: Dict[str, str]) -> Tuple[Optional[Dict], str]:
+    if not company:
+        return None, "Please choose a company to scan."
+
+    folder = COMPANIES_DIR / company / "raw"
+    if not folder.exists():
+        return None, f"Folder '{folder}' does not exist."
+
+    compiled_patterns, error = _gather_patterns(pattern_inputs)
+    if error:
+        return None, error
+
+    pdf_paths = sorted(folder.rglob("*.pdf"))
+    if not pdf_paths:
+        return {
+            "folder": str(folder),
+            "entries": [],
+        }, "No PDF files were found for the selected company."
+
+    entries = []
+    for pdf_path in pdf_paths:
+        try:
+            doc = fitz.open(pdf_path)
+        except Exception as exc:  # pragma: no cover - safety net
+            return None, f"Could not open '{pdf_path.name}': {exc}"
+        matches: Dict[str, List[MatchRecord]] = {column: [] for column in COLUMNS}
+        try:
             for page_index in range(len(doc)):
                 page = doc.load_page(page_index)
-                page_text = page.get_text("text")
-                for column, patterns in pattern_map.items():
+                text = page.get_text("text")
+                for column, patterns in compiled_patterns.items():
                     for pattern in patterns:
-                        if pattern.search(page_text):
-                            matches[column].append(Match(page_index=page_index, source="regex", pattern=pattern.pattern))
+                        if pattern.search(text):
+                            image_b64 = _render_page_base64(doc, page_index)
+                            matches[column].append(
+                                MatchRecord(page_index=page_index, source="regex", pattern=pattern.pattern, image_b64=image_b64)
+                            )
                             break
+        finally:
+            doc.close()
 
-            entry = PDFEntry(path=pdf_path, doc=doc, matches=matches)
-            # Reset current indices based on available matches
-            for column in COLUMNS:
-                entry.current_index[column] = 0 if entry.matches[column] else None
-            self.pdf_entries.append(entry)
-
-        self._rebuild_grid()
-
-    def _clear_entries(self) -> None:
-        for entry in self.pdf_entries:
-            try:
-                entry.doc.close()
-            except Exception:
-                pass
-        self.pdf_entries.clear()
-        self.cells.clear()
-        for child in self.inner_frame.winfo_children():
-            child.destroy()
-
-    def _gather_patterns(self) -> Dict[str, List[re.Pattern[str]]]:
-        pattern_map: Dict[str, List[re.Pattern[str]]] = {}
-        for column in COLUMNS:
-            text_widget = self.pattern_texts[column]
-            raw_text = text_widget.get("1.0", tk.END)
-            patterns = [line.strip() for line in raw_text.splitlines() if line.strip()]
-            if not patterns:
-                patterns = DEFAULT_PATTERNS[column]
-                text_widget.delete("1.0", tk.END)
-                text_widget.insert("1.0", "\n".join(patterns))
-            compiled = []
-            for pattern in patterns:
-                try:
-                    compiled.append(re.compile(pattern, re.IGNORECASE))
-                except re.error as exc:
-                    messagebox.showerror("Invalid Pattern", f"Invalid regex '{pattern}' for {column}: {exc}")
-            pattern_map[column] = compiled
-        return pattern_map
-
-    def _rebuild_grid(self) -> None:
-        for child in self.inner_frame.winfo_children():
-            child.destroy()
-        self.cells.clear()
-
-        header = ttk.Frame(self.inner_frame)
-        header.grid(row=0, column=0, columnspan=4, sticky="ew")
-        ttk.Label(header, text="PDF", width=30, anchor="w").grid(row=0, column=0, padx=4)
-        for idx, column in enumerate(COLUMNS, start=1):
-            ttk.Label(header, text=column, anchor="center").grid(row=0, column=idx, padx=4)
-
-        for row_index, entry in enumerate(self.pdf_entries, start=1):
-            relative_path = entry.path.relative_to(Path(self.folder_path.get())) if self.folder_path.get() else entry.path.name
-            ttk.Label(self.inner_frame, text=relative_path, anchor="w", width=30, wraplength=200).grid(row=row_index, column=0, sticky="nw", padx=4, pady=4)
-            for col_index, column in enumerate(COLUMNS, start=1):
-                cell = PDFCell(self.inner_frame, self, entry, column)
-                cell.frame.grid(row=row_index, column=col_index, padx=4, pady=4, sticky="nsew")
-                self.cells[(entry.path, column)] = cell
-                self._update_cell(entry, column)
-
-        for idx in range(len(COLUMNS) + 1):
-            self.inner_frame.columnconfigure(idx, weight=1)
-
-    def _update_cell(self, entry: PDFEntry, category: str) -> None:
-        cell = self.cells.get((entry.path, category))
-        if cell is None:
-            return
-
-        matches = entry.matches[category]
-        current_index = entry.current_index.get(category)
-        if current_index is None or not matches:
-            cell.update_display(None, "No matches found")
-            return
-
-        current_index = max(0, min(current_index, len(matches) - 1))
-        entry.current_index[category] = current_index
-        match = matches[current_index]
-        photo = self._render_page(entry.doc, match.page_index)
-        info_parts = [f"Match {current_index + 1}/{len(matches)}", f"Page {match.page_index + 1}"]
-        if match.source == "manual":
-            info_parts.append("(manual)")
-        cell.update_display(photo, " | ".join(info_parts))
-
-    def _render_page(self, doc: fitz.Document, page_index: int) -> Optional[ImageTk.PhotoImage]:
-        try:
-            page = doc.load_page(page_index)
-            zoom_matrix = fitz.Matrix(1.5, 1.5)
-            pix = page.get_pixmap(matrix=zoom_matrix)
-            mode = "RGBA" if pix.alpha else "RGB"
-            image = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
-            max_width = 300
-            if image.width > max_width:
-                ratio = max_width / image.width
-                new_size = (int(image.width * ratio), int(image.height * ratio))
-                image = image.resize(new_size, Image.LANCZOS)
-            return ImageTk.PhotoImage(image)
-        except Exception as exc:  # pragma: no cover - guard for rendering issues
-            messagebox.showwarning("Render Error", f"Could not render page {page_index + 1}: {exc}")
-            return None
-
-    def cycle_match(self, entry: PDFEntry, category: str, *, forward: bool) -> None:
-        matches = entry.matches.get(category, [])
-        if not matches:
-            messagebox.showinfo("No Matches", f"No matches available for {category} in {entry.path.name}.")
-            return
-
-        current_index = entry.current_index.get(category) or 0
-        if forward:
-            if current_index + 1 >= len(matches):
-                messagebox.showinfo("End of Matches", "Reached the last matched page.")
-                return
-            entry.current_index[category] = current_index + 1
-        else:
-            if current_index - 1 < 0:
-                messagebox.showinfo("Start of Matches", "Reached the first matched page.")
-                return
-            entry.current_index[category] = current_index - 1
-        self._update_cell(entry, category)
-
-    def manual_select(self, entry: PDFEntry, category: str) -> None:
-        pdf_path = entry.path
-        self._open_pdf(pdf_path)
-        page_number = simpledialog.askinteger(
-            "Manual Page Selection",
-            f"Enter page number for {category} in {pdf_path.name}:",
-            parent=self.root,
-            minvalue=1,
-            maxvalue=len(entry.doc),
+        reader = PdfReader(str(pdf_path))
+        entries.append(
+            {
+                "path": str(pdf_path),
+                "display_name": str(pdf_path.relative_to(folder)),
+                "total_pages": len(reader.pages),
+                "matches": {column: [match.to_dict() for match in match_list] for column, match_list in matches.items()},
+                "current": {column: (0 if matches[column] else None) for column in COLUMNS},
+            }
         )
-        if page_number is None:
-            return
 
-        page_index = page_number - 1
-        matches = entry.matches[category]
-        for idx, match in enumerate(matches):
-            if match.page_index == page_index:
-                entry.current_index[category] = idx
-                self._update_cell(entry, category)
-                return
-
-        matches.append(Match(page_index=page_index, source="manual"))
-        entry.current_index[category] = len(matches) - 1
-        self._update_cell(entry, category)
-
-    def _open_pdf(self, pdf_path: Path) -> None:
-        try:
-            if sys.platform.startswith("win"):
-                os.startfile(pdf_path)  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                os.system(f"open '{pdf_path}'")
-            else:
-                os.system(f"xdg-open '{pdf_path}' >/dev/null 2>&1 &")
-        except Exception as exc:
-            messagebox.showwarning("Open PDF", f"Could not open PDF: {exc}")
-
-    def confirm_selections(self) -> None:
-        if not self.pdf_entries:
-            messagebox.showinfo("No PDFs", "Load PDFs before confirming selections.")
-            return
-
-        folder = Path(self.folder_path.get())
-        output_dir = folder / "cut"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        for entry in self.pdf_entries:
-            reader = PdfReader(str(entry.path))
-            for category in COLUMNS:
-                index = entry.current_index.get(category)
-                matches = entry.matches.get(category, [])
-                if index is None or not matches:
-                    continue
-                index = max(0, min(index, len(matches) - 1))
-                match = matches[index]
-                if match.page_index >= len(reader.pages):
-                    continue
-                writer = PdfWriter()
-                writer.add_page(reader.pages[match.page_index])
-                output_path = output_dir / f"{entry.stem}_{category}.pdf"
-                with output_path.open("wb") as fh:
-                    writer.write(fh)
-
-        messagebox.showinfo("Pages Saved", f"Selected pages have been saved to '{output_dir}'.")
+    return {"folder": str(folder), "entries": entries}, f"Loaded {len(entries)} PDF(s) from {folder}."
 
 
-def main() -> None:
-    root = tk.Tk()
-    app = ReportApp(root)
-    root.mainloop()
+def _cycle_match(state: Dict, entry_idx: int, category: str, forward: bool) -> Tuple[Dict, str]:
+    state_copy = deepcopy(state)
+    entry = state_copy["entries"][entry_idx]
+    matches = entry["matches"][category]
+    current = entry["current"].get(category)
+    if not matches or current is None:
+        return state, f"No matches available for {category} in {Path(entry['path']).name}."
+
+    new_index = current + (1 if forward else -1)
+    if new_index < 0:
+        return state, "Reached the first matched page."
+    if new_index >= len(matches):
+        return state, "Reached the last matched page."
+
+    entry["current"][category] = new_index
+    return state_copy, ""
+
+
+def _apply_manual_selection(state: Dict, entry_idx: int, category: str, page_number: int) -> Tuple[Dict, str]:
+    if page_number <= 0:
+        return state, "Page number must be positive."
+
+    state_copy = deepcopy(state)
+    entry = state_copy["entries"][entry_idx]
+    total_pages = entry["total_pages"]
+    if page_number > total_pages:
+        return state, f"Page {page_number} exceeds total pages ({total_pages})."
+
+    page_index = page_number - 1
+    matches = entry["matches"][category]
+    for idx, match in enumerate(matches):
+        if match["page_index"] == page_index:
+            entry["current"][category] = idx
+            return state_copy, ""
+
+    pdf_path = Path(entry["path"])
+    image_b64 = _render_page_base64_from_path(pdf_path, page_index)
+    matches.append(
+        {
+            "page_index": page_index,
+            "source": "manual",
+            "pattern": None,
+            "image": image_b64,
+        }
+    )
+    entry["current"][category] = len(matches) - 1
+    return state_copy, ""
+
+
+def _export_selected_pages(state: Dict) -> str:
+    folder = Path(state["folder"])
+    output_dir = folder / "cut"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for entry in state["entries"]:
+        reader = PdfReader(entry["path"])
+        for category in COLUMNS:
+            current_index = entry["current"].get(category)
+            matches = entry["matches"].get(category, [])
+            if current_index is None or not matches:
+                continue
+            current_index = max(0, min(current_index, len(matches) - 1))
+            match = matches[current_index]
+            page_index = match["page_index"]
+            if page_index >= len(reader.pages):
+                continue
+            writer = PdfWriter()
+            writer.add_page(reader.pages[page_index])
+            output_path = output_dir / f"{Path(entry['path']).stem}_{category}.pdf"
+            with output_path.open("wb") as fh:
+                writer.write(fh)
+    return f"Selected pages saved to '{output_dir}'."
+
+
+app = Dash(__name__)
+app.title = "Annual Report Analyst"
+
+
+@app.server.route("/pdf/<path:relative_path>")
+def serve_pdf(relative_path: str):
+    pdf_path = (BASE_DIR / relative_path).resolve()
+    if BASE_DIR not in pdf_path.parents and pdf_path != BASE_DIR:
+        abort(404)
+    if not pdf_path.exists():
+        abort(404)
+    return send_file(str(pdf_path), mimetype="application/pdf")
+
+
+def _company_options() -> List[Dict[str, str]]:
+    if not COMPANIES_DIR.exists():
+        return []
+    options = []
+    for child in sorted(COMPANIES_DIR.iterdir()):
+        if child.is_dir():
+            options.append({"label": child.name, "value": child.name})
+    return options
+
+
+def _default_text(column: str) -> str:
+    return "\n".join(DEFAULT_PATTERNS[column])
+
+
+company_options = _company_options()
+default_company = company_options[0]["value"] if company_options else None
+pattern_defaults = {column: _default_text(column) for column in COLUMNS}
+default_state, default_message = (None, "")
+if default_company:
+    default_state, default_message = _load_company_data(default_company, pattern_defaults)
+
+
+def _build_cell(entry_idx: int, category: str, entry: Dict) -> html.Div:
+    matches: List[Dict] = entry["matches"][category]
+    current_index = entry["current"].get(category)
+    info_text = "No matches found"
+    image_component = html.Div("No preview", className="no-preview")
+    if matches and current_index is not None and 0 <= current_index < len(matches):
+        match = matches[current_index]
+        info_parts = [f"Match {current_index + 1}/{len(matches)}", f"Page {match['page_index'] + 1}"]
+        if match["source"] == "manual":
+            info_parts.append("(manual)")
+        if match.get("pattern"):
+            info_parts.append(match["pattern"])
+        info_text = " | ".join(info_parts)
+        image_component = html.Img(
+            src=f"data:image/png;base64,{match['image']}",
+            id={"type": "nav", "entry": entry_idx, "category": category, "action": "next"},
+            className="page-preview",
+            title="Click to go to the next match",
+        )
+
+    controls = html.Div(
+        [
+            html.Button(
+                "Prev",
+                id={"type": "nav", "entry": entry_idx, "category": category, "action": "prev"},
+                className="nav-button",
+            ),
+            html.Button(
+                "Next",
+                id={"type": "nav", "entry": entry_idx, "category": category, "action": "next_button"},
+                className="nav-button",
+            ),
+        ],
+        className="nav-controls",
+    )
+
+    manual_controls = html.Div(
+        [
+            dcc.Input(
+                id={"type": "manual-input", "entry": entry_idx, "category": category},
+                type="number",
+                min=1,
+                placeholder="Page #",
+                className="manual-input",
+            ),
+            html.Button(
+                "Set Page",
+                id={"type": "manual-set", "entry": entry_idx, "category": category},
+                className="nav-button",
+            ),
+            html.A(
+                "Open PDF",
+                href=f"/pdf/{Path(entry['path']).relative_to(BASE_DIR)}",
+                target="_blank",
+                className="open-link",
+            ),
+        ],
+        className="manual-controls",
+    )
+
+    return html.Div(
+        [
+            image_component,
+            html.Div(info_text, className="cell-info"),
+            controls,
+            manual_controls,
+        ],
+        className="grid-cell",
+    )
+
+
+app.layout = html.Div(
+    [
+        html.Style(
+            """
+            body { font-family: Arial, sans-serif; background-color: #f4f6f8; margin: 0; }
+            .app-container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+            .controls { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; align-items: center; }
+            .controls > * { flex: 1 1 200px; }
+            .pattern-area { width: 100%; min-height: 120px; }
+            .pattern-container { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-bottom: 12px; }
+            .grid { display: grid; grid-template-columns: 1.2fr repeat(3, 1fr); gap: 12px; }
+            .grid-header { font-weight: bold; }
+            .grid-row { background: #fff; border-radius: 8px; padding: 12px; display: contents; }
+            .grid-label { background: #fff; border-radius: 8px; padding: 12px; display: flex; align-items: center; font-weight: 600; }
+            .grid-cell { background: #fff; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+            .page-preview { max-width: 100%; border-radius: 4px; box-shadow: 0 2px 6px rgba(0,0,0,0.12); cursor: pointer; }
+            .cell-info { font-size: 13px; text-align: center; color: #374151; }
+            .nav-controls, .manual-controls { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+            .nav-button { padding: 6px 12px; border-radius: 4px; border: 1px solid #d1d5db; background: #e5e7eb; cursor: pointer; }
+            .nav-button:hover { background: #d1d5db; }
+            .manual-input { width: 90px; padding: 4px 6px; }
+            .open-link { align-self: center; font-size: 13px; }
+            .no-preview { font-size: 13px; color: #6b7280; }
+            .status { margin-top: 16px; font-size: 14px; color: #2563eb; }
+            .confirm-container { margin-top: 24px; display: flex; gap: 12px; align-items: center; }
+            .confirm-button { padding: 8px 16px; border-radius: 6px; border: none; background: #2563eb; color: #fff; cursor: pointer; }
+            .confirm-button:disabled { background: #9ca3af; cursor: not-allowed; }
+            .header { margin-bottom: 16px; }
+            """
+        ),
+        html.Div(
+            [
+                html.H1("Annual Report Analyst", className="header"),
+                html.Div(
+                    [
+                        dcc.Dropdown(
+                            id="company-dropdown",
+                            options=company_options,
+                            placeholder="Select a company",
+                            value=default_company,
+                            clearable=False,
+                        ),
+                        html.Button("Apply Patterns", id="apply-button", className="nav-button"),
+                    ],
+                    className="controls",
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Label(column),
+                                dcc.Textarea(
+                                    id={"type": "pattern", "column": column},
+                                    value=pattern_defaults[column],
+                                    className="pattern-area",
+                                ),
+                            ],
+                            className="pattern-block",
+                        )
+                        for column in COLUMNS
+                    ],
+                    className="pattern-container",
+                ),
+                html.Div(id="grid-container", className="grid"),
+                html.Div(
+                    [
+                        html.Button("Confirm", id="confirm-button", className="confirm-button"),
+                        html.Div(default_message, id="status-message", className="status"),
+                    ],
+                    className="confirm-container",
+                ),
+                dcc.Store(id="app-state", data=default_state),
+            ],
+            className="app-container",
+        ),
+    ]
+)
+
+
+@app.callback(
+    Output("app-state", "data"),
+    Output("status-message", "children"),
+    Input("apply-button", "n_clicks"),
+    State("company-dropdown", "value"),
+    State({"type": "pattern", "column": ALL}, "value"),
+    prevent_initial_call=True,
+)
+def load_data(_n_clicks, company, pattern_values):
+    pattern_inputs = {column: pattern_values[idx] if pattern_values and idx < len(pattern_values) else "" for idx, column in enumerate(COLUMNS)}
+    state, message = _load_company_data(company, pattern_inputs)
+    return state, message
+
+
+@app.callback(
+    Output("grid-container", "children"),
+    Input("app-state", "data"),
+)
+def rebuild_grid(state):
+    headers = [html.Div("PDF", className="grid-header")] + [html.Div(column, className="grid-header") for column in COLUMNS]
+    if not state or not state.get("entries"):
+        return [html.Div(headers, className="grid-row")]
+
+    rows: List[html.Div] = [html.Div(headers, className="grid-row")]
+    for entry_idx, entry in enumerate(state["entries"]):
+        label = html.Div(entry["display_name"], className="grid-label")
+        cells = [label]
+        for category in COLUMNS:
+            cells.append(_build_cell(entry_idx, category, entry))
+        rows.append(html.Div(cells, className="grid-row"))
+    return rows
+
+
+@app.callback(
+    Output("app-state", "data", allow_duplicate=True),
+    Output("status-message", "children", allow_duplicate=True),
+    Input({"type": "nav", "entry": ALL, "category": ALL, "action": ALL}, "n_clicks"),
+    State("app-state", "data"),
+    prevent_initial_call=True,
+)
+def handle_navigation(_clicks, state):
+    if not state:
+        return no_update, no_update
+    ctx = callback_context
+    if not ctx.triggered:
+        return no_update, no_update
+    triggered_id = ctx.triggered_id
+    if not isinstance(triggered_id, dict):
+        return no_update, no_update
+    entry_idx = int(triggered_id.get("entry", 0))
+    category = triggered_id.get("category")
+    action = triggered_id.get("action")
+    forward = action in ("next", "next_button")
+    if category not in COLUMNS:
+        return no_update, no_update
+    new_state, message = _cycle_match(state, entry_idx, category, forward=forward)
+    if new_state is state:
+        return no_update, message or no_update
+    return new_state, message
+
+
+@app.callback(
+    Output("app-state", "data", allow_duplicate=True),
+    Output("status-message", "children", allow_duplicate=True),
+    Input({"type": "manual-set", "entry": ALL, "category": ALL}, "n_clicks"),
+    State({"type": "manual-input", "entry": ALL, "category": ALL}, "value"),
+    State("app-state", "data"),
+    prevent_initial_call=True,
+)
+def handle_manual_selection(_clicks, values, state):
+    if not state:
+        return no_update, no_update
+    ctx = callback_context
+    if not ctx.triggered:
+        return no_update, no_update
+    triggered_id = ctx.triggered_id
+    if not isinstance(triggered_id, dict):
+        return no_update, no_update
+    entry_idx = int(triggered_id.get("entry", 0))
+    category = triggered_id.get("category")
+    if category not in COLUMNS:
+        return no_update, no_update
+
+    index = None
+    if values:
+        total_categories = len(COLUMNS)
+        index = entry_idx * total_categories + COLUMNS.index(category)
+        if index >= len(values):
+            index = None
+    page_value = values[index] if values and index is not None else None
+    if page_value is None:
+        return no_update, "Enter a page number before applying."
+    new_state, message = _apply_manual_selection(state, entry_idx, category, int(page_value))
+    if new_state is state:
+        return no_update, message or no_update
+    return new_state, message
+
+
+@app.callback(
+    Output("status-message", "children", allow_duplicate=True),
+    Input("confirm-button", "n_clicks"),
+    State("app-state", "data"),
+    prevent_initial_call=True,
+)
+def confirm_selection(_n_clicks, state):
+    if not state:
+        return "Load PDFs before confirming selections."
+    message = _export_selected_pages(state)
+    return message
 
 
 if __name__ == "__main__":
-    main()
+    app.run_server(debug=False, host="0.0.0.0")
