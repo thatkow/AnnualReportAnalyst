@@ -261,7 +261,51 @@ class ReportApp:
         if not self.folder_path.get():
             messagebox.showinfo("Select Folder", "Please select a folder before applying patterns.")
             return
-        self.load_pdfs()
+        if not self.pdf_entries:
+            self.load_pdfs()
+            return
+
+        prev_patterns = {key: list(value) for key, value in self.config_data.get("patterns", {}).items()}
+        prev_case = {key: bool(value) for key, value in self.config_data.get("case_insensitive", {}).items()}
+        prev_whitespace = {key: bool(value) for key, value in self.config_data.get("space_as_whitespace", {}).items()}
+        prev_year_patterns = list(self.config_data.get("year_patterns", YEAR_DEFAULT_PATTERNS))
+        prev_year_case = bool(self.config_data.get("year_case_insensitive", True))
+        prev_year_whitespace = bool(self.config_data.get("year_space_as_whitespace", False))
+
+        pattern_map, year_patterns = self._gather_patterns()
+
+        new_patterns = self.config_data.get("patterns", {})
+        new_case = self.config_data.get("case_insensitive", {})
+        new_whitespace = self.config_data.get("space_as_whitespace", {})
+
+        changed_columns = set()
+        for column in COLUMNS:
+            old_patterns = prev_patterns.get(column, [])
+            new_column_patterns = new_patterns.get(column, [])
+            if old_patterns != new_column_patterns:
+                changed_columns.add(column)
+                continue
+            old_case = prev_case.get(column, True)
+            new_case_flag = bool(new_case.get(column, True))
+            old_whitespace = prev_whitespace.get(column, False)
+            new_whitespace_flag = bool(new_whitespace.get(column, False))
+            if old_case != new_case_flag or old_whitespace != new_whitespace_flag:
+                changed_columns.add(column)
+
+        new_year_patterns = list(self.config_data.get("year_patterns", YEAR_DEFAULT_PATTERNS))
+        new_year_case = bool(self.config_data.get("year_case_insensitive", True))
+        new_year_whitespace = bool(self.config_data.get("year_space_as_whitespace", False))
+
+        year_changed = (
+            prev_year_patterns != new_year_patterns
+            or prev_year_case != new_year_case
+            or prev_year_whitespace != new_year_whitespace
+        )
+
+        if not changed_columns and not year_changed:
+            return
+
+        self._rescan_entries(pattern_map, year_patterns, changed_columns, year_changed)
 
     def load_pdfs(self) -> None:
         folder = self.folder_path.get()
@@ -387,6 +431,88 @@ class ReportApp:
         if match.source == "manual":
             info_parts.append("(manual)")
         cell.update_display(photo, " | ".join(info_parts))
+
+    def _rescan_entries(
+        self,
+        pattern_map: Dict[str, List[re.Pattern[str]]],
+        year_patterns: List[re.Pattern[str]],
+        columns: set[str],
+        year_changed: bool,
+    ) -> None:
+        for entry in self.pdf_entries:
+            previous_pages: Dict[str, Optional[int]] = {}
+            manual_matches: Dict[str, List[Match]] = {}
+            new_matches: Dict[str, List[Match]] = {column: [] for column in columns}
+
+            for column in columns:
+                existing_matches = entry.matches.get(column, [])
+                manual_matches[column] = [m for m in existing_matches if m.source == "manual"]
+                current_index = entry.current_index.get(column)
+                if current_index is not None and 0 <= current_index < len(existing_matches):
+                    previous_pages[column] = existing_matches[current_index].page_index
+                else:
+                    previous_pages[column] = None
+
+            detected_year: Optional[str] = None
+
+            for page_index in range(len(entry.doc)):
+                page = entry.doc.load_page(page_index)
+                page_text = page.get_text("text")
+
+                if year_changed and detected_year is None:
+                    for pattern in year_patterns:
+                        year_match = pattern.search(page_text)
+                        if year_match:
+                            if year_match.groups():
+                                detected_year = year_match.group(1)
+                            else:
+                                detected_year = year_match.group(0)
+                            break
+
+                for column in columns:
+                    compiled_patterns = pattern_map.get(column, [])
+                    for pattern in compiled_patterns:
+                        if pattern.search(page_text):
+                            new_matches[column].append(
+                                Match(page_index=page_index, source="regex", pattern=pattern.pattern)
+                            )
+                            break
+
+            for column in columns:
+                matches = new_matches[column]
+                manual = manual_matches[column]
+                manual_pages = {match.page_index for match in matches}
+                for manual_match in manual:
+                    if manual_match.page_index not in manual_pages:
+                        matches.append(manual_match)
+                entry.matches[column] = matches
+
+                if matches:
+                    target_page = previous_pages[column]
+                    if target_page is not None:
+                        for idx, match in enumerate(matches):
+                            if match.page_index == target_page:
+                                entry.current_index[column] = idx
+                                break
+                        else:
+                            entry.current_index[column] = 0
+                    else:
+                        entry.current_index[column] = 0
+                else:
+                    entry.current_index[column] = None
+
+                self._update_cell(entry, column)
+
+            if year_changed:
+                if detected_year is not None:
+                    entry.year = detected_year
+                    year_var = self.year_vars.get(entry.path)
+                    if year_var is not None and year_var.get() != detected_year:
+                        year_var.set(detected_year)
+                else:
+                    year_var = self.year_vars.get(entry.path)
+                    if year_var is not None and year_var.get() != entry.year:
+                        year_var.set(entry.year)
 
     def _render_page(self, doc: fitz.Document, page_index: int, target_width: int) -> Optional[ImageTk.PhotoImage]:
         try:
