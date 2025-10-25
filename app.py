@@ -2,11 +2,13 @@ import csv
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from tkinter import messagebox, simpledialog, ttk
+from datetime import datetime, timedelta
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -321,6 +323,8 @@ class ReportApp:
         self._thumbnail_resize_job: Optional[str] = None
         self.company_tabs: Dict[str, "ReportApp"] = {}
         self.company_frames: Dict[str, ttk.Frame] = {}
+        self.downloads_dir_var = tk.StringVar(master=self.root)
+        self.recent_download_minutes_var = tk.IntVar(master=self.root, value=5)
 
         self._build_ui()
         self._load_pattern_config()
@@ -330,6 +334,7 @@ class ReportApp:
 
     def _build_ui(self) -> None:
         if not self.embedded:
+            self._create_menus()
             top_frame = ttk.Frame(self.root, padding=8)
             top_frame.pack(fill=tk.X)
             company_label = ttk.Label(top_frame, text="Company:")
@@ -341,8 +346,6 @@ class ReportApp:
             folder_entry.pack(side=tk.LEFT, padx=4)
             load_button = ttk.Button(top_frame, text="Load PDFs", command=self._open_company_tab)
             load_button.pack(side=tk.LEFT, padx=4)
-            new_company_button = ttk.Button(top_frame, text="New Company", command=self.create_company)
-            new_company_button.pack(side=tk.LEFT, padx=(0, 4))
             self._refresh_company_options()
             self.company_notebook = ttk.Notebook(self.root)
             self.company_notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
@@ -632,6 +635,154 @@ class ReportApp:
 
         self._rescan_entries(pattern_map, year_patterns, changed_columns, year_changed)
 
+    def _create_menus(self) -> None:
+        if self.embedded:
+            return
+        menubar = tk.Menu(self.root)
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="New Company", command=self.create_company)
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        configuration_menu = tk.Menu(menubar, tearoff=False)
+        configuration_menu.add_command(label="Set Downloads Dir", command=self._set_downloads_dir)
+        configuration_menu.add_command(
+            label="Set Download Window (minutes)",
+            command=self._set_download_window,
+        )
+        menubar.add_cascade(label="Configuration", menu=configuration_menu)
+        try:
+            self.root.configure(menu=menubar)
+        except tk.TclError:
+            pass
+
+    def _set_downloads_dir(self) -> None:
+        initial = self.downloads_dir_var.get() or str(Path.home())
+        try:
+            selected = filedialog.askdirectory(
+                parent=self.root,
+                initialdir=initial,
+                title="Select Downloads Directory",
+            )
+        except tk.TclError:
+            return
+        if not selected:
+            return
+        self.downloads_dir_var.set(selected)
+        self.config_data["downloads_dir"] = selected
+        self._write_config()
+
+    def _set_download_window(self) -> None:
+        current_value = max(1, self.recent_download_minutes_var.get())
+        value = simpledialog.askinteger(
+            "Download Window",
+            "Enter the number of minutes to consider downloads recent:",
+            parent=self.root,
+            minvalue=1,
+            initialvalue=current_value,
+        )
+        if value is None:
+            return
+        self.recent_download_minutes_var.set(value)
+        self.config_data["downloads_minutes"] = int(value)
+        self._write_config()
+
+    def _collect_recent_downloads(self) -> List[Path]:
+        downloads_dir = self.downloads_dir_var.get().strip()
+        if not downloads_dir:
+            messagebox.showinfo(
+                "Downloads Directory",
+                "Please configure the downloads directory from Configuration → Set Downloads Dir.",
+            )
+            return []
+        directory = Path(downloads_dir)
+        if not directory.exists():
+            messagebox.showerror("Downloads Directory", f"The folder '{downloads_dir}' does not exist.")
+            return []
+
+        minutes = self.recent_download_minutes_var.get()
+        if minutes <= 0:
+            minutes = 5
+            self.recent_download_minutes_var.set(minutes)
+            self.config_data["downloads_minutes"] = minutes
+            self._write_config()
+        cutoff_ts = (datetime.now() - timedelta(minutes=minutes)).timestamp()
+
+        recent: List[tuple[float, Path]] = []
+        for path in directory.iterdir():
+            if not path.is_file() or path.suffix.lower() != ".pdf":
+                continue
+            try:
+                stat_info = path.stat()
+            except OSError:
+                continue
+            if stat_info.st_mtime >= cutoff_ts:
+                recent.append((stat_info.st_mtime, path))
+
+        recent.sort(key=lambda item: item[0], reverse=True)
+        return [path for _mtime, path in recent]
+
+    def _show_recent_download_previews(self, pdf_paths: List[Path]) -> tk.Toplevel:
+        window = tk.Toplevel(self.root)
+        window.title("Recent Downloads Preview")
+        window.transient(self.root)
+
+        container = ttk.Frame(window, padding=8)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(container, borderwidth=0)
+        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        inner = ttk.Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(_: tk.Event) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        inner.bind("<Configure>", _on_inner_configure)
+
+        def _on_canvas_configure(event: tk.Event) -> None:  # type: ignore[override]
+            canvas.itemconfigure(window_id, width=event.width)
+
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        previews: List[ImageTk.PhotoImage] = []
+        for pdf_path in pdf_paths:
+            item_frame = ttk.Frame(inner, padding=8)
+            item_frame.pack(fill=tk.X, expand=True, pady=4)
+            modified_text = ""
+            try:
+                modified = datetime.fromtimestamp(pdf_path.stat().st_mtime)
+                modified_text = modified.strftime("%Y-%m-%d %H:%M")
+            except OSError:
+                pass
+            header = pdf_path.name if not modified_text else f"{pdf_path.name} (modified {modified_text})"
+            ttk.Label(item_frame, text=header, font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+            try:
+                doc = fitz.open(pdf_path)
+            except Exception as exc:  # pragma: no cover - guard for invalid PDFs
+                ttk.Label(item_frame, text=f"Unable to open PDF: {exc}").pack(anchor="w", pady=(4, 0))
+                continue
+            try:
+                photo = self._render_page(doc, 0, self.thumbnail_width_var.get())
+            finally:
+                doc.close()
+            if photo is None:
+                ttk.Label(item_frame, text="Preview unavailable").pack(anchor="w", pady=(4, 0))
+            else:
+                previews.append(photo)
+                ttk.Label(item_frame, image=photo).pack(anchor="w", pady=(4, 0))
+
+        window.preview_images = previews  # type: ignore[attr-defined]
+        window.update_idletasks()
+        try:
+            window.lift()
+        except tk.TclError:
+            pass
+        return window
+
     def load_pdfs(self) -> None:
         folder = self.folder_path.get()
         if not folder:
@@ -705,13 +856,29 @@ class ReportApp:
     def create_company(self) -> None:
         if self.embedded:
             return
+        preview_window: Optional[tk.Toplevel] = None
+        recent_pdfs = self._collect_recent_downloads()
+        if recent_pdfs:
+            preview_window = self._show_recent_download_previews(recent_pdfs)
+        else:
+            downloads_dir = self.downloads_dir_var.get().strip()
+            if downloads_dir:
+                messagebox.showinfo(
+                    "Recent Downloads",
+                    "No recently downloaded PDFs were found in the configured downloads folder.",
+                )
+
         name = simpledialog.askstring("New Company", "Enter a name for the new company:", parent=self.root)
         if name is None:
+            if preview_window is not None and preview_window.winfo_exists():
+                preview_window.destroy()
             return
 
         normalized = name.strip()
         if not normalized:
             messagebox.showwarning("Invalid Name", "Company name cannot be empty.")
+            if preview_window is not None and preview_window.winfo_exists():
+                preview_window.destroy()
             return
 
         safe_name = re.sub(r"[\\/:*?\"<>|]", "_", normalized).strip().strip(".")
@@ -720,6 +887,8 @@ class ReportApp:
                 "Invalid Name",
                 "Company name contains only unsupported characters. Please choose a different name.",
             )
+            if preview_window is not None and preview_window.winfo_exists():
+                preview_window.destroy()
             return
 
         if safe_name != normalized:
@@ -734,7 +903,18 @@ class ReportApp:
             raw_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             messagebox.showerror("Create Company", f"Could not create folders for '{safe_name}': {exc}")
+            if preview_window is not None and preview_window.winfo_exists():
+                preview_window.destroy()
             return
+
+        copied_files = 0
+        for pdf_path in recent_pdfs:
+            try:
+                destination = self._ensure_unique_path(raw_dir / pdf_path.name)
+                shutil.copy2(pdf_path, destination)
+                copied_files += 1
+            except Exception as exc:
+                messagebox.showwarning("Copy PDF", f"Could not copy '{pdf_path.name}': {exc}")
 
         self._refresh_company_options()
         if hasattr(self, "company_combo"):
@@ -746,6 +926,10 @@ class ReportApp:
 
         self._open_in_file_manager(raw_dir)
         self._open_company_tab()
+        if preview_window is not None and preview_window.winfo_exists():
+            preview_window.destroy()
+        if copied_files:
+            messagebox.showinfo("Create Company", f"Copied {copied_files} PDF(s) into '{safe_name}/raw'.")
 
     def _open_in_file_manager(self, path: Path) -> None:
         try:
@@ -1701,6 +1885,7 @@ class ReportApp:
     def _load_pattern_config(self) -> None:
         if not self.pattern_config_path.exists():
             self._config_loaded = True
+            self._ensure_download_settings()
             return
         try:
             with self.pattern_config_path.open("r", encoding="utf-8") as fh:
@@ -1735,6 +1920,7 @@ class ReportApp:
         self.last_company_preference = data.get("last_company", "")
         if "api_key" in data:
             self.api_key_var.set(str(data.get("api_key", "")))
+        self._ensure_download_settings()
         self._apply_last_company_selection()
         self._config_loaded = True
 
@@ -1742,6 +1928,27 @@ class ReportApp:
         if not enabled:
             return pattern
         return pattern.replace(" ", r"\s+")
+
+    def _ensure_download_settings(self) -> None:
+        configured_dir = str(self.config_data.get("downloads_dir", "")).strip()
+        if configured_dir:
+            self.downloads_dir_var.set(configured_dir)
+        elif not self.downloads_dir_var.get():
+            default_download_dir = Path.home() / "Downloads"
+            if default_download_dir.exists():
+                self.downloads_dir_var.set(str(default_download_dir))
+        if self.downloads_dir_var.get():
+            self.config_data["downloads_dir"] = self.downloads_dir_var.get()
+
+        configured_minutes = self.config_data.get("downloads_minutes")
+        if isinstance(configured_minutes, int) and configured_minutes > 0:
+            self.recent_download_minutes_var.set(configured_minutes)
+        else:
+            minutes_value = self.recent_download_minutes_var.get()
+            if minutes_value <= 0:
+                minutes_value = 5
+                self.recent_download_minutes_var.set(minutes_value)
+            self.config_data["downloads_minutes"] = minutes_value
 
     def _maximize_window(self, window: Optional[tk.Misc] = None) -> None:
         target = window or self.root
