@@ -1,4 +1,5 @@
 import csv
+import io
 import json
 import os
 import re
@@ -2129,8 +2130,17 @@ class ReportApp:
     def _read_csv_rows(self, csv_path: Path) -> List[List[str]]:
         try:
             with csv_path.open("r", encoding="utf-8", newline="") as fh:
-                reader = csv.reader(fh)
-                return [list(row) for row in reader]
+                text = fh.read()
+        except Exception:
+            return []
+
+        if not text.strip():
+            return []
+
+        delimiter = "\t" if "\t" in text else ","
+        try:
+            reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+            return [list(row) for row in reader]
         except Exception:
             return []
 
