@@ -1,24 +1,28 @@
-You are parsing an "Share Equity Statement"
+You are parsing an "Share Equity Statement".
 
 Task:
-1. Extract the Statement into one tab-separated table with these columns: CATEGORY, ITEM, and one column per date in format DD.MM.YYYY.
-   CATEGORY = "SHARES"
-   ITEM = "NUMBER OF SHARES"
-   Each date column = the number of shares on issue for that date (as-is, without multiplication).
-   Extract the current year and the previous year only
+1. Determine whether the statement notes a presentation scale such as "Amounts in thousands", "shares in millions", "(000s)", etc.
+   - Treat "thousand"/"000" → multiply every numeric value by 1,000.
+   - Treat "million"/"m" → multiply by 1,000,000.
+   - Treat "billion"/"bn" → multiply by 1,000,000,000.
+   - Use the scale that is explicitly tied to the table (e.g., a caption like "(shares in millions)"). If no clear scale appears, use factor 1.
+   - Apply the factor to every numeric cell you output. Leave blanks blank.
 
-2. Number formatting:
-   - Remove commas.
+2. Extract the statement into one tab-separated table with these columns: CATEGORY, ITEM, and one column per date in format DD.MM.YYYY.
+   - CATEGORY must be "SHARES" for every row.
+   - ITEM must be "NUMBER OF SHARES" for every row.
+   - Include the current year and the previous year only.
+
+3. Number formatting:
+   - Remove commas from numbers before applying the scale factor.
    - If no value is shown, leave cell blank (not 0).
 
-3. Output rules:
+4. Output rules:
    - Use exactly one tab as the separator.
    - Output one table, starting with headers.
    - Do not output explanations, just the table.
 
 Example:
 
-CATEGORY	ITEM	30.06.2018	30.06.2017
-"SHARES"	"NUMBER OF SHARES"	19653493	15062845
-
-
+CATEGORYITEM30.06.201830.06.2017
+"SHARES""NUMBER OF SHARES"1965349300015062845000
