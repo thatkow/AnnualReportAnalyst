@@ -2370,6 +2370,21 @@ class ReportApp:
         if not lines:
             return [["response"], [""]]
 
+        if any("\t" in line for line in lines):
+            rows: List[List[str]] = []
+            max_columns = 0
+            for line in lines:
+                parts = [segment.strip() for segment in line.split("\t")]
+                rows.append(parts)
+                if len(parts) > max_columns:
+                    max_columns = len(parts)
+            if max_columns:
+                for row in rows:
+                    if len(row) < max_columns:
+                        row.extend([""] * (max_columns - len(row)))
+            if rows:
+                return rows
+
         if all(
             line.startswith("|") and line.endswith("|") and "|" in line.strip("|") for line in lines
         ):
