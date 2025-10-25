@@ -277,13 +277,29 @@ class CategoryRow:
 
 
 class ReportApp:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(
+        self,
+        root: tk.Misc,
+        *,
+        embedded: bool = False,
+        company_name: Optional[str] = None,
+        folder_override: Optional[Path] = None,
+    ) -> None:
         self.root = root
-        self.root.title("Annual Report Analyst")
-        self.folder_path = tk.StringVar()
-        self.company_var = tk.StringVar()
-        self.api_key_var = tk.StringVar()
-        self.thumbnail_width_var = tk.IntVar(value=220)
+        self.embedded = embedded
+        if hasattr(self.root, "title") and not embedded:
+            try:
+                self.root.title("Annual Report Analyst")
+            except tk.TclError:
+                pass
+        self.folder_path = tk.StringVar(master=self.root)
+        if folder_override is not None:
+            self.folder_path.set(str(folder_override))
+        self.company_var = tk.StringVar(master=self.root)
+        if company_name:
+            self.company_var.set(company_name)
+        self.api_key_var = tk.StringVar(master=self.root)
+        self.thumbnail_width_var = tk.IntVar(master=self.root, value=220)
         self.pattern_texts: Dict[str, tk.Text] = {}
         self.case_insensitive_vars: Dict[str, tk.BooleanVar] = {}
         self.whitespace_as_space_vars: Dict[str, tk.BooleanVar] = {}
@@ -303,47 +319,50 @@ class ReportApp:
         self.assigned_pages_path: Optional[Path] = None
         self.scraped_images: List[ImageTk.PhotoImage] = []
         self._thumbnail_resize_job: Optional[str] = None
+        self.company_tabs: Dict[str, "ReportApp"] = {}
+        self.company_frames: Dict[str, ttk.Frame] = {}
 
         self._build_ui()
         self._load_pattern_config()
-        self._maximize_window()
-        self.root.after(0, self._load_pdfs_on_start)
+        if not self.embedded:
+            self._maximize_window()
+            self.root.after(0, self._load_pdfs_on_start)
 
     def _build_ui(self) -> None:
+        if not self.embedded:
+            top_frame = ttk.Frame(self.root, padding=8)
+            top_frame.pack(fill=tk.X)
+            company_label = ttk.Label(top_frame, text="Company:")
+            company_label.pack(side=tk.LEFT)
+            self.company_combo = ttk.Combobox(top_frame, textvariable=self.company_var, state="readonly", width=30)
+            self.company_combo.pack(side=tk.LEFT, padx=4)
+            self.company_combo.bind("<<ComboboxSelected>>", self._on_company_selected)
+            folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=60, state="readonly")
+            folder_entry.pack(side=tk.LEFT, padx=4)
+            load_button = ttk.Button(top_frame, text="Load PDFs", command=self._open_company_tab)
+            load_button.pack(side=tk.LEFT, padx=4)
+            new_company_button = ttk.Button(top_frame, text="New Company", command=self.create_company)
+            new_company_button.pack(side=tk.LEFT, padx=(0, 4))
+            self._refresh_company_options()
+            self.company_notebook = ttk.Notebook(self.root)
+            self.company_notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+            self.company_notebook.bind("<<NotebookTabChanged>>", self._on_company_tab_changed)
+            return
         top_frame = ttk.Frame(self.root, padding=8)
         top_frame.pack(fill=tk.X)
-
-        company_label = ttk.Label(top_frame, text="Company:")
-        company_label.pack(side=tk.LEFT)
-
-        self.company_combo = ttk.Combobox(top_frame, textvariable=self.company_var, state="readonly", width=30)
-        self.company_combo.pack(side=tk.LEFT, padx=4)
-        self.company_combo.bind("<<ComboboxSelected>>", self._on_company_selected)
-
-        folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=60, state="readonly")
-        folder_entry.pack(side=tk.LEFT, padx=4)
-
-        load_button = ttk.Button(top_frame, text="Load PDFs", command=self.load_pdfs)
-        load_button.pack(side=tk.LEFT, padx=4)
-
-        new_company_button = ttk.Button(top_frame, text="New Company", command=self.create_company)
-        new_company_button.pack(side=tk.LEFT, padx=(0, 4))
-
-        self._refresh_company_options()
-
+        ttk.Label(top_frame, text=f"Company: {self.company_var.get() or 'Unknown'}", font=("TkDefaultFont", 11, "bold")).pack(side=tk.LEFT)
+        folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=50, state="readonly")
+        folder_entry.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
+        ttk.Button(top_frame, text="Reload PDFs", command=self.load_pdfs).pack(side=tk.LEFT, padx=(8, 0))
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
         self.notebook = notebook
-
         review_container = ttk.Frame(notebook)
         notebook.add(review_container, text="Review")
-
         pattern_section = CollapsibleFrame(review_container, "Regex patterns (one per line)")
         pattern_section.pack(fill=tk.X, padx=8, pady=4)
-
         pattern_frame = ttk.Frame(pattern_section.content, padding=8)
         pattern_frame.pack(fill=tk.X)
-
         for idx, column in enumerate(COLUMNS):
             column_frame = ttk.Frame(pattern_frame)
             column_frame.grid(row=0, column=idx, padx=4, sticky="nsew")
@@ -363,10 +382,8 @@ class ReportApp:
                 text="Treat spaces as any whitespace",
                 variable=whitespace_var,
             ).pack(anchor="w")
-
         update_button = ttk.Button(pattern_section.content, text="Apply Patterns", command=self.apply_patterns)
         update_button.pack(pady=4)
-
         year_frame = ttk.Frame(pattern_section.content)
         year_frame.pack(fill=tk.X, pady=(8, 0))
         ttk.Label(year_frame, text="Year pattern").pack(anchor="w")
@@ -380,7 +397,6 @@ class ReportApp:
             text="Treat spaces as any whitespace",
             variable=self.year_whitespace_as_space_var,
         ).pack(anchor="w")
-
         size_frame = ttk.Frame(review_container, padding=(8, 0))
         size_frame.pack(fill=tk.X, padx=0, pady=(0, 4))
         ttk.Label(size_frame, text="Thumbnail width:").pack(side=tk.LEFT)
@@ -394,37 +410,28 @@ class ReportApp:
         self.thumbnail_scale.set(self.thumbnail_width_var.get())
         self.thumbnail_scale.pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
         ttk.Label(size_frame, textvariable=self.thumbnail_width_var).pack(side=tk.LEFT)
-
         grid_container = ttk.Frame(review_container)
         grid_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
-
         self.canvas = tk.Canvas(grid_container)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         scrollbar = ttk.Scrollbar(grid_container, orient=tk.VERTICAL, command=self.canvas.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.canvas.configure(yscrollcommand=scrollbar.set)
-
         self.canvas.bind("<Enter>", self._bind_mousewheel)
         self.canvas.bind("<Leave>", self._unbind_mousewheel)
-        # Linux scroll events
         self.canvas.bind("<Button-4>", self._on_mousewheel)
         self.canvas.bind("<Button-5>", self._on_mousewheel)
-
         self.inner_frame = ttk.Frame(self.canvas)
         self.canvas_window = self.canvas.create_window((0, 0), window=self.inner_frame, anchor="nw")
         self.inner_frame.bind("<Configure>", self._on_frame_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
-
         action_frame = ttk.Frame(review_container, padding=8)
         action_frame.pack(fill=tk.X, pady=(0, 8))
         self.commit_button = ttk.Button(action_frame, text="Commit", command=self.commit_assignments)
         self.commit_button.pack(side=tk.RIGHT)
-
         scraped_container = ttk.Frame(notebook)
         self.scraped_frame = scraped_container
         notebook.add(scraped_container, text="Scraped")
-
         scraped_controls = ttk.Frame(scraped_container, padding=8)
         scraped_controls.pack(fill=tk.X)
         ttk.Label(scraped_controls, text="API key:").pack(side=tk.LEFT)
@@ -436,22 +443,15 @@ class ReportApp:
         self.scrape_button.pack(side=tk.LEFT, padx=(8, 0))
         self.scrape_progress = ttk.Progressbar(scraped_controls, orient=tk.HORIZONTAL, mode="determinate", length=200)
         self.scrape_progress.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
-
         self.scraped_canvas = tk.Canvas(scraped_container)
         self.scraped_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         scraped_scrollbar = ttk.Scrollbar(scraped_container, orient=tk.VERTICAL, command=self.scraped_canvas.yview)
         scraped_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.scraped_canvas.configure(yscrollcommand=scraped_scrollbar.set)
-
         self.scraped_inner = ttk.Frame(self.scraped_canvas)
         self.scraped_window = self.scraped_canvas.create_window((0, 0), window=self.scraped_inner, anchor="nw")
-        self.scraped_inner.bind(
-            "<Configure>", lambda _e: self.scraped_canvas.configure(scrollregion=self.scraped_canvas.bbox("all"))
-        )
-        self.scraped_canvas.bind(
-            "<Configure>", lambda e: self.scraped_canvas.itemconfigure(self.scraped_window, width=e.width)
-        )
+        self.scraped_inner.bind("<Configure>", lambda _e: self.scraped_canvas.configure(scrollregion=self.scraped_canvas.bbox("all")))
+        self.scraped_canvas.bind("<Configure>", lambda e: self.scraped_canvas.itemconfigure(self.scraped_window, width=e.width))
 
     def _on_frame_configure(self, _: tk.Event) -> None:  # type: ignore[override]
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -488,6 +488,8 @@ class ReportApp:
             row.set_thumbnail_width(width)
 
     def _refresh_company_options(self) -> None:
+        if self.embedded or not hasattr(self, "company_combo"):
+            return
         if not self.companies_dir.exists():
             self.company_combo.configure(values=[])
             return
@@ -502,6 +504,46 @@ class ReportApp:
             self.company_combo.current(0)
             self._set_folder_from_company(companies[0])
 
+    def _open_company_tab(self) -> None:
+        if self.embedded:
+            return
+        company = self.company_var.get()
+        if not company:
+            messagebox.showinfo("Select Company", "Please choose a company before loading PDFs.")
+            return
+        folder = self.companies_dir / company / "raw"
+        self.folder_path.set(str(folder))
+        frame = self.company_frames.get(company)
+        if frame is None:
+            frame = ttk.Frame(self.company_notebook)
+            frame.pack(fill=tk.BOTH, expand=True)
+            child = ReportApp(
+                frame,
+                embedded=True,
+                company_name=company,
+                folder_override=folder,
+            )
+            self.company_frames[company] = frame
+            self.company_tabs[company] = child
+            self.company_notebook.add(frame, text=company)
+            self.company_notebook.select(frame)
+            self.root.after(0, child.load_pdfs)
+        else:
+            self.company_notebook.select(frame)
+
+    def _on_company_tab_changed(self, event: tk.Event) -> None:  # type: ignore[override]
+        if self.embedded:
+            return
+        widget = event.widget
+        if not isinstance(widget, ttk.Notebook):
+            return
+        tab_id = widget.select()
+        for name, frame in self.company_frames.items():
+            if str(frame) == tab_id:
+                self.company_var.set(name)
+                self.folder_path.set(str(self.companies_dir / name / "raw"))
+                break
+
     def _on_company_selected(self, _: tk.Event) -> None:  # type: ignore[override]
         company = self.company_var.get()
         self._set_folder_from_company(company)
@@ -511,13 +553,15 @@ class ReportApp:
             self.folder_path.set("")
             self.assigned_pages = {}
             self.assigned_pages_path = None
-            self._reset_review_scroll()
+            if self.embedded:
+                self._reset_review_scroll()
             return
         folder = self.companies_dir / company / "raw"
         self.folder_path.set(str(folder))
-        self._load_assigned_pages(company)
-        self._refresh_scraped_tab()
-        self._reset_review_scroll()
+        if self.embedded:
+            self._load_assigned_pages(company)
+            self._refresh_scraped_tab()
+            self._reset_review_scroll()
         if self._config_loaded:
             self._update_last_company(company)
 
@@ -655,6 +699,8 @@ class ReportApp:
         self.root.after_idle(_scroll)
 
     def create_company(self) -> None:
+        if self.embedded:
+            return
         name = simpledialog.askstring("New Company", "Enter a name for the new company:", parent=self.root)
         if name is None:
             return
@@ -687,13 +733,15 @@ class ReportApp:
             return
 
         self._refresh_company_options()
-        self.company_combo.set(safe_name)
+        if hasattr(self, "company_combo"):
+            self.company_combo.set(safe_name)
         self.company_var.set(safe_name)
         self._set_folder_from_company(safe_name)
         if self._config_loaded:
             self._update_last_company(safe_name)
 
         self._open_in_file_manager(raw_dir)
+        self._open_company_tab()
 
     def _open_in_file_manager(self, path: Path) -> None:
         try:
@@ -1708,6 +1756,8 @@ class ReportApp:
         target.geometry(f"{screen_width}x{screen_height}+0+0")
 
     def _apply_last_company_selection(self) -> None:
+        if self.embedded or not hasattr(self, "company_combo"):
+            return
         if not self.last_company_preference:
             return
         companies = list(self.company_combo["values"])
@@ -1886,7 +1936,7 @@ class ReportApp:
                         attempted += 1
                         if hasattr(self, "scrape_progress"):
                             self.scrape_progress["value"] = attempted
-                            self.root.update_idletasks()
+                            self.root.update()
                         continue
                     try:
                         page = entry.doc.load_page(page_index)
@@ -1896,7 +1946,7 @@ class ReportApp:
                         attempted += 1
                         if hasattr(self, "scrape_progress"):
                             self.scrape_progress["value"] = attempted
-                            self.root.update_idletasks()
+                            self.root.update()
                         continue
 
                     jobs.append(
@@ -1941,7 +1991,7 @@ class ReportApp:
 
                         if hasattr(self, "scrape_progress"):
                             self.scrape_progress["value"] = attempted
-                            self.root.update_idletasks()
+                            self.root.update()
 
             for entry_path, changed in metadata_changed.items():
                 if not changed:
