@@ -1557,12 +1557,38 @@ class ReportApp:
                 meta = metadata.get(category)
                 if not isinstance(meta, dict):
                     continue
-                csv_name = meta.get("csv")
                 page_index = meta.get("page_index")
-                if csv_name is None or page_index is None:
+                if page_index is None:
                     continue
-                csv_path = doc_dir / csv_name
-                if not csv_path.exists():
+                preview_mode: Optional[str] = None
+                preview_path: Optional[Path] = None
+                preview_text: Optional[str] = None
+                rows: List[List[str]] = []
+
+                txt_name = meta.get("txt")
+                if isinstance(txt_name, str) and txt_name:
+                    candidate = doc_dir / txt_name
+                    if candidate.exists():
+                        try:
+                            preview_text = candidate.read_text(encoding="utf-8")
+                        except Exception:
+                            preview_text = None
+                        else:
+                            rows = self._convert_response_to_rows(preview_text)
+                            preview_mode = "txt"
+                            preview_path = candidate
+
+                if not rows:
+                    csv_name = meta.get("csv")
+                    if isinstance(csv_name, str) and csv_name:
+                        candidate_csv = doc_dir / csv_name
+                        if candidate_csv.exists():
+                            rows = self._read_csv_rows(candidate_csv)
+                            if rows:
+                                preview_mode = "csv"
+                                preview_path = candidate_csv
+
+                if not rows:
                     continue
                 if not header_added:
                     header_frame = ttk.Frame(self.scraped_inner)
@@ -1574,7 +1600,7 @@ class ReportApp:
                     ).grid(row=0, column=0, sticky="w")
                     ttk.Label(
                         header_frame,
-                        text="Converted CSV",
+                        text="Parsed Output",
                         font=("TkDefaultFont", 10, "bold"),
                     ).grid(row=0, column=1, sticky="w")
                     header_frame.columnconfigure(0, weight=1)
@@ -1609,8 +1635,12 @@ class ReportApp:
                 ).grid(row=0, column=2, sticky="e", padx=(0, 4))
                 ttk.Button(
                     header_frame,
-                    text="View CSV",
-                    command=lambda path=csv_path: self._show_csv_preview(path),
+                    text="View TXT" if preview_mode == "txt" else "View CSV",
+                    command=(
+                        (lambda path=preview_path, text=preview_text: self._show_text_preview(path, text))
+                        if preview_mode == "txt"
+                        else (lambda path=preview_path: self._show_csv_preview(path) if path else None)
+                    ),
                     width=10,
                 ).grid(row=0, column=3, sticky="e", padx=(0, 4))
                 ttk.Button(
@@ -1639,12 +1669,11 @@ class ReportApp:
                 else:
                     ttk.Label(image_frame, text="Preview unavailable").pack(expand=True, fill=tk.BOTH)
 
-                rows = self._read_csv_rows(csv_path)
                 table_frame.columnconfigure(0, weight=1)
                 table_frame.rowconfigure(0, weight=1)
 
                 if not rows:
-                    ttk.Label(table_frame, text="CSV file is empty").grid(
+                    ttk.Label(table_frame, text="No data available").grid(
                         row=0, column=0, sticky="nsew"
                     )
                 else:
@@ -1707,14 +1736,14 @@ class ReportApp:
         if not self.pdf_entries:
             ttk.Label(
                 self.combined_header_frame,
-                text="Load PDFs to review scraped CSV headers.",
+                text="Load PDFs to review scraped output headers.",
             ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
             return
         scrape_root = self.companies_dir / company / "openapiscrape"
         if not scrape_root.exists():
             ttk.Label(
                 self.combined_header_frame,
-                text="Run AIScrape to populate CSV results for combination.",
+                text="Run AIScrape to populate scraped results for combination.",
             ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
             return
 
@@ -1731,13 +1760,22 @@ class ReportApp:
                 meta = metadata.get(category)
                 if not isinstance(meta, dict):
                     continue
-                csv_name = meta.get("csv")
-                if not isinstance(csv_name, str) or not csv_name:
-                    continue
-                csv_path = doc_dir / csv_name
-                if not csv_path.exists():
-                    continue
-                rows = self._read_csv_rows(csv_path)
+                rows: List[List[str]] = []
+                txt_name = meta.get("txt")
+                if isinstance(txt_name, str) and txt_name:
+                    txt_path = doc_dir / txt_name
+                    if txt_path.exists():
+                        try:
+                            text = txt_path.read_text(encoding="utf-8")
+                        except Exception:
+                            text = ""
+                        rows = self._convert_response_to_rows(text)
+                if not rows:
+                    csv_name = meta.get("csv")
+                    if isinstance(csv_name, str) and csv_name:
+                        csv_path = doc_dir / csv_name
+                        if csv_path.exists():
+                            rows = self._read_csv_rows(csv_path)
                 if not rows:
                     continue
                 headings = rows[0]
@@ -1774,7 +1812,7 @@ class ReportApp:
         if not pdf_entries_with_data:
             ttk.Label(
                 self.combined_header_frame,
-                text="No scraped CSV results available to combine.",
+                text="No scraped results available to combine.",
             ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
             return
 
@@ -1830,7 +1868,7 @@ class ReportApp:
                 if headers:
                     display_text = "\n".join(headers)
                 else:
-                    display_text = "No CSV"
+                    display_text = "No data"
                 ttk.Label(
                     self.combined_header_frame,
                     text=display_text,
@@ -1851,7 +1889,7 @@ class ReportApp:
     def _confirm_combined_table(self, auto: bool = False) -> None:
         if not self.combined_pdf_order or not self.combined_csv_sources:
             if not auto:
-                messagebox.showinfo("Combine CSV", "No scraped CSV data is available to combine.")
+                messagebox.showinfo("Combine Results", "No scraped data is available to combine.")
             return
 
         label_map: Dict[Path, str] = {}
@@ -1906,7 +1944,7 @@ class ReportApp:
         if not combined_rows:
             if not auto:
                 messagebox.showinfo(
-                    "Combine CSV", "No rows were available after processing the scraped CSV files."
+                    "Combine Results", "No rows were available after processing the scraped results."
                 )
             return
 
@@ -1954,7 +1992,7 @@ class ReportApp:
                     text=f"Combined CSV saved to: {combined_path}",
                 ).pack(anchor="w", padx=8, pady=(4, 0))
             except Exception as exc:
-                messagebox.showwarning("Combine CSV", f"Could not save combined CSV: {exc}")
+                messagebox.showwarning("Combine Results", f"Could not save combined CSV: {exc}")
 
     def _show_raw_text_dialog(self, entry: PDFEntry, page_index: int) -> None:
         try:
@@ -1987,6 +2025,53 @@ class ReportApp:
             button_frame,
             text="Copy",
             command=lambda: self._copy_to_clipboard(page_text),
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.wait_visibility()
+        dialog.focus_set()
+
+    def _show_text_preview(self, txt_path: Optional[Path], preloaded_text: Optional[str] = None) -> None:
+        if txt_path is None or not txt_path.exists():
+            messagebox.showinfo(
+                "View TXT", "The selected response file could not be found on disk."
+            )
+            return
+
+        text = preloaded_text
+        if text is None:
+            try:
+                text = txt_path.read_text(encoding="utf-8")
+            except Exception as exc:
+                messagebox.showwarning("View TXT", f"Could not read response file: {exc}")
+                return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Response Preview - {txt_path.name}")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        content_frame = ttk.Frame(dialog, padding=(12, 12, 12, 0))
+        content_frame.pack(fill=tk.BOTH, expand=True)
+        content_frame.columnconfigure(0, weight=1)
+        content_frame.rowconfigure(0, weight=1)
+
+        text_widget = tk.Text(content_frame, wrap="word", width=100, height=30)
+        text_widget.insert("1.0", text)
+        text_widget.configure(font=("TkFixedFont", 9), state="disabled")
+        text_widget.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(content_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        text_widget.configure(yscrollcommand=y_scroll.set)
+
+        button_frame = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        button_frame.pack(fill=tk.X)
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(
+            button_frame,
+            text="Copy",
+            command=lambda data=text: self._copy_to_clipboard(data),
         ).pack(side=tk.RIGHT, padx=(0, 8))
 
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
@@ -2575,16 +2660,12 @@ class ReportApp:
                 if not prompts.get(category):
                     continue
                 existing = metadata.get(category)
-                csv_exists = False
                 txt_exists = False
                 if isinstance(existing, dict):
-                    csv_name = existing.get("csv")
                     txt_name = existing.get("txt")
-                    if isinstance(csv_name, str) and csv_name:
-                        csv_exists = (doc_dir / csv_name).exists()
                     if isinstance(txt_name, str) and txt_name:
                         txt_exists = (doc_dir / txt_name).exists()
-                if csv_exists and txt_exists:
+                if txt_exists:
                     continue
                 entry_tasks.append((category, page_index))
 
@@ -2623,26 +2704,7 @@ class ReportApp:
             except Exception as exc:
                 return False, None, f"{job.entry_name} - {job.category}: Could not save response ({exc})"
 
-            rows = self._convert_response_to_rows(response_text)
-            csv_path = txt_path.with_suffix(".csv")
-
-            try:
-                self._write_csv_rows(rows, csv_path)
-            except Exception as exc:
-                try:
-                    txt_path.unlink(missing_ok=True)
-                except TypeError:
-                    try:
-                        if txt_path.exists():
-                            txt_path.unlink()
-                    except FileNotFoundError:
-                        pass
-                    except Exception:
-                        pass
-                return False, None, f"{job.entry_name} - {job.category}: Could not write CSV ({exc})"
-
             metadata_entry = {
-                "csv": csv_path.name,
                 "txt": txt_path.name,
                 "page_index": job.page_index,
                 "year": job.entry_year,
