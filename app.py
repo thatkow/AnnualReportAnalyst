@@ -575,8 +575,12 @@ class ReportApp:
         self._write_config()
 
     def _load_pdfs_on_start(self) -> None:
-        if self.folder_path.get():
-            self.load_pdfs()
+        if self.embedded:
+            if self.folder_path.get():
+                self.load_pdfs()
+        else:
+            if self.company_var.get():
+                self._open_company_tab()
 
     def apply_patterns(self) -> None:
         if not self.folder_path.get():
