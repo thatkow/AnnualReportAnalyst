@@ -325,6 +325,10 @@ class ReportApp:
         self.company_frames: Dict[str, ttk.Frame] = {}
         self.downloads_dir_var = tk.StringVar(master=self.root)
         self.recent_download_minutes_var = tk.IntVar(master=self.root, value=5)
+        self.combined_label_vars: Dict[Path, tk.StringVar] = {}
+        self.combined_csv_sources: Dict[Tuple[Path, str], Dict[str, Any]] = {}
+        self.combined_pdf_order: List[Path] = []
+        self.combined_result_tree: Optional[ttk.Treeview] = None
 
         self._build_ui()
         self._load_pattern_config()
@@ -455,6 +459,43 @@ class ReportApp:
         self.scraped_window = self.scraped_canvas.create_window((0, 0), window=self.scraped_inner, anchor="nw")
         self.scraped_inner.bind("<Configure>", lambda _e: self.scraped_canvas.configure(scrollregion=self.scraped_canvas.bbox("all")))
         self.scraped_canvas.bind("<Configure>", lambda e: self.scraped_canvas.itemconfigure(self.scraped_window, width=e.width))
+
+        combined_container = ttk.Frame(notebook)
+        self.combined_frame = combined_container
+        notebook.add(combined_container, text="Combined")
+        combined_controls = ttk.Frame(combined_container, padding=8)
+        combined_controls.pack(fill=tk.X)
+        ttk.Label(
+            combined_controls,
+            text="Review scraped headers and label the combined output columns before confirming.",
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.combine_confirm_button = ttk.Button(
+            combined_controls,
+            text="Confirm",
+            command=self._confirm_combined_table,
+            state="disabled",
+        )
+        self.combine_confirm_button.pack(side=tk.RIGHT)
+        combined_canvas = tk.Canvas(combined_container)
+        combined_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        combined_vscroll = ttk.Scrollbar(combined_container, orient=tk.VERTICAL, command=combined_canvas.yview)
+        combined_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        combined_hscroll = ttk.Scrollbar(combined_container, orient=tk.HORIZONTAL, command=combined_canvas.xview)
+        combined_hscroll.pack(side=tk.BOTTOM, fill=tk.X)
+        combined_canvas.configure(yscrollcommand=combined_vscroll.set, xscrollcommand=combined_hscroll.set)
+        self.combined_canvas = combined_canvas
+        self.combined_inner = ttk.Frame(combined_canvas)
+        self.combined_window = combined_canvas.create_window((0, 0), window=self.combined_inner, anchor="nw")
+        self.combined_inner.bind(
+            "<Configure>",
+            lambda _e: combined_canvas.configure(scrollregion=combined_canvas.bbox("all")),
+        )
+        self.combined_header_frame = ttk.Frame(self.combined_inner, padding=8)
+        self.combined_header_frame.grid(row=0, column=0, sticky="nsew")
+        self.combined_result_frame = ttk.Frame(self.combined_inner, padding=8)
+        self.combined_result_frame.grid(row=1, column=0, sticky="nsew")
+        self.combined_inner.columnconfigure(0, weight=1)
+        self.combined_inner.rowconfigure(1, weight=1)
 
     def _on_frame_configure(self, _: tk.Event) -> None:  # type: ignore[override]
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -1480,6 +1521,7 @@ class ReportApp:
         for child in self.scraped_inner.winfo_children():
             child.destroy()
         self.scraped_images.clear()
+        self._clear_combined_tab()
         if hasattr(self, "scrape_progress"):
             self.scrape_progress["value"] = 0
         company = self.company_var.get()
@@ -1629,6 +1671,277 @@ class ReportApp:
                             tree.insert("", tk.END, values=values)
 
                 row_index += 1
+
+        self._refresh_combined_tab()
+
+    def _clear_combined_tab(self) -> None:
+        if not hasattr(self, "combined_header_frame"):
+            return
+        for child in self.combined_header_frame.winfo_children():
+            child.destroy()
+        for child in self.combined_result_frame.winfo_children():
+            child.destroy()
+        self.combined_csv_sources.clear()
+        self.combined_pdf_order = []
+        self.combined_result_tree = None
+        if hasattr(self, "combine_confirm_button"):
+            self.combine_confirm_button.state(["disabled"])
+
+    def _refresh_combined_tab(self) -> None:
+        if not hasattr(self, "combined_header_frame"):
+            return
+        self._clear_combined_tab()
+        company = self.company_var.get()
+        if not company:
+            ttk.Label(
+                self.combined_header_frame,
+                text="Select a company and run AIScrape to review combined data.",
+            ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+            return
+        if not self.pdf_entries:
+            ttk.Label(
+                self.combined_header_frame,
+                text="Load PDFs to review scraped CSV headers.",
+            ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+            return
+        scrape_root = self.companies_dir / company / "openapiscrape"
+        if not scrape_root.exists():
+            ttk.Label(
+                self.combined_header_frame,
+                text="Run AIScrape to populate CSV results for combination.",
+            ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+            return
+
+        table_data: Dict[str, Dict[Path, List[str]]] = {category: {} for category in COLUMNS}
+        pdf_entries_with_data: List[PDFEntry] = []
+
+        for entry in self.pdf_entries:
+            doc_dir = scrape_root / entry.stem
+            metadata = self._load_doc_metadata(doc_dir)
+            if not metadata:
+                continue
+            entry_has_data = False
+            for category in COLUMNS:
+                meta = metadata.get(category)
+                if not isinstance(meta, dict):
+                    continue
+                csv_name = meta.get("csv")
+                if not isinstance(csv_name, str) or not csv_name:
+                    continue
+                csv_path = doc_dir / csv_name
+                if not csv_path.exists():
+                    continue
+                rows = self._read_csv_rows(csv_path)
+                if not rows:
+                    continue
+                headings = rows[0]
+                if not headings:
+                    continue
+                category_index: Optional[int] = None
+                item_index: Optional[int] = None
+                data_indices: List[int] = []
+                display_headers: List[str] = []
+                for idx, heading in enumerate(headings):
+                    normalized = heading.strip().lower()
+                    if normalized == "category":
+                        category_index = idx
+                    elif normalized == "item":
+                        item_index = idx
+                    else:
+                        data_indices.append(idx)
+                        display_headers.append(heading.strip() or f"Column {idx + 1}")
+                if category_index is None or item_index is None:
+                    continue
+                data_rows = rows[1:] if len(rows) > 1 else []
+                self.combined_csv_sources[(entry.path, category)] = {
+                    "rows": data_rows,
+                    "category_index": category_index,
+                    "item_index": item_index,
+                    "data_indices": data_indices,
+                    "headings": [headings[i] if i < len(headings) else "" for i in data_indices],
+                }
+                table_data[category][entry.path] = display_headers or ["(no data columns)"]
+                entry_has_data = True
+            if entry_has_data:
+                pdf_entries_with_data.append(entry)
+
+        if not pdf_entries_with_data:
+            ttk.Label(
+                self.combined_header_frame,
+                text="No scraped CSV results available to combine.",
+            ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+            return
+
+        current_paths = {entry.path for entry in pdf_entries_with_data}
+        for stale_path in list(self.combined_label_vars.keys()):
+            if stale_path not in current_paths:
+                self.combined_label_vars.pop(stale_path, None)
+
+        self.combined_pdf_order = [entry.path for entry in pdf_entries_with_data]
+
+        ttk.Label(self.combined_header_frame, text="", width=18).grid(row=0, column=0, padx=4, pady=4, sticky="w")
+        ttk.Label(
+            self.combined_header_frame,
+            text="PDF",
+            font=("TkDefaultFont", 10, "bold"),
+        ).grid(row=1, column=0, padx=4, pady=(0, 4), sticky="w")
+
+        for column_index, entry in enumerate(pdf_entries_with_data, start=1):
+            headers_for_default = next(
+                (table_data[category].get(entry.path) for category in COLUMNS if entry.path in table_data[category]),
+                None,
+            )
+            default_label = ""
+            if headers_for_default:
+                default_label = headers_for_default[0]
+            if not default_label:
+                default_label = entry.year or entry.path.stem
+            var = self.combined_label_vars.get(entry.path)
+            if var is None:
+                var = tk.StringVar(master=self.root, value=default_label)
+                self.combined_label_vars[entry.path] = var
+            elif not var.get():
+                var.set(default_label)
+            entry_widget = ttk.Entry(self.combined_header_frame, textvariable=var, width=18)
+            entry_widget.grid(row=0, column=column_index, padx=4, pady=4, sticky="ew")
+            ttk.Label(
+                self.combined_header_frame,
+                text=entry.path.name,
+                justify="center",
+                wraplength=200,
+            ).grid(row=1, column=column_index, padx=4, pady=(0, 4), sticky="ew")
+
+        start_row = 2
+        for offset, category in enumerate(COLUMNS):
+            row_index = start_row + offset
+            ttk.Label(
+                self.combined_header_frame,
+                text=category,
+                font=("TkDefaultFont", 10, "bold"),
+            ).grid(row=row_index, column=0, padx=4, pady=4, sticky="nw")
+            for column_index, entry in enumerate(pdf_entries_with_data, start=1):
+                headers = table_data[category].get(entry.path)
+                if headers:
+                    display_text = "\n".join(headers)
+                else:
+                    display_text = "No CSV"
+                ttk.Label(
+                    self.combined_header_frame,
+                    text=display_text,
+                    justify="left",
+                    wraplength=200,
+                ).grid(row=row_index, column=column_index, padx=4, pady=4, sticky="nw")
+
+        for column_index in range(len(pdf_entries_with_data) + 1):
+            weight = 0 if column_index == 0 else 1
+            self.combined_header_frame.columnconfigure(column_index, weight=weight)
+
+        if hasattr(self, "combine_confirm_button"):
+            self.combine_confirm_button.state(["!disabled"])
+
+    def _confirm_combined_table(self) -> None:
+        if not self.combined_pdf_order or not self.combined_csv_sources:
+            messagebox.showinfo("Combine CSV", "No scraped CSV data is available to combine.")
+            return
+
+        label_map: Dict[Path, str] = {}
+        for path in self.combined_pdf_order:
+            var = self.combined_label_vars.get(path)
+            label_value = var.get().strip() if var else ""
+            if not label_value:
+                label_value = path.stem
+            label_map[path] = label_value
+
+        combined_rows: Dict[Tuple[str, str], Dict[str, str]] = {}
+        column_order: List[str] = []
+
+        for path in self.combined_pdf_order:
+            label_value = label_map.get(path, path.stem)
+            for category in COLUMNS:
+                source = self.combined_csv_sources.get((path, category))
+                if not source:
+                    continue
+                data_indices: List[int] = source.get("data_indices", [])
+                if not data_indices:
+                    continue
+                headings: List[str] = source.get("headings", [])
+                rows: List[List[str]] = source.get("rows", [])
+                category_index = source.get("category_index")
+                item_index = source.get("item_index")
+                if not isinstance(category_index, int) or not isinstance(item_index, int):
+                    continue
+                for row in rows:
+                    if category_index >= len(row) or item_index >= len(row):
+                        continue
+                    category_value = row[category_index]
+                    item_value = row[item_index]
+                    key = (category_value, item_value)
+                    record = combined_rows.setdefault(
+                        key,
+                        {"Category": category_value, "Item": item_value},
+                    )
+                    for position, data_index in enumerate(data_indices):
+                        base_heading = ""
+                        if position < len(headings):
+                            base_heading = (headings[position] or "").strip()
+                        if not base_heading:
+                            base_heading = f"Column {data_index + 1}"
+                        label_text = label_value or path.stem
+                        column_name = f"{label_text} - {base_heading}" if base_heading else label_text
+                        if column_name not in column_order:
+                            column_order.append(column_name)
+                        value = row[data_index] if data_index < len(row) else ""
+                        record[column_name] = value
+
+        if not combined_rows:
+            messagebox.showinfo("Combine CSV", "No rows were available after processing the scraped CSV files.")
+            return
+
+        ordered_columns = ["Category", "Item", *column_order]
+        merged_records = list(combined_rows.values())
+        merged_records.sort(key=lambda r: (r.get("Category", ""), r.get("Item", "")))
+
+        for child in self.combined_result_frame.winfo_children():
+            child.destroy()
+
+        result_container = ttk.Frame(self.combined_result_frame)
+        result_container.pack(fill=tk.BOTH, expand=True)
+        result_container.columnconfigure(0, weight=1)
+        result_container.rowconfigure(0, weight=1)
+
+        tree = ttk.Treeview(result_container, columns=ordered_columns, show="headings")
+        tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttk.Scrollbar(result_container, orient=tk.VERTICAL, command=tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(result_container, orient=tk.HORIZONTAL, command=tree.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        for column_name in ordered_columns:
+            tree.heading(column_name, text=column_name)
+            tree.column(column_name, anchor="center", stretch=True, width=140)
+
+        for record in merged_records:
+            values = [record.get(column_name, "") for column_name in ordered_columns]
+            tree.insert("", tk.END, values=values)
+
+        self.combined_result_tree = tree
+
+        company = self.company_var.get()
+        if company:
+            scrape_root = self.companies_dir / company / "openapiscrape"
+            combined_path = scrape_root / "combined.csv"
+            try:
+                csv_rows = [ordered_columns]
+                for record in merged_records:
+                    csv_rows.append([record.get(column_name, "") for column_name in ordered_columns])
+                self._write_csv_rows(csv_rows, combined_path)
+                ttk.Label(
+                    self.combined_result_frame,
+                    text=f"Combined CSV saved to: {combined_path}",
+                ).pack(anchor="w", padx=8, pady=(4, 0))
+            except Exception as exc:
+                messagebox.showwarning("Combine CSV", f"Could not save combined CSV: {exc}")
 
     def _show_prompt_preview(self, entry: PDFEntry, category: str, page_index: int) -> None:
         company = self.company_var.get()
