@@ -1587,6 +1587,7 @@ class ReportApp:
                 header_frame.columnconfigure(1, weight=0)
                 header_frame.columnconfigure(2, weight=0)
                 header_frame.columnconfigure(3, weight=0)
+                header_frame.columnconfigure(4, weight=0)
                 ttk.Label(
                     header_frame,
                     text=f"{entry.path.name} - {category} (Page {int(page_index) + 1})",
@@ -1608,10 +1609,16 @@ class ReportApp:
                 ).grid(row=0, column=2, sticky="e", padx=(0, 4))
                 ttk.Button(
                     header_frame,
+                    text="View CSV",
+                    command=lambda path=csv_path: self._show_csv_preview(path),
+                    width=10,
+                ).grid(row=0, column=3, sticky="e", padx=(0, 4))
+                ttk.Button(
+                    header_frame,
                     text="Delete",
                     command=lambda d=doc_dir, c=category: self._delete_scrape_output(d, c),
                     width=10,
-                ).grid(row=0, column=3, sticky="e")
+                ).grid(row=0, column=4, sticky="e")
                 row_index += 1
 
                 image_frame = ttk.Frame(self.scraped_inner, padding=8)
@@ -1980,6 +1987,53 @@ class ReportApp:
             button_frame,
             text="Copy",
             command=lambda: self._copy_to_clipboard(page_text),
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.wait_visibility()
+        dialog.focus_set()
+
+    def _show_csv_preview(self, csv_path: Path) -> None:
+        if not csv_path.exists():
+            messagebox.showinfo(
+                "View CSV", "The selected CSV file could not be found on disk."
+            )
+            return
+
+        try:
+            csv_text = csv_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            messagebox.showwarning("View CSV", f"Could not read CSV file: {exc}")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"CSV Preview - {csv_path.name}")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        content_frame = ttk.Frame(dialog, padding=(12, 12, 12, 0))
+        content_frame.pack(fill=tk.BOTH, expand=True)
+        content_frame.columnconfigure(0, weight=1)
+        content_frame.rowconfigure(0, weight=1)
+
+        text_widget = tk.Text(content_frame, wrap="none", width=100, height=30)
+        text_widget.insert("1.0", csv_text)
+        text_widget.configure(font=("TkFixedFont", 9), state="disabled")
+        text_widget.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(content_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(content_frame, orient=tk.HORIZONTAL, command=text_widget.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        text_widget.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        button_frame = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        button_frame.pack(fill=tk.X)
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(
+            button_frame,
+            text="Copy",
+            command=lambda: self._copy_to_clipboard(csv_text),
         ).pack(side=tk.RIGHT, padx=(0, 8))
 
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
