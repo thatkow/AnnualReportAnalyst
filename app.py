@@ -1472,7 +1472,7 @@ class ReportApp:
                         selections[category] = int(page_index)
 
         self._write_assigned_pages()
-        messagebox.showinfo("Assignments Saved", "Assignments have been committed to assigned.json.")
+        self.scrape_selections()
 
     def _refresh_scraped_tab(self) -> None:
         if not hasattr(self, "scraped_inner"):
@@ -1544,7 +1544,9 @@ class ReportApp:
                 ttk.Button(
                     header_frame,
                     text="View Prompt",
-                    command=lambda c=category: self._show_prompt_preview(c),
+                    command=lambda e=entry, c=category, p=int(page_index): self._show_prompt_preview(
+                        e, c, p
+                    ),
                     width=12,
                 ).grid(row=0, column=1, sticky="e", padx=(0, 4))
                 ttk.Button(
@@ -1591,11 +1593,18 @@ class ReportApp:
                 text_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
                 rows = self._read_csv_rows(csv_path)
+                table_frame.columnconfigure(0, weight=1)
+                table_frame.rowconfigure(0, weight=1)
+
                 if not rows:
-                    ttk.Label(table_frame, text="CSV file is empty").pack(expand=True, fill=tk.BOTH)
+                    ttk.Label(table_frame, text="CSV file is empty").grid(
+                        row=0, column=0, sticky="nsew"
+                    )
                 else:
                     headings = rows[0]
                     data_rows = rows[1:] if len(rows) > 1 else []
+                    if not any(heading.strip() for heading in headings):
+                        headings = [f"Column {idx + 1}" for idx in range(len(headings))]
                     columns = [f"col_{idx}" for idx in range(len(headings))]
                     tree = ttk.Treeview(
                         table_frame,
@@ -1603,20 +1612,25 @@ class ReportApp:
                         show="headings",
                         height=min(15, max(3, len(data_rows))),
                     )
+                    y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
+                    x_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=tree.xview)
+                    tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+                    tree.grid(row=0, column=0, sticky="nsew")
+                    y_scroll.grid(row=0, column=1, sticky="ns")
+                    x_scroll.grid(row=1, column=0, sticky="ew")
                     for col, heading in zip(columns, headings):
                         tree.heading(col, text=heading)
-                        tree.column(col, anchor="center")
+                        tree.column(col, anchor="center", stretch=True, width=120)
                     if data_rows:
                         for data in data_rows:
                             values = list(data)
                             if len(values) < len(columns):
                                 values.extend([""] * (len(columns) - len(values)))
                             tree.insert("", tk.END, values=values)
-                    tree.pack(expand=True, fill=tk.BOTH)
 
                 row_index += 1
 
-    def _show_prompt_preview(self, category: str) -> None:
+    def _show_prompt_preview(self, entry: PDFEntry, category: str, page_index: int) -> None:
         company = self.company_var.get()
         if not company:
             messagebox.showinfo("Prompt Preview", "Select a company to view its prompts.")
@@ -1629,6 +1643,20 @@ class ReportApp:
             )
             return
 
+        try:
+            page = entry.doc.load_page(page_index)
+            page_text = page.get_text("text")
+        except Exception as exc:
+            messagebox.showerror(
+                "Prompt Preview",
+                f"Unable to load the parsed page text for page {page_index + 1}: {exc}",
+            )
+            return
+
+        combined_text = (
+            f"=== System Prompt ===\n{prompt_text}\n\n=== Parsed Page Text ===\n{page_text}"
+        )
+
         dialog = tk.Toplevel(self.root)
         dialog.title(f"{category} Prompt Preview")
         dialog.transient(self.root)
@@ -1638,8 +1666,8 @@ class ReportApp:
         content_frame.pack(fill=tk.BOTH, expand=True)
 
         text_widget = tk.Text(content_frame, wrap="word", width=80, height=25)
-        text_widget.insert("1.0", prompt_text)
-        text_widget.configure(state="disabled")
+        text_widget.insert("1.0", combined_text)
+        text_widget.configure(font=("TkFixedFont", 9), state="disabled")
         text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         scrollbar = ttk.Scrollbar(content_frame, orient=tk.VERTICAL, command=text_widget.yview)
@@ -1649,10 +1677,24 @@ class ReportApp:
         button_frame = ttk.Frame(dialog, padding=(12, 0, 12, 12))
         button_frame.pack(fill=tk.X)
         ttk.Button(button_frame, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(
+            button_frame,
+            text="Copy",
+            command=lambda: self._copy_to_clipboard(combined_text),
+        ).pack(side=tk.RIGHT, padx=(0, 8))
 
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
         dialog.wait_visibility()
         dialog.focus_set()
+
+    def _copy_to_clipboard(self, text: str) -> None:
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        except tk.TclError:
+            messagebox.showwarning(
+                "Copy Failed", "Could not access the clipboard to copy the prompt preview."
+            )
 
     def _load_doc_metadata(self, doc_dir: Path) -> Dict[str, Any]:
         metadata_path = doc_dir / "metadata.json"
