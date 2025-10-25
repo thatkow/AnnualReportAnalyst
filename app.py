@@ -1664,7 +1664,7 @@ class ReportApp:
 
                 row_index += 1
 
-        self._refresh_combined_tab()
+        self._refresh_combined_tab(auto_update=True)
 
     def _clear_combined_tab(self) -> None:
         if not hasattr(self, "combined_header_frame"):
@@ -1679,7 +1679,7 @@ class ReportApp:
         if hasattr(self, "combine_confirm_button"):
             self.combine_confirm_button.state(["disabled"])
 
-    def _refresh_combined_tab(self) -> None:
+    def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
         if not hasattr(self, "combined_header_frame"):
             return
         self._clear_combined_tab()
@@ -1831,9 +1831,13 @@ class ReportApp:
         if hasattr(self, "combine_confirm_button"):
             self.combine_confirm_button.state(["!disabled"])
 
-    def _confirm_combined_table(self) -> None:
+        if auto_update and self.combined_pdf_order and self.combined_csv_sources and self.combined_result_tree is None:
+            self._confirm_combined_table(auto=True)
+
+    def _confirm_combined_table(self, auto: bool = False) -> None:
         if not self.combined_pdf_order or not self.combined_csv_sources:
-            messagebox.showinfo("Combine CSV", "No scraped CSV data is available to combine.")
+            if not auto:
+                messagebox.showinfo("Combine CSV", "No scraped CSV data is available to combine.")
             return
 
         label_map: Dict[Path, str] = {}
@@ -1886,7 +1890,10 @@ class ReportApp:
                         record[column_name] = value
 
         if not combined_rows:
-            messagebox.showinfo("Combine CSV", "No rows were available after processing the scraped CSV files.")
+            if not auto:
+                messagebox.showinfo(
+                    "Combine CSV", "No rows were available after processing the scraped CSV files."
+                )
             return
 
         ordered_columns = ["Category", "Item", *column_order]
