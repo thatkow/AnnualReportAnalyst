@@ -1,12 +1,15 @@
 import csv
+import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from tkinter import messagebox, simpledialog, ttk
+from datetime import datetime, timedelta
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -321,6 +324,12 @@ class ReportApp:
         self._thumbnail_resize_job: Optional[str] = None
         self.company_tabs: Dict[str, "ReportApp"] = {}
         self.company_frames: Dict[str, ttk.Frame] = {}
+        self.downloads_dir_var = tk.StringVar(master=self.root)
+        self.recent_download_minutes_var = tk.IntVar(master=self.root, value=5)
+        self.combined_label_vars: Dict[Path, tk.StringVar] = {}
+        self.combined_csv_sources: Dict[Tuple[Path, str], Dict[str, Any]] = {}
+        self.combined_pdf_order: List[Path] = []
+        self.combined_result_tree: Optional[ttk.Treeview] = None
 
         self._build_ui()
         self._load_pattern_config()
@@ -330,6 +339,7 @@ class ReportApp:
 
     def _build_ui(self) -> None:
         if not self.embedded:
+            self._create_menus()
             top_frame = ttk.Frame(self.root, padding=8)
             top_frame.pack(fill=tk.X)
             company_label = ttk.Label(top_frame, text="Company:")
@@ -341,8 +351,6 @@ class ReportApp:
             folder_entry.pack(side=tk.LEFT, padx=4)
             load_button = ttk.Button(top_frame, text="Load PDFs", command=self._open_company_tab)
             load_button.pack(side=tk.LEFT, padx=4)
-            new_company_button = ttk.Button(top_frame, text="New Company", command=self.create_company)
-            new_company_button.pack(side=tk.LEFT, padx=(0, 4))
             self._refresh_company_options()
             self.company_notebook = ttk.Notebook(self.root)
             self.company_notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
@@ -359,7 +367,9 @@ class ReportApp:
         self.notebook = notebook
         review_container = ttk.Frame(notebook)
         notebook.add(review_container, text="Review")
-        pattern_section = CollapsibleFrame(review_container, "Regex patterns (one per line)")
+        pattern_section = CollapsibleFrame(
+            review_container, "Regex patterns (one per line)", initially_open=False
+        )
         pattern_section.pack(fill=tk.X, padx=8, pady=4)
         pattern_frame = ttk.Frame(pattern_section.content, padding=8)
         pattern_frame.pack(fill=tk.X)
@@ -452,6 +462,43 @@ class ReportApp:
         self.scraped_window = self.scraped_canvas.create_window((0, 0), window=self.scraped_inner, anchor="nw")
         self.scraped_inner.bind("<Configure>", lambda _e: self.scraped_canvas.configure(scrollregion=self.scraped_canvas.bbox("all")))
         self.scraped_canvas.bind("<Configure>", lambda e: self.scraped_canvas.itemconfigure(self.scraped_window, width=e.width))
+
+        combined_container = ttk.Frame(notebook)
+        self.combined_frame = combined_container
+        notebook.add(combined_container, text="Combined")
+        combined_controls = ttk.Frame(combined_container, padding=8)
+        combined_controls.pack(fill=tk.X)
+        ttk.Label(
+            combined_controls,
+            text="Review scraped headers and label the combined output columns before confirming.",
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.combine_confirm_button = ttk.Button(
+            combined_controls,
+            text="Confirm",
+            command=self._confirm_combined_table,
+            state="disabled",
+        )
+        self.combine_confirm_button.pack(side=tk.RIGHT)
+        combined_canvas = tk.Canvas(combined_container)
+        combined_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        combined_vscroll = ttk.Scrollbar(combined_container, orient=tk.VERTICAL, command=combined_canvas.yview)
+        combined_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        combined_hscroll = ttk.Scrollbar(combined_container, orient=tk.HORIZONTAL, command=combined_canvas.xview)
+        combined_hscroll.pack(side=tk.BOTTOM, fill=tk.X)
+        combined_canvas.configure(yscrollcommand=combined_vscroll.set, xscrollcommand=combined_hscroll.set)
+        self.combined_canvas = combined_canvas
+        self.combined_inner = ttk.Frame(combined_canvas)
+        self.combined_window = combined_canvas.create_window((0, 0), window=self.combined_inner, anchor="nw")
+        self.combined_inner.bind(
+            "<Configure>",
+            lambda _e: combined_canvas.configure(scrollregion=combined_canvas.bbox("all")),
+        )
+        self.combined_header_frame = ttk.Frame(self.combined_inner, padding=8)
+        self.combined_header_frame.grid(row=0, column=0, sticky="nsew")
+        self.combined_result_frame = ttk.Frame(self.combined_inner, padding=8)
+        self.combined_result_frame.grid(row=1, column=0, sticky="nsew")
+        self.combined_inner.columnconfigure(0, weight=1)
+        self.combined_inner.rowconfigure(1, weight=1)
 
     def _on_frame_configure(self, _: tk.Event) -> None:  # type: ignore[override]
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -575,8 +622,12 @@ class ReportApp:
         self._write_config()
 
     def _load_pdfs_on_start(self) -> None:
-        if self.folder_path.get():
-            self.load_pdfs()
+        if self.embedded:
+            if self.folder_path.get():
+                self.load_pdfs()
+        else:
+            if self.company_var.get():
+                self._open_company_tab()
 
     def apply_patterns(self) -> None:
         if not self.folder_path.get():
@@ -628,6 +679,154 @@ class ReportApp:
 
         self._rescan_entries(pattern_map, year_patterns, changed_columns, year_changed)
 
+    def _create_menus(self) -> None:
+        if self.embedded:
+            return
+        menubar = tk.Menu(self.root)
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="New Company", command=self.create_company)
+        menubar.add_cascade(label="File", menu=file_menu)
+
+        configuration_menu = tk.Menu(menubar, tearoff=False)
+        configuration_menu.add_command(label="Set Downloads Dir", command=self._set_downloads_dir)
+        configuration_menu.add_command(
+            label="Set Download Window (minutes)",
+            command=self._set_download_window,
+        )
+        menubar.add_cascade(label="Configuration", menu=configuration_menu)
+        try:
+            self.root.configure(menu=menubar)
+        except tk.TclError:
+            pass
+
+    def _set_downloads_dir(self) -> None:
+        initial = self.downloads_dir_var.get() or str(Path.home())
+        try:
+            selected = filedialog.askdirectory(
+                parent=self.root,
+                initialdir=initial,
+                title="Select Downloads Directory",
+            )
+        except tk.TclError:
+            return
+        if not selected:
+            return
+        self.downloads_dir_var.set(selected)
+        self.config_data["downloads_dir"] = selected
+        self._write_config()
+
+    def _set_download_window(self) -> None:
+        current_value = max(1, self.recent_download_minutes_var.get())
+        value = simpledialog.askinteger(
+            "Download Window",
+            "Enter the number of minutes to consider downloads recent:",
+            parent=self.root,
+            minvalue=1,
+            initialvalue=current_value,
+        )
+        if value is None:
+            return
+        self.recent_download_minutes_var.set(value)
+        self.config_data["downloads_minutes"] = int(value)
+        self._write_config()
+
+    def _collect_recent_downloads(self) -> List[Path]:
+        downloads_dir = self.downloads_dir_var.get().strip()
+        if not downloads_dir:
+            messagebox.showinfo(
+                "Downloads Directory",
+                "Please configure the downloads directory from Configuration → Set Downloads Dir.",
+            )
+            return []
+        directory = Path(downloads_dir)
+        if not directory.exists():
+            messagebox.showerror("Downloads Directory", f"The folder '{downloads_dir}' does not exist.")
+            return []
+
+        minutes = self.recent_download_minutes_var.get()
+        if minutes <= 0:
+            minutes = 5
+            self.recent_download_minutes_var.set(minutes)
+            self.config_data["downloads_minutes"] = minutes
+            self._write_config()
+        cutoff_ts = (datetime.now() - timedelta(minutes=minutes)).timestamp()
+
+        recent: List[tuple[float, Path]] = []
+        for path in directory.iterdir():
+            if not path.is_file() or path.suffix.lower() != ".pdf":
+                continue
+            try:
+                stat_info = path.stat()
+            except OSError:
+                continue
+            if stat_info.st_mtime >= cutoff_ts:
+                recent.append((stat_info.st_mtime, path))
+
+        recent.sort(key=lambda item: item[0], reverse=True)
+        return [path for _mtime, path in recent]
+
+    def _show_recent_download_previews(self, pdf_paths: List[Path]) -> tk.Toplevel:
+        window = tk.Toplevel(self.root)
+        window.title("Recent Downloads Preview")
+        window.transient(self.root)
+
+        container = ttk.Frame(window, padding=8)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(container, borderwidth=0)
+        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        inner = ttk.Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(_: tk.Event) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        inner.bind("<Configure>", _on_inner_configure)
+
+        def _on_canvas_configure(event: tk.Event) -> None:  # type: ignore[override]
+            canvas.itemconfigure(window_id, width=event.width)
+
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        previews: List[ImageTk.PhotoImage] = []
+        for pdf_path in pdf_paths:
+            item_frame = ttk.Frame(inner, padding=8)
+            item_frame.pack(fill=tk.X, expand=True, pady=4)
+            modified_text = ""
+            try:
+                modified = datetime.fromtimestamp(pdf_path.stat().st_mtime)
+                modified_text = modified.strftime("%Y-%m-%d %H:%M")
+            except OSError:
+                pass
+            header = pdf_path.name if not modified_text else f"{pdf_path.name} (modified {modified_text})"
+            ttk.Label(item_frame, text=header, font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+            try:
+                doc = fitz.open(pdf_path)
+            except Exception as exc:  # pragma: no cover - guard for invalid PDFs
+                ttk.Label(item_frame, text=f"Unable to open PDF: {exc}").pack(anchor="w", pady=(4, 0))
+                continue
+            try:
+                photo = self._render_page(doc, 0, self.thumbnail_width_var.get())
+            finally:
+                doc.close()
+            if photo is None:
+                ttk.Label(item_frame, text="Preview unavailable").pack(anchor="w", pady=(4, 0))
+            else:
+                previews.append(photo)
+                ttk.Label(item_frame, image=photo).pack(anchor="w", pady=(4, 0))
+
+        window.preview_images = previews  # type: ignore[attr-defined]
+        window.update_idletasks()
+        try:
+            window.lift()
+        except tk.TclError:
+            pass
+        return window
+
     def load_pdfs(self) -> None:
         folder = self.folder_path.get()
         if not folder:
@@ -638,6 +837,10 @@ class ReportApp:
         if not folder_path.exists():
             messagebox.showerror("Folder Not Found", f"The folder '{folder}' does not exist.")
             return
+
+        company_name = self.company_var.get().strip()
+        if company_name:
+            self._load_assigned_pages(company_name)
 
         self._clear_entries()
         pattern_map, year_patterns = self._gather_patterns()
@@ -701,13 +904,29 @@ class ReportApp:
     def create_company(self) -> None:
         if self.embedded:
             return
+        preview_window: Optional[tk.Toplevel] = None
+        recent_pdfs = self._collect_recent_downloads()
+        if recent_pdfs:
+            preview_window = self._show_recent_download_previews(recent_pdfs)
+        else:
+            downloads_dir = self.downloads_dir_var.get().strip()
+            if downloads_dir:
+                messagebox.showinfo(
+                    "Recent Downloads",
+                    "No recently downloaded PDFs were found in the configured downloads folder.",
+                )
+
         name = simpledialog.askstring("New Company", "Enter a name for the new company:", parent=self.root)
         if name is None:
+            if preview_window is not None and preview_window.winfo_exists():
+                preview_window.destroy()
             return
 
         normalized = name.strip()
         if not normalized:
             messagebox.showwarning("Invalid Name", "Company name cannot be empty.")
+            if preview_window is not None and preview_window.winfo_exists():
+                preview_window.destroy()
             return
 
         safe_name = re.sub(r"[\\/:*?\"<>|]", "_", normalized).strip().strip(".")
@@ -716,6 +935,8 @@ class ReportApp:
                 "Invalid Name",
                 "Company name contains only unsupported characters. Please choose a different name.",
             )
+            if preview_window is not None and preview_window.winfo_exists():
+                preview_window.destroy()
             return
 
         if safe_name != normalized:
@@ -730,7 +951,18 @@ class ReportApp:
             raw_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             messagebox.showerror("Create Company", f"Could not create folders for '{safe_name}': {exc}")
+            if preview_window is not None and preview_window.winfo_exists():
+                preview_window.destroy()
             return
+
+        copied_files = 0
+        for pdf_path in recent_pdfs:
+            try:
+                destination = self._ensure_unique_path(raw_dir / pdf_path.name)
+                shutil.copy2(pdf_path, destination)
+                copied_files += 1
+            except Exception as exc:
+                messagebox.showwarning("Copy PDF", f"Could not copy '{pdf_path.name}': {exc}")
 
         self._refresh_company_options()
         if hasattr(self, "company_combo"):
@@ -742,6 +974,10 @@ class ReportApp:
 
         self._open_in_file_manager(raw_dir)
         self._open_company_tab()
+        if preview_window is not None and preview_window.winfo_exists():
+            preview_window.destroy()
+        if copied_files:
+            messagebox.showinfo("Create Company", f"Copied {copied_files} PDF(s) into '{safe_name}/raw'.")
 
     def _open_in_file_manager(self, path: Path) -> None:
         try:
@@ -1284,7 +1520,7 @@ class ReportApp:
                         selections[category] = int(page_index)
 
         self._write_assigned_pages()
-        messagebox.showinfo("Assignments Saved", "Assignments have been committed to assigned.json.")
+        self.scrape_selections()
 
     def _refresh_scraped_tab(self) -> None:
         if not hasattr(self, "scraped_inner"):
@@ -1292,6 +1528,7 @@ class ReportApp:
         for child in self.scraped_inner.winfo_children():
             child.destroy()
         self.scraped_images.clear()
+        self._clear_combined_tab()
         if hasattr(self, "scrape_progress"):
             self.scrape_progress["value"] = 0
         company = self.company_var.get()
@@ -1302,8 +1539,7 @@ class ReportApp:
             return
 
         self.scraped_inner.columnconfigure(0, weight=1)
-        self.scraped_inner.columnconfigure(1, weight=1)
-        self.scraped_inner.columnconfigure(2, weight=1)
+        self.scraped_inner.columnconfigure(1, weight=2)
         row_index = 0
         header_added = False
         for entry in self.pdf_entries:
@@ -1324,7 +1560,7 @@ class ReportApp:
                     continue
                 if not header_added:
                     header_frame = ttk.Frame(self.scraped_inner)
-                    header_frame.grid(row=row_index, column=0, columnspan=3, sticky="ew", padx=8, pady=(8, 0))
+                    header_frame.grid(row=row_index, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 0))
                     ttk.Label(
                         header_frame,
                         text="Original PDF Page",
@@ -1332,22 +1568,19 @@ class ReportApp:
                     ).grid(row=0, column=0, sticky="w")
                     ttk.Label(
                         header_frame,
-                        text="Raw Text",
-                        font=("TkDefaultFont", 10, "bold"),
-                    ).grid(row=0, column=1, sticky="w")
-                    ttk.Label(
-                        header_frame,
                         text="Converted CSV",
                         font=("TkDefaultFont", 10, "bold"),
-                    ).grid(row=0, column=2, sticky="w")
+                    ).grid(row=0, column=1, sticky="w")
                     header_frame.columnconfigure(0, weight=1)
                     header_frame.columnconfigure(1, weight=1)
-                    header_frame.columnconfigure(2, weight=1)
                     row_index += 1
                     header_added = True
                 header_frame = ttk.Frame(self.scraped_inner)
-                header_frame.grid(row=row_index, column=0, columnspan=3, sticky="ew", padx=8, pady=(8, 0))
+                header_frame.grid(row=row_index, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 0))
                 header_frame.columnconfigure(0, weight=1)
+                header_frame.columnconfigure(1, weight=0)
+                header_frame.columnconfigure(2, weight=0)
+                header_frame.columnconfigure(3, weight=0)
                 ttk.Label(
                     header_frame,
                     text=f"{entry.path.name} - {category} (Page {int(page_index) + 1})",
@@ -1356,23 +1589,29 @@ class ReportApp:
                 ttk.Button(
                     header_frame,
                     text="View Prompt",
-                    command=lambda c=category: self._show_prompt_preview(c),
+                    command=lambda e=entry, c=category, p=int(page_index): self._show_prompt_preview(
+                        e, c, p
+                    ),
                     width=12,
                 ).grid(row=0, column=1, sticky="e", padx=(0, 4))
+                ttk.Button(
+                    header_frame,
+                    text="View Raw Text",
+                    command=lambda e=entry, p=int(page_index): self._show_raw_text_dialog(e, p),
+                    width=14,
+                ).grid(row=0, column=2, sticky="e", padx=(0, 4))
                 ttk.Button(
                     header_frame,
                     text="Delete",
                     command=lambda d=doc_dir, c=category: self._delete_scrape_output(d, c),
                     width=10,
-                ).grid(row=0, column=2, sticky="e")
+                ).grid(row=0, column=3, sticky="e")
                 row_index += 1
 
                 image_frame = ttk.Frame(self.scraped_inner, padding=8)
                 image_frame.grid(row=row_index, column=0, sticky="nsew", padx=4)
-                text_frame = ttk.Frame(self.scraped_inner, padding=8)
-                text_frame.grid(row=row_index, column=1, sticky="nsew", padx=4)
                 table_frame = ttk.Frame(self.scraped_inner, padding=8)
-                table_frame.grid(row=row_index, column=2, sticky="nsew", padx=4)
+                table_frame.grid(row=row_index, column=1, sticky="nsew", padx=4)
                 self.scraped_inner.rowconfigure(row_index, weight=1)
 
                 photo = self._render_page(entry.doc, int(page_index), 350)
@@ -1387,27 +1626,19 @@ class ReportApp:
                 else:
                     ttk.Label(image_frame, text="Preview unavailable").pack(expand=True, fill=tk.BOTH)
 
-                raw_text = ""
-                try:
-                    page = entry.doc.load_page(int(page_index))
-                    raw_text = page.get_text("text")
-                except Exception:
-                    raw_text = "Could not load page text."
-
-                text_container = tk.Text(text_frame, wrap="word", height=25)
-                text_container.insert("1.0", raw_text)
-                text_container.configure(state="disabled")
-                text_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_container.yview)
-                text_container.configure(yscrollcommand=text_scroll.set)
-                text_container.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
-                text_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
                 rows = self._read_csv_rows(csv_path)
+                table_frame.columnconfigure(0, weight=1)
+                table_frame.rowconfigure(0, weight=1)
+
                 if not rows:
-                    ttk.Label(table_frame, text="CSV file is empty").pack(expand=True, fill=tk.BOTH)
+                    ttk.Label(table_frame, text="CSV file is empty").grid(
+                        row=0, column=0, sticky="nsew"
+                    )
                 else:
                     headings = rows[0]
                     data_rows = rows[1:] if len(rows) > 1 else []
+                    if not any(heading.strip() for heading in headings):
+                        headings = [f"Column {idx + 1}" for idx in range(len(headings))]
                     columns = [f"col_{idx}" for idx in range(len(headings))]
                     tree = ttk.Treeview(
                         table_frame,
@@ -1415,20 +1646,341 @@ class ReportApp:
                         show="headings",
                         height=min(15, max(3, len(data_rows))),
                     )
+                    y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
+                    x_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=tree.xview)
+                    tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+                    tree.grid(row=0, column=0, sticky="nsew")
+                    y_scroll.grid(row=0, column=1, sticky="ns")
+                    x_scroll.grid(row=1, column=0, sticky="ew")
                     for col, heading in zip(columns, headings):
                         tree.heading(col, text=heading)
-                        tree.column(col, anchor="center")
+                        tree.column(col, anchor="center", stretch=True, width=120)
                     if data_rows:
                         for data in data_rows:
                             values = list(data)
                             if len(values) < len(columns):
                                 values.extend([""] * (len(columns) - len(values)))
-                            tree.insert("", tk.END, values=values)
-                    tree.pack(expand=True, fill=tk.BOTH)
+                            display_values = [self._format_table_value(value) for value in values]
+                            tree.insert("", tk.END, values=display_values)
 
                 row_index += 1
 
-    def _show_prompt_preview(self, category: str) -> None:
+        self._refresh_combined_tab(auto_update=True)
+
+    def _clear_combined_tab(self) -> None:
+        if not hasattr(self, "combined_header_frame"):
+            return
+        for child in self.combined_header_frame.winfo_children():
+            child.destroy()
+        for child in self.combined_result_frame.winfo_children():
+            child.destroy()
+        self.combined_csv_sources.clear()
+        self.combined_pdf_order = []
+        self.combined_result_tree = None
+        if hasattr(self, "combine_confirm_button"):
+            self.combine_confirm_button.state(["disabled"])
+
+    def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
+        if not hasattr(self, "combined_header_frame"):
+            return
+        self._clear_combined_tab()
+        company = self.company_var.get()
+        if not company:
+            ttk.Label(
+                self.combined_header_frame,
+                text="Select a company and run AIScrape to review combined data.",
+            ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+            return
+        if not self.pdf_entries:
+            ttk.Label(
+                self.combined_header_frame,
+                text="Load PDFs to review scraped CSV headers.",
+            ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+            return
+        scrape_root = self.companies_dir / company / "openapiscrape"
+        if not scrape_root.exists():
+            ttk.Label(
+                self.combined_header_frame,
+                text="Run AIScrape to populate CSV results for combination.",
+            ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+            return
+
+        table_data: Dict[str, Dict[Path, List[str]]] = {category: {} for category in COLUMNS}
+        pdf_entries_with_data: List[PDFEntry] = []
+
+        for entry in self.pdf_entries:
+            doc_dir = scrape_root / entry.stem
+            metadata = self._load_doc_metadata(doc_dir)
+            if not metadata:
+                continue
+            entry_has_data = False
+            for category in COLUMNS:
+                meta = metadata.get(category)
+                if not isinstance(meta, dict):
+                    continue
+                csv_name = meta.get("csv")
+                if not isinstance(csv_name, str) or not csv_name:
+                    continue
+                csv_path = doc_dir / csv_name
+                if not csv_path.exists():
+                    continue
+                rows = self._read_csv_rows(csv_path)
+                if not rows:
+                    continue
+                headings = rows[0]
+                if not headings:
+                    continue
+                category_index: Optional[int] = None
+                item_index: Optional[int] = None
+                data_indices: List[int] = []
+                display_headers: List[str] = []
+                for idx, heading in enumerate(headings):
+                    normalized = heading.strip().lower()
+                    if normalized == "category":
+                        category_index = idx
+                    elif normalized == "item":
+                        item_index = idx
+                    else:
+                        data_indices.append(idx)
+                        display_headers.append(heading.strip() or f"Column {idx + 1}")
+                if category_index is None or item_index is None:
+                    continue
+                data_rows = rows[1:] if len(rows) > 1 else []
+                self.combined_csv_sources[(entry.path, category)] = {
+                    "rows": data_rows,
+                    "category_index": category_index,
+                    "item_index": item_index,
+                    "data_indices": data_indices,
+                    "headings": [headings[i] if i < len(headings) else "" for i in data_indices],
+                }
+                table_data[category][entry.path] = display_headers or ["(no data columns)"]
+                entry_has_data = True
+            if entry_has_data:
+                pdf_entries_with_data.append(entry)
+
+        if not pdf_entries_with_data:
+            ttk.Label(
+                self.combined_header_frame,
+                text="No scraped CSV results available to combine.",
+            ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
+            return
+
+        current_paths = {entry.path for entry in pdf_entries_with_data}
+        for stale_path in list(self.combined_label_vars.keys()):
+            if stale_path not in current_paths:
+                self.combined_label_vars.pop(stale_path, None)
+
+        self.combined_pdf_order = [entry.path for entry in pdf_entries_with_data]
+
+        ttk.Label(self.combined_header_frame, text="", width=18).grid(row=0, column=0, padx=4, pady=4, sticky="w")
+        ttk.Label(
+            self.combined_header_frame,
+            text="PDF",
+            font=("TkDefaultFont", 10, "bold"),
+        ).grid(row=1, column=0, padx=4, pady=(0, 4), sticky="w")
+
+        for column_index, entry in enumerate(pdf_entries_with_data, start=1):
+            headers_for_default = next(
+                (table_data[category].get(entry.path) for category in COLUMNS if entry.path in table_data[category]),
+                None,
+            )
+            default_label = ""
+            if headers_for_default:
+                default_label = headers_for_default[0]
+            if not default_label:
+                default_label = entry.year or entry.path.stem
+            var = self.combined_label_vars.get(entry.path)
+            if var is None:
+                var = tk.StringVar(master=self.root, value=default_label)
+                self.combined_label_vars[entry.path] = var
+            elif not var.get():
+                var.set(default_label)
+            entry_widget = ttk.Entry(self.combined_header_frame, textvariable=var, width=18)
+            entry_widget.grid(row=0, column=column_index, padx=4, pady=4, sticky="ew")
+            ttk.Label(
+                self.combined_header_frame,
+                text=entry.path.name,
+                justify="center",
+                wraplength=200,
+            ).grid(row=1, column=column_index, padx=4, pady=(0, 4), sticky="ew")
+
+        start_row = 2
+        for offset, category in enumerate(COLUMNS):
+            row_index = start_row + offset
+            ttk.Label(
+                self.combined_header_frame,
+                text=category,
+                font=("TkDefaultFont", 10, "bold"),
+            ).grid(row=row_index, column=0, padx=4, pady=4, sticky="nw")
+            for column_index, entry in enumerate(pdf_entries_with_data, start=1):
+                headers = table_data[category].get(entry.path)
+                if headers:
+                    display_text = "\n".join(headers)
+                else:
+                    display_text = "No CSV"
+                ttk.Label(
+                    self.combined_header_frame,
+                    text=display_text,
+                    justify="left",
+                    wraplength=200,
+                ).grid(row=row_index, column=column_index, padx=4, pady=4, sticky="nw")
+
+        for column_index in range(len(pdf_entries_with_data) + 1):
+            weight = 0 if column_index == 0 else 1
+            self.combined_header_frame.columnconfigure(column_index, weight=weight)
+
+        if hasattr(self, "combine_confirm_button"):
+            self.combine_confirm_button.state(["!disabled"])
+
+        if auto_update and self.combined_pdf_order and self.combined_csv_sources and self.combined_result_tree is None:
+            self._confirm_combined_table(auto=True)
+
+    def _confirm_combined_table(self, auto: bool = False) -> None:
+        if not self.combined_pdf_order or not self.combined_csv_sources:
+            if not auto:
+                messagebox.showinfo("Combine CSV", "No scraped CSV data is available to combine.")
+            return
+
+        label_map: Dict[Path, str] = {}
+        for path in self.combined_pdf_order:
+            var = self.combined_label_vars.get(path)
+            label_value = var.get().strip() if var else ""
+            if not label_value:
+                label_value = path.stem
+            label_map[path] = label_value
+
+        combined_rows: Dict[Tuple[str, str], Dict[str, str]] = {}
+        column_order: List[str] = []
+
+        for path in self.combined_pdf_order:
+            label_value = label_map.get(path, path.stem)
+            for category in COLUMNS:
+                source = self.combined_csv_sources.get((path, category))
+                if not source:
+                    continue
+                data_indices: List[int] = source.get("data_indices", [])
+                if not data_indices:
+                    continue
+                headings: List[str] = source.get("headings", [])
+                rows: List[List[str]] = source.get("rows", [])
+                category_index = source.get("category_index")
+                item_index = source.get("item_index")
+                if not isinstance(category_index, int) or not isinstance(item_index, int):
+                    continue
+                for row in rows:
+                    if category_index >= len(row) or item_index >= len(row):
+                        continue
+                    category_value = row[category_index]
+                    item_value = row[item_index]
+                    key = (category_value, item_value)
+                    record = combined_rows.setdefault(
+                        key,
+                        {"Category": category_value, "Item": item_value},
+                    )
+                    for position, data_index in enumerate(data_indices):
+                        base_heading = ""
+                        if position < len(headings):
+                            base_heading = (headings[position] or "").strip()
+                        if not base_heading:
+                            base_heading = f"Column {data_index + 1}"
+                        label_text = label_value or path.stem
+                        column_name = f"{label_text} - {base_heading}" if base_heading else label_text
+                        if column_name not in column_order:
+                            column_order.append(column_name)
+                        value = row[data_index] if data_index < len(row) else ""
+                        record[column_name] = value
+
+        if not combined_rows:
+            if not auto:
+                messagebox.showinfo(
+                    "Combine CSV", "No rows were available after processing the scraped CSV files."
+                )
+            return
+
+        ordered_columns = ["Category", "Item", *column_order]
+        merged_records = list(combined_rows.values())
+        merged_records.sort(key=lambda r: (r.get("Category", ""), r.get("Item", "")))
+
+        for child in self.combined_result_frame.winfo_children():
+            child.destroy()
+
+        result_container = ttk.Frame(self.combined_result_frame)
+        result_container.pack(fill=tk.BOTH, expand=True)
+        result_container.columnconfigure(0, weight=1)
+        result_container.rowconfigure(0, weight=1)
+
+        tree = ttk.Treeview(result_container, columns=ordered_columns, show="headings")
+        tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttk.Scrollbar(result_container, orient=tk.VERTICAL, command=tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(result_container, orient=tk.HORIZONTAL, command=tree.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        for column_name in ordered_columns:
+            tree.heading(column_name, text=column_name)
+            tree.column(column_name, anchor="center", stretch=True, width=140)
+
+        for record in merged_records:
+            values = [record.get(column_name, "") for column_name in ordered_columns]
+            tree.insert("", tk.END, values=values)
+
+        self.combined_result_tree = tree
+
+        company = self.company_var.get()
+        if company:
+            scrape_root = self.companies_dir / company / "openapiscrape"
+            combined_path = scrape_root / "combined.csv"
+            try:
+                csv_rows = [ordered_columns]
+                for record in merged_records:
+                    csv_rows.append([record.get(column_name, "") for column_name in ordered_columns])
+                self._write_csv_rows(csv_rows, combined_path)
+                ttk.Label(
+                    self.combined_result_frame,
+                    text=f"Combined CSV saved to: {combined_path}",
+                ).pack(anchor="w", padx=8, pady=(4, 0))
+            except Exception as exc:
+                messagebox.showwarning("Combine CSV", f"Could not save combined CSV: {exc}")
+
+    def _show_raw_text_dialog(self, entry: PDFEntry, page_index: int) -> None:
+        try:
+            page = entry.doc.load_page(page_index)
+            page_text = page.get_text("text")
+        except Exception as exc:
+            page_text = f"Unable to load the parsed page text for page {page_index + 1}: {exc}"
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Raw Text - {entry.path.name} (Page {page_index + 1})")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        content_frame = ttk.Frame(dialog, padding=(12, 12, 12, 0))
+        content_frame.pack(fill=tk.BOTH, expand=True)
+
+        text_widget = tk.Text(content_frame, wrap="word", width=80, height=25)
+        text_widget.insert("1.0", page_text)
+        text_widget.configure(font=("TkFixedFont", 9), state="disabled")
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(content_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        button_frame = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        button_frame.pack(fill=tk.X)
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(
+            button_frame,
+            text="Copy",
+            command=lambda: self._copy_to_clipboard(page_text),
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.wait_visibility()
+        dialog.focus_set()
+
+    def _show_prompt_preview(self, entry: PDFEntry, category: str, page_index: int) -> None:
         company = self.company_var.get()
         if not company:
             messagebox.showinfo("Prompt Preview", "Select a company to view its prompts.")
@@ -1441,6 +1993,20 @@ class ReportApp:
             )
             return
 
+        try:
+            page = entry.doc.load_page(page_index)
+            page_text = page.get_text("text")
+        except Exception as exc:
+            messagebox.showerror(
+                "Prompt Preview",
+                f"Unable to load the parsed page text for page {page_index + 1}: {exc}",
+            )
+            return
+
+        combined_text = (
+            f"=== System Prompt ===\n{prompt_text}\n\n=== Parsed Page Text ===\n{page_text}"
+        )
+
         dialog = tk.Toplevel(self.root)
         dialog.title(f"{category} Prompt Preview")
         dialog.transient(self.root)
@@ -1450,8 +2016,8 @@ class ReportApp:
         content_frame.pack(fill=tk.BOTH, expand=True)
 
         text_widget = tk.Text(content_frame, wrap="word", width=80, height=25)
-        text_widget.insert("1.0", prompt_text)
-        text_widget.configure(state="disabled")
+        text_widget.insert("1.0", combined_text)
+        text_widget.configure(font=("TkFixedFont", 9), state="disabled")
         text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         scrollbar = ttk.Scrollbar(content_frame, orient=tk.VERTICAL, command=text_widget.yview)
@@ -1461,10 +2027,54 @@ class ReportApp:
         button_frame = ttk.Frame(dialog, padding=(12, 0, 12, 12))
         button_frame.pack(fill=tk.X)
         ttk.Button(button_frame, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(
+            button_frame,
+            text="Copy",
+            command=lambda: self._copy_to_clipboard(combined_text),
+        ).pack(side=tk.RIGHT, padx=(0, 8))
 
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
         dialog.wait_visibility()
         dialog.focus_set()
+
+    def _copy_to_clipboard(self, text: str) -> None:
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        except tk.TclError:
+            messagebox.showwarning(
+                "Copy Failed", "Could not access the clipboard to copy the prompt preview."
+            )
+
+    def _format_table_value(self, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            return ""
+
+        suffix = ""
+        normalized = stripped
+        if normalized.endswith("%"):
+            suffix = "%"
+            normalized = normalized[:-1]
+
+        prefix = ""
+        if normalized and normalized[0] in "$€£¥":
+            prefix = normalized[0]
+            normalized = normalized[1:]
+
+        normalized = normalized.strip()
+        if normalized.startswith("(") and normalized.endswith(")") and len(normalized) > 2:
+            normalized = f"-{normalized[1:-1]}"
+
+        normalized = normalized.replace(",", "")
+
+        try:
+            numeric_value = float(normalized)
+        except ValueError:
+            return stripped
+
+        formatted = f"{numeric_value:.6e}"
+        return f"{prefix}{formatted}{suffix}"
 
     def _load_doc_metadata(self, doc_dir: Path) -> Dict[str, Any]:
         metadata_path = doc_dir / "metadata.json"
@@ -1520,8 +2130,17 @@ class ReportApp:
     def _read_csv_rows(self, csv_path: Path) -> List[List[str]]:
         try:
             with csv_path.open("r", encoding="utf-8", newline="") as fh:
-                reader = csv.reader(fh)
-                return [list(row) for row in reader]
+                text = fh.read()
+        except Exception:
+            return []
+
+        if not text.strip():
+            return []
+
+        delimiter = "\t" if "\t" in text else ","
+        try:
+            reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+            return [list(row) for row in reader]
         except Exception:
             return []
 
@@ -1697,6 +2316,7 @@ class ReportApp:
     def _load_pattern_config(self) -> None:
         if not self.pattern_config_path.exists():
             self._config_loaded = True
+            self._ensure_download_settings()
             return
         try:
             with self.pattern_config_path.open("r", encoding="utf-8") as fh:
@@ -1731,6 +2351,7 @@ class ReportApp:
         self.last_company_preference = data.get("last_company", "")
         if "api_key" in data:
             self.api_key_var.set(str(data.get("api_key", "")))
+        self._ensure_download_settings()
         self._apply_last_company_selection()
         self._config_loaded = True
 
@@ -1738,6 +2359,27 @@ class ReportApp:
         if not enabled:
             return pattern
         return pattern.replace(" ", r"\s+")
+
+    def _ensure_download_settings(self) -> None:
+        configured_dir = str(self.config_data.get("downloads_dir", "")).strip()
+        if configured_dir:
+            self.downloads_dir_var.set(configured_dir)
+        elif not self.downloads_dir_var.get():
+            default_download_dir = Path.home() / "Downloads"
+            if default_download_dir.exists():
+                self.downloads_dir_var.set(str(default_download_dir))
+        if self.downloads_dir_var.get():
+            self.config_data["downloads_dir"] = self.downloads_dir_var.get()
+
+        configured_minutes = self.config_data.get("downloads_minutes")
+        if isinstance(configured_minutes, int) and configured_minutes > 0:
+            self.recent_download_minutes_var.set(configured_minutes)
+        else:
+            minutes_value = self.recent_download_minutes_var.get()
+            if minutes_value <= 0:
+                minutes_value = 5
+                self.recent_download_minutes_var.set(minutes_value)
+            self.config_data["downloads_minutes"] = minutes_value
 
     def _maximize_window(self, window: Optional[tk.Misc] = None) -> None:
         target = window or self.root
