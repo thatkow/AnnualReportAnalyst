@@ -2,8 +2,10 @@ import csv
 import json
 import os
 import re
+import subprocess
 import sys
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tkinter import messagebox, simpledialog, ttk
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +51,18 @@ class PDFEntry:
         return self.path.stem
 
 
+@dataclass(frozen=True)
+class ScrapeTask:
+    entry_path: Path
+    entry_name: str
+    entry_year: str
+    category: str
+    page_index: int
+    prompt_text: str
+    page_text: str
+    doc_dir: Path
+
+
 class CollapsibleFrame(ttk.Frame):
     def __init__(self, parent: tk.Widget, title: str, *, initially_open: bool = True) -> None:
         super().__init__(parent)
@@ -74,6 +88,9 @@ class CollapsibleFrame(ttk.Frame):
         else:
             self._content.pack_forget()
         self._header.configure(text=self._formatted_title())
+
+
+SHIFT_MASK = 0x0001
 
 
 class MatchThumbnail:
@@ -137,7 +154,8 @@ class MatchThumbnail:
         return self._context_menu
 
     def _on_click(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
-        if event.state & tk.SHIFT:
+        state = getattr(event, "state", 0)
+        if state & SHIFT_MASK:
             self.app.open_thumbnail_zoom(self.entry, self.match.page_index)
             return "break"
         self.app.select_match_index(self.entry, self.row.category, self.match_index)
@@ -182,6 +200,7 @@ class CategoryRow:
         self.window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<MouseWheel>", self._on_generic_mousewheel)
         self.canvas.bind("<Shift-MouseWheel>", self._on_mousewheel)
         self.canvas.bind("<Shift-Button-4>", self._on_mousewheel)
         self.canvas.bind("<Shift-Button-5>", self._on_mousewheel)
@@ -229,6 +248,14 @@ class CategoryRow:
     def _on_canvas_configure(self, event: tk.Event) -> None:  # type: ignore[override]
         self.canvas.itemconfigure(self.window, height=event.height)
 
+    def _on_generic_mousewheel(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
+        state = getattr(event, "state", 0)
+        # Only translate generic mouse wheel events into horizontal scrolling when Shift is held.
+        if state & SHIFT_MASK:
+            self._on_mousewheel(event)
+            return "break"
+        return None
+
     def _on_mousewheel(self, event: tk.Event) -> None:  # type: ignore[override]
         if getattr(event, "delta", 0):
             step = -1 if event.delta > 0 else 1
@@ -250,13 +277,29 @@ class CategoryRow:
 
 
 class ReportApp:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(
+        self,
+        root: tk.Misc,
+        *,
+        embedded: bool = False,
+        company_name: Optional[str] = None,
+        folder_override: Optional[Path] = None,
+    ) -> None:
         self.root = root
-        self.root.title("Annual Report Analyst")
-        self.folder_path = tk.StringVar()
-        self.company_var = tk.StringVar()
-        self.api_key_var = tk.StringVar()
-        self.thumbnail_width_var = tk.IntVar(value=220)
+        self.embedded = embedded
+        if hasattr(self.root, "title") and not embedded:
+            try:
+                self.root.title("Annual Report Analyst")
+            except tk.TclError:
+                pass
+        self.folder_path = tk.StringVar(master=self.root)
+        if folder_override is not None:
+            self.folder_path.set(str(folder_override))
+        self.company_var = tk.StringVar(master=self.root)
+        if company_name:
+            self.company_var.set(company_name)
+        self.api_key_var = tk.StringVar(master=self.root)
+        self.thumbnail_width_var = tk.IntVar(master=self.root, value=220)
         self.pattern_texts: Dict[str, tk.Text] = {}
         self.case_insensitive_vars: Dict[str, tk.BooleanVar] = {}
         self.whitespace_as_space_vars: Dict[str, tk.BooleanVar] = {}
@@ -276,44 +319,50 @@ class ReportApp:
         self.assigned_pages_path: Optional[Path] = None
         self.scraped_images: List[ImageTk.PhotoImage] = []
         self._thumbnail_resize_job: Optional[str] = None
+        self.company_tabs: Dict[str, "ReportApp"] = {}
+        self.company_frames: Dict[str, ttk.Frame] = {}
 
         self._build_ui()
         self._load_pattern_config()
-        self._maximize_window()
-        self.root.after(0, self._load_pdfs_on_start)
+        if not self.embedded:
+            self._maximize_window()
+            self.root.after(0, self._load_pdfs_on_start)
 
     def _build_ui(self) -> None:
+        if not self.embedded:
+            top_frame = ttk.Frame(self.root, padding=8)
+            top_frame.pack(fill=tk.X)
+            company_label = ttk.Label(top_frame, text="Company:")
+            company_label.pack(side=tk.LEFT)
+            self.company_combo = ttk.Combobox(top_frame, textvariable=self.company_var, state="readonly", width=30)
+            self.company_combo.pack(side=tk.LEFT, padx=4)
+            self.company_combo.bind("<<ComboboxSelected>>", self._on_company_selected)
+            folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=60, state="readonly")
+            folder_entry.pack(side=tk.LEFT, padx=4)
+            load_button = ttk.Button(top_frame, text="Load PDFs", command=self._open_company_tab)
+            load_button.pack(side=tk.LEFT, padx=4)
+            new_company_button = ttk.Button(top_frame, text="New Company", command=self.create_company)
+            new_company_button.pack(side=tk.LEFT, padx=(0, 4))
+            self._refresh_company_options()
+            self.company_notebook = ttk.Notebook(self.root)
+            self.company_notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+            self.company_notebook.bind("<<NotebookTabChanged>>", self._on_company_tab_changed)
+            return
         top_frame = ttk.Frame(self.root, padding=8)
         top_frame.pack(fill=tk.X)
-
-        company_label = ttk.Label(top_frame, text="Company:")
-        company_label.pack(side=tk.LEFT)
-
-        self.company_combo = ttk.Combobox(top_frame, textvariable=self.company_var, state="readonly", width=30)
-        self.company_combo.pack(side=tk.LEFT, padx=4)
-        self.company_combo.bind("<<ComboboxSelected>>", self._on_company_selected)
-
-        folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=60, state="readonly")
-        folder_entry.pack(side=tk.LEFT, padx=4)
-
-        load_button = ttk.Button(top_frame, text="Load PDFs", command=self.load_pdfs)
-        load_button.pack(side=tk.LEFT, padx=4)
-
-        self._refresh_company_options()
-
+        ttk.Label(top_frame, text=f"Company: {self.company_var.get() or 'Unknown'}", font=("TkDefaultFont", 11, "bold")).pack(side=tk.LEFT)
+        folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=50, state="readonly")
+        folder_entry.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
+        ttk.Button(top_frame, text="Reload PDFs", command=self.load_pdfs).pack(side=tk.LEFT, padx=(8, 0))
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
         self.notebook = notebook
-
         review_container = ttk.Frame(notebook)
         notebook.add(review_container, text="Review")
-
         pattern_section = CollapsibleFrame(review_container, "Regex patterns (one per line)")
         pattern_section.pack(fill=tk.X, padx=8, pady=4)
-
         pattern_frame = ttk.Frame(pattern_section.content, padding=8)
         pattern_frame.pack(fill=tk.X)
-
         for idx, column in enumerate(COLUMNS):
             column_frame = ttk.Frame(pattern_frame)
             column_frame.grid(row=0, column=idx, padx=4, sticky="nsew")
@@ -333,10 +382,8 @@ class ReportApp:
                 text="Treat spaces as any whitespace",
                 variable=whitespace_var,
             ).pack(anchor="w")
-
         update_button = ttk.Button(pattern_section.content, text="Apply Patterns", command=self.apply_patterns)
         update_button.pack(pady=4)
-
         year_frame = ttk.Frame(pattern_section.content)
         year_frame.pack(fill=tk.X, pady=(8, 0))
         ttk.Label(year_frame, text="Year pattern").pack(anchor="w")
@@ -350,7 +397,6 @@ class ReportApp:
             text="Treat spaces as any whitespace",
             variable=self.year_whitespace_as_space_var,
         ).pack(anchor="w")
-
         size_frame = ttk.Frame(review_container, padding=(8, 0))
         size_frame.pack(fill=tk.X, padx=0, pady=(0, 4))
         ttk.Label(size_frame, text="Thumbnail width:").pack(side=tk.LEFT)
@@ -364,37 +410,28 @@ class ReportApp:
         self.thumbnail_scale.set(self.thumbnail_width_var.get())
         self.thumbnail_scale.pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
         ttk.Label(size_frame, textvariable=self.thumbnail_width_var).pack(side=tk.LEFT)
-
         grid_container = ttk.Frame(review_container)
         grid_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
-
         self.canvas = tk.Canvas(grid_container)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         scrollbar = ttk.Scrollbar(grid_container, orient=tk.VERTICAL, command=self.canvas.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.canvas.configure(yscrollcommand=scrollbar.set)
-
         self.canvas.bind("<Enter>", self._bind_mousewheel)
         self.canvas.bind("<Leave>", self._unbind_mousewheel)
-        # Linux scroll events
         self.canvas.bind("<Button-4>", self._on_mousewheel)
         self.canvas.bind("<Button-5>", self._on_mousewheel)
-
         self.inner_frame = ttk.Frame(self.canvas)
         self.canvas_window = self.canvas.create_window((0, 0), window=self.inner_frame, anchor="nw")
         self.inner_frame.bind("<Configure>", self._on_frame_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
-
         action_frame = ttk.Frame(review_container, padding=8)
         action_frame.pack(fill=tk.X, pady=(0, 8))
         self.commit_button = ttk.Button(action_frame, text="Commit", command=self.commit_assignments)
         self.commit_button.pack(side=tk.RIGHT)
-
         scraped_container = ttk.Frame(notebook)
         self.scraped_frame = scraped_container
         notebook.add(scraped_container, text="Scraped")
-
         scraped_controls = ttk.Frame(scraped_container, padding=8)
         scraped_controls.pack(fill=tk.X)
         ttk.Label(scraped_controls, text="API key:").pack(side=tk.LEFT)
@@ -406,22 +443,15 @@ class ReportApp:
         self.scrape_button.pack(side=tk.LEFT, padx=(8, 0))
         self.scrape_progress = ttk.Progressbar(scraped_controls, orient=tk.HORIZONTAL, mode="determinate", length=200)
         self.scrape_progress.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
-
         self.scraped_canvas = tk.Canvas(scraped_container)
         self.scraped_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         scraped_scrollbar = ttk.Scrollbar(scraped_container, orient=tk.VERTICAL, command=self.scraped_canvas.yview)
         scraped_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.scraped_canvas.configure(yscrollcommand=scraped_scrollbar.set)
-
         self.scraped_inner = ttk.Frame(self.scraped_canvas)
         self.scraped_window = self.scraped_canvas.create_window((0, 0), window=self.scraped_inner, anchor="nw")
-        self.scraped_inner.bind(
-            "<Configure>", lambda _e: self.scraped_canvas.configure(scrollregion=self.scraped_canvas.bbox("all"))
-        )
-        self.scraped_canvas.bind(
-            "<Configure>", lambda e: self.scraped_canvas.itemconfigure(self.scraped_window, width=e.width)
-        )
+        self.scraped_inner.bind("<Configure>", lambda _e: self.scraped_canvas.configure(scrollregion=self.scraped_canvas.bbox("all")))
+        self.scraped_canvas.bind("<Configure>", lambda e: self.scraped_canvas.itemconfigure(self.scraped_window, width=e.width))
 
     def _on_frame_configure(self, _: tk.Event) -> None:  # type: ignore[override]
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -458,6 +488,8 @@ class ReportApp:
             row.set_thumbnail_width(width)
 
     def _refresh_company_options(self) -> None:
+        if self.embedded or not hasattr(self, "company_combo"):
+            return
         if not self.companies_dir.exists():
             self.company_combo.configure(values=[])
             return
@@ -472,6 +504,46 @@ class ReportApp:
             self.company_combo.current(0)
             self._set_folder_from_company(companies[0])
 
+    def _open_company_tab(self) -> None:
+        if self.embedded:
+            return
+        company = self.company_var.get()
+        if not company:
+            messagebox.showinfo("Select Company", "Please choose a company before loading PDFs.")
+            return
+        folder = self.companies_dir / company / "raw"
+        self.folder_path.set(str(folder))
+        frame = self.company_frames.get(company)
+        if frame is None:
+            frame = ttk.Frame(self.company_notebook)
+            frame.pack(fill=tk.BOTH, expand=True)
+            child = ReportApp(
+                frame,
+                embedded=True,
+                company_name=company,
+                folder_override=folder,
+            )
+            self.company_frames[company] = frame
+            self.company_tabs[company] = child
+            self.company_notebook.add(frame, text=company)
+            self.company_notebook.select(frame)
+            self.root.after(0, child.load_pdfs)
+        else:
+            self.company_notebook.select(frame)
+
+    def _on_company_tab_changed(self, event: tk.Event) -> None:  # type: ignore[override]
+        if self.embedded:
+            return
+        widget = event.widget
+        if not isinstance(widget, ttk.Notebook):
+            return
+        tab_id = widget.select()
+        for name, frame in self.company_frames.items():
+            if str(frame) == tab_id:
+                self.company_var.set(name)
+                self.folder_path.set(str(self.companies_dir / name / "raw"))
+                break
+
     def _on_company_selected(self, _: tk.Event) -> None:  # type: ignore[override]
         company = self.company_var.get()
         self._set_folder_from_company(company)
@@ -481,11 +553,15 @@ class ReportApp:
             self.folder_path.set("")
             self.assigned_pages = {}
             self.assigned_pages_path = None
+            if self.embedded:
+                self._reset_review_scroll()
             return
         folder = self.companies_dir / company / "raw"
         self.folder_path.set(str(folder))
-        self._load_assigned_pages(company)
-        self._refresh_scraped_tab()
+        if self.embedded:
+            self._load_assigned_pages(company)
+            self._refresh_scraped_tab()
+            self._reset_review_scroll()
         if self._config_loaded:
             self._update_last_company(company)
 
@@ -607,6 +683,76 @@ class ReportApp:
 
         self._rebuild_grid()
         self._refresh_scraped_tab()
+        self._reset_review_scroll()
+
+    def _reset_review_scroll(self) -> None:
+        if not hasattr(self, "canvas"):
+            return
+
+        def _scroll() -> None:
+            try:
+                self.canvas.yview_moveto(0)
+                self.canvas.xview_moveto(0)
+            except tk.TclError:
+                pass
+
+        self.root.after_idle(_scroll)
+
+    def create_company(self) -> None:
+        if self.embedded:
+            return
+        name = simpledialog.askstring("New Company", "Enter a name for the new company:", parent=self.root)
+        if name is None:
+            return
+
+        normalized = name.strip()
+        if not normalized:
+            messagebox.showwarning("Invalid Name", "Company name cannot be empty.")
+            return
+
+        safe_name = re.sub(r"[\\/:*?\"<>|]", "_", normalized).strip().strip(".")
+        if not safe_name:
+            messagebox.showwarning(
+                "Invalid Name",
+                "Company name contains only unsupported characters. Please choose a different name.",
+            )
+            return
+
+        if safe_name != normalized:
+            messagebox.showinfo(
+                "Company Name Adjusted",
+                f"Using '{safe_name}' as the folder name due to unsupported characters.",
+            )
+
+        company_dir = self.companies_dir / safe_name
+        raw_dir = company_dir / "raw"
+        try:
+            raw_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            messagebox.showerror("Create Company", f"Could not create folders for '{safe_name}': {exc}")
+            return
+
+        self._refresh_company_options()
+        if hasattr(self, "company_combo"):
+            self.company_combo.set(safe_name)
+        self.company_var.set(safe_name)
+        self._set_folder_from_company(safe_name)
+        if self._config_loaded:
+            self._update_last_company(safe_name)
+
+        self._open_in_file_manager(raw_dir)
+        self._open_company_tab()
+
+    def _open_in_file_manager(self, path: Path) -> None:
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except Exception as exc:
+            messagebox.showwarning("Open Folder", f"Could not open file browser: {exc}")
 
     def _load_assigned_pages(self, company: str) -> None:
         company_dir = self.companies_dir / company
@@ -977,6 +1123,10 @@ class ReportApp:
         dialog.grab_set()
         dialog.focus_set()
 
+        # Ensure the zoom dialog opens maximized so reviewers can inspect the page comfortably.
+        self._maximize_window(dialog)
+        dialog.update_idletasks()
+
         def _close() -> None:
             try:
                 dialog.grab_release()
@@ -994,20 +1144,77 @@ class ReportApp:
 
         container = ttk.Frame(dialog, padding=8)
         container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
 
-        target_width = max(480, self.thumbnail_width_var.get() * 2)
+        canvas = tk.Canvas(container, highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=canvas.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        canvas.configure(xscrollcommand=x_scroll.set, yscrollcommand=y_scroll.set)
+
+        available_width = dialog.winfo_width()
+        if available_width <= 1:
+            available_width = dialog.winfo_screenwidth()
+        target_width = max(480, available_width - 64, self.thumbnail_width_var.get() * 2)
         photo = self._render_page(entry.doc, page_index, target_width)
 
         if photo is not None:
-            label = ttk.Label(container, image=photo)
-            label.pack(expand=True, fill=tk.BOTH)
+            canvas.create_image(0, 0, anchor="nw", image=photo)
             dialog._photo = photo  # type: ignore[attr-defined]
         else:
-            label = ttk.Label(container, text="Preview unavailable")
-            label.pack(expand=True, fill=tk.BOTH)
+            canvas.create_text(
+                canvas.winfo_reqwidth() // 2,
+                canvas.winfo_reqheight() // 2,
+                text="Preview unavailable",
+                anchor="center",
+            )
 
-        label.bind("<Button-1>", lambda _e: _close())
-        container.bind("<Button-1>", lambda _e: _close())
+        bbox = canvas.bbox("all")
+        if bbox:
+            canvas.configure(scrollregion=bbox)
+
+        def _on_mousewheel(event: tk.Event) -> str:  # type: ignore[override]
+            delta = getattr(event, "delta", 0)
+            if delta == 0:
+                button = getattr(event, "num", 0)
+                if button in (4, 6):
+                    delta = 120
+                elif button in (5, 7):
+                    delta = -120
+                else:
+                    delta = -120
+            if getattr(event, "state", 0) & SHIFT_MASK:
+                canvas.xview_scroll(-1 if delta > 0 else 1, "units")
+            else:
+                canvas.yview_scroll(-1 if delta > 0 else 1, "units")
+            return "break"
+
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        canvas.bind("<Shift-MouseWheel>", _on_mousewheel)
+        canvas.bind("<Button-4>", _on_mousewheel)
+        canvas.bind("<Button-5>", _on_mousewheel)
+        canvas.bind("<Shift-Button-4>", _on_mousewheel)
+        canvas.bind("<Shift-Button-5>", _on_mousewheel)
+
+        windowing_system = str(self.root.tk.call("tk", "windowingsystem")).lower()
+        if windowing_system == "x11":
+            for sequence in (
+                "<Button-6>",
+                "<Button-7>",
+                "<Shift-Button-6>",
+                "<Shift-Button-7>",
+            ):
+                try:
+                    canvas.bind(sequence, _on_mousewheel)
+                except tk.TclError:
+                    # Some Tk builds may omit extended button bindings; ignore failures.
+                    pass
+
+        canvas.bind("<Button-1>", lambda _e: _close())
 
     def _set_selected_page(self, entry: PDFEntry, category: str, page_index: int) -> None:
         matches = entry.matches[category]
@@ -1148,10 +1355,16 @@ class ReportApp:
                 ).grid(row=0, column=0, sticky="w")
                 ttk.Button(
                     header_frame,
+                    text="View Prompt",
+                    command=lambda c=category: self._show_prompt_preview(c),
+                    width=12,
+                ).grid(row=0, column=1, sticky="e", padx=(0, 4))
+                ttk.Button(
+                    header_frame,
                     text="Delete",
                     command=lambda d=doc_dir, c=category: self._delete_scrape_output(d, c),
                     width=10,
-                ).grid(row=0, column=1, sticky="e")
+                ).grid(row=0, column=2, sticky="e")
                 row_index += 1
 
                 image_frame = ttk.Frame(self.scraped_inner, padding=8)
@@ -1165,7 +1378,12 @@ class ReportApp:
                 photo = self._render_page(entry.doc, int(page_index), 350)
                 if photo is not None:
                     self.scraped_images.append(photo)
-                    ttk.Label(image_frame, image=photo).pack(expand=True, fill=tk.BOTH)
+                    image_label = ttk.Label(image_frame, image=photo, cursor="hand2")
+                    image_label.pack(expand=True, fill=tk.BOTH)
+                    image_label.bind(
+                        "<Button-1>",
+                        lambda _e, e=entry, p=int(page_index): self.open_thumbnail_zoom(e, p),
+                    )
                 else:
                     ttk.Label(image_frame, text="Preview unavailable").pack(expand=True, fill=tk.BOTH)
 
@@ -1209,6 +1427,44 @@ class ReportApp:
                     tree.pack(expand=True, fill=tk.BOTH)
 
                 row_index += 1
+
+    def _show_prompt_preview(self, category: str) -> None:
+        company = self.company_var.get()
+        if not company:
+            messagebox.showinfo("Prompt Preview", "Select a company to view its prompts.")
+            return
+        prompt_text = self._get_prompt_text(company, category)
+        if prompt_text is None:
+            messagebox.showerror(
+                "Prompt Preview",
+                f"No prompt file found for the '{category}' category.",
+            )
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"{category} Prompt Preview")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        content_frame = ttk.Frame(dialog, padding=(12, 12, 12, 0))
+        content_frame.pack(fill=tk.BOTH, expand=True)
+
+        text_widget = tk.Text(content_frame, wrap="word", width=80, height=25)
+        text_widget.insert("1.0", prompt_text)
+        text_widget.configure(state="disabled")
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(content_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        button_frame = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        button_frame.pack(fill=tk.X)
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.wait_visibility()
+        dialog.focus_set()
 
     def _load_doc_metadata(self, doc_dir: Path) -> Dict[str, Any]:
         metadata_path = doc_dir / "metadata.json"
@@ -1500,6 +1756,8 @@ class ReportApp:
         target.geometry(f"{screen_width}x{screen_height}+0+0")
 
     def _apply_last_company_selection(self) -> None:
+        if self.embedded or not hasattr(self, "company_combo"):
+            return
         if not self.last_company_preference:
             return
         companies = list(self.company_combo["values"])
@@ -1565,16 +1823,21 @@ class ReportApp:
         scrape_root.mkdir(parents=True, exist_ok=True)
 
         errors: List[str] = []
-        pending: Dict[PDFEntry, List[Tuple[str, int]]] = {}
+        pending: List[Tuple[PDFEntry, List[Tuple[str, int]]]] = []
         metadata_cache: Dict[Path, Dict[str, Any]] = {}
+        doc_dir_map: Dict[Path, Path] = {}
 
         for entry in self.pdf_entries:
+            entry_tasks: List[Tuple[str, int]] = []
             doc_dir = scrape_root / entry.stem
             doc_dir.mkdir(parents=True, exist_ok=True)
             metadata = self._load_doc_metadata(doc_dir)
             if not isinstance(metadata, dict):
                 metadata = {}
+            else:
+                metadata = dict(metadata)
             metadata_cache[entry.path] = metadata
+            doc_dir_map[entry.path] = doc_dir
             for category in COLUMNS:
                 page_index = self._get_selected_page_index(entry, category)
                 if page_index is None:
@@ -1593,9 +1856,12 @@ class ReportApp:
                         txt_exists = (doc_dir / txt_name).exists()
                 if csv_exists and txt_exists:
                     continue
-                pending.setdefault(entry, []).append((category, page_index))
+                entry_tasks.append((category, page_index))
 
-        total_tasks = sum(len(items) for items in pending.values())
+            if entry_tasks:
+                pending.append((entry, entry_tasks))
+
+        total_tasks = sum(len(items) for _, items in pending)
         if not total_tasks:
             messagebox.showinfo("AIScrape", "All selected sections already have scraped files.")
             return
@@ -1608,79 +1874,135 @@ class ReportApp:
         successful = 0
         attempted = 0
 
+        metadata_changed: Dict[Path, bool] = {}
+        jobs: List[ScrapeTask] = []
+
+        def _run_job(job: ScrapeTask) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+            try:
+                response_text = self._call_openai(api_key, job.prompt_text, job.page_text)
+            except requests.RequestException as exc:
+                return False, None, f"{job.entry_name} - {job.category}: API request failed ({exc})"
+            except Exception as exc:
+                return False, None, f"{job.entry_name} - {job.category}: {exc}"
+
+            base_name = f"{job.entry_year or 'unknown'}_{job.category}"
+            txt_path = self._ensure_unique_path(job.doc_dir / f"{base_name}.txt")
+
+            try:
+                txt_path.write_text(response_text, encoding="utf-8")
+            except Exception as exc:
+                return False, None, f"{job.entry_name} - {job.category}: Could not save response ({exc})"
+
+            rows = self._convert_response_to_rows(response_text)
+            csv_path = txt_path.with_suffix(".csv")
+
+            try:
+                self._write_csv_rows(rows, csv_path)
+            except Exception as exc:
+                try:
+                    txt_path.unlink(missing_ok=True)
+                except TypeError:
+                    try:
+                        if txt_path.exists():
+                            txt_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except Exception:
+                        pass
+                return False, None, f"{job.entry_name} - {job.category}: Could not write CSV ({exc})"
+
+            metadata_entry = {
+                "csv": csv_path.name,
+                "txt": txt_path.name,
+                "page_index": job.page_index,
+                "year": job.entry_year,
+            }
+            return True, metadata_entry, None
+
         try:
-            for entry, tasks in pending.items():
-                doc_dir = scrape_root / entry.stem
+            for entry, tasks in pending:
                 metadata = metadata_cache.get(entry.path, {})
                 if not isinstance(metadata, dict):
                     metadata = {}
-                metadata_changed = False
+                metadata = dict(metadata)
+                metadata_cache[entry.path] = metadata
+                metadata_changed.setdefault(entry.path, False)
                 for category, page_index in tasks:
                     removed = metadata.pop(category, None)
                     if removed is not None:
-                        metadata_changed = True
+                        metadata_changed[entry.path] = True
                     prompt_text = prompts.get(category)
                     if not prompt_text:
                         attempted += 1
                         if hasattr(self, "scrape_progress"):
                             self.scrape_progress["value"] = attempted
-                            self.root.update_idletasks()
+                            self.root.update()
                         continue
                     try:
                         page = entry.doc.load_page(page_index)
                         page_text = page.get_text("text")
                     except Exception as exc:
                         errors.append(f"{entry.path.name} - {category}: Could not read page ({exc})")
-                    else:
-                        try:
-                            response_text = self._call_openai(api_key, prompt_text, page_text)
-                        except requests.RequestException as exc:
-                            errors.append(f"{entry.path.name} - {category}: API request failed ({exc})")
-                        except Exception as exc:
-                            errors.append(f"{entry.path.name} - {category}: {exc}")
-                        else:
-                            base_name = f"{entry.year or 'unknown'}_{category}"
-                            txt_path = self._ensure_unique_path(doc_dir / f"{base_name}.txt")
-                            write_failed = False
-                            try:
-                                txt_path.write_text(response_text, encoding="utf-8")
-                            except Exception as exc:
-                                errors.append(f"{entry.path.name} - {category}: Could not save response ({exc})")
-                                write_failed = True
-                            if not write_failed:
-                                csv_path = txt_path.with_suffix(".csv")
-                                rows = self._convert_response_to_rows(response_text)
-                                try:
-                                    self._write_csv_rows(rows, csv_path)
-                                except Exception as exc:
-                                    errors.append(f"{entry.path.name} - {category}: Could not write CSV ({exc})")
-                                    try:
-                                        txt_path.unlink(missing_ok=True)
-                                    except TypeError:
-                                        try:
-                                            if txt_path.exists():
-                                                txt_path.unlink()
-                                        except FileNotFoundError:
-                                            pass
-                                        except Exception:
-                                            pass
-                                else:
-                                    metadata[category] = {
-                                        "csv": csv_path.name,
-                                        "txt": txt_path.name,
-                                        "page_index": page_index,
-                                        "year": entry.year,
-                                    }
-                                    metadata_changed = True
-                                    successful += 1
-                    finally:
                         attempted += 1
                         if hasattr(self, "scrape_progress"):
                             self.scrape_progress["value"] = attempted
-                            self.root.update_idletasks()
-                if metadata_changed:
-                    metadata_cache[entry.path] = metadata
-                    self._write_doc_metadata(doc_dir, metadata)
+                            self.root.update()
+                        continue
+
+                    jobs.append(
+                        ScrapeTask(
+                            entry_path=entry.path,
+                            entry_name=entry.path.name,
+                            entry_year=entry.year,
+                            category=category,
+                            page_index=page_index,
+                            prompt_text=prompt_text,
+                            page_text=page_text,
+                            doc_dir=doc_dir_map.get(entry.path, scrape_root / entry.stem),
+                        )
+                    )
+
+            if jobs:
+                max_workers = min(8, max(2, os.cpu_count() or 4))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_map = {executor.submit(_run_job, job): job for job in jobs}
+                    for future in as_completed(future_map):
+                        job = future_map[future]
+                        success = False
+                        metadata_entry: Optional[Dict[str, Any]] = None
+                        error_message: Optional[str] = None
+                        try:
+                            success, metadata_entry, error_message = future.result()
+                        except Exception as exc:
+                            error_message = f"{job.entry_name} - {job.category}: {exc}"
+
+                        attempted += 1
+
+                        if success and metadata_entry is not None:
+                            metadata = metadata_cache.get(job.entry_path, {})
+                            if not isinstance(metadata, dict):
+                                metadata = {}
+                                metadata_cache[job.entry_path] = metadata
+                            metadata[job.category] = metadata_entry
+                            metadata_changed[job.entry_path] = True
+                            successful += 1
+                        elif error_message:
+                            errors.append(error_message)
+
+                        if hasattr(self, "scrape_progress"):
+                            self.scrape_progress["value"] = attempted
+                            self.root.update()
+
+            for entry_path, changed in metadata_changed.items():
+                if not changed:
+                    continue
+                metadata = metadata_cache.get(entry_path, {})
+                if not isinstance(metadata, dict):
+                    continue
+                doc_dir = doc_dir_map.get(entry_path)
+                if doc_dir is None:
+                    continue
+                self._write_doc_metadata(doc_dir, metadata)
         finally:
             if hasattr(self, "scrape_button"):
                 self.scrape_button.state(["!disabled"])

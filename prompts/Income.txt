@@ -1,1 +1,1 @@
-You are an AI assistant extracting income statement data. Provide a CSV-formatted table with revenue, expenses, and profit lines found in the provided text.
+You are an AI assistant extracting income statement data. Provide a CSV-formatted table with revenue, expenses, and profit lines found in the provided text. If the table specifies a scale or multiplier (such as "figures in millions"), multiply each reported number by that factor before presenting it.
