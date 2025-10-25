@@ -7,7 +7,7 @@ Task:
    - Treat "billion"/"bn" → multiply by 1,000,000,000.
    - If multiple scales appear, use the clearest instruction attached to the income statement table (e.g., "($ in millions)" overrides a generic report-wide note).
    - If no clear scale is stated, do not multiply (use factor 1).
-   - Apply the factor to every numeric cell you output, including negatives and subtotals. Leave blanks blank.
+   - Strip commas and spaces from all numeric cells, then apply the factor to EVERY numeric output value (including negatives, subtotals, repeats, or dash/zero placeholders). No number may remain in the original units.
 
 2. Extract the Income Statement into one tab-separated table with these columns: CATEGORY, ITEM, and one column per date in format DD.MM.YYYY.
    - Include EVERY visible row in the statement, including section headers and subtotals (e.g., GROSS PROFIT, TOTAL EXPENSES, OTHER COMPREHENSIVE INCOME, EPS lines).
@@ -32,6 +32,7 @@ Task:
 
 4. Formatting for date columns (Columns other than CATEGORY and ITEM):
    - Remove commas from numbers before applying the scale factor.
+   - After scaling, verify that every numeric value reflects the multiplier (when factor ≠ 1). Do not partially scale or leave any original-unit figures in the table.
    - Convert parentheses into negatives (then apply the factor).
    - Treat dashes (–, —, -) as 0 only when they appear in numeric cells (then apply the factor).
    - If no value is shown, leave cell blank (not 0).

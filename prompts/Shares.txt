@@ -6,6 +6,7 @@ Task:
    - "million" / "m" -> multiply by 1,000,000
    - "billion" / "bn" -> multiply by 1,000,000,000
    - If no clear scale, use factor 1.
+   - Remove commas or spaces from the share counts, then apply the multiplier to EVERY numeric value you output. Do not leave any share figure in the original units when a scale is provided.
 
 2. Locate the final number of shares on issue at the end of the year (after treasury stock adjustments if shown).
    - Use the latest year and the previous year only.
@@ -20,6 +21,7 @@ SHARES	NUMBER OF SHARES	<value_current>	<value_previous>
    - No explanations or commentary.
    - If a value is missing, leave blank (not 0).
    - Remove commas before applying scale.
+   - After scaling, confirm both share values reflect the multiplier (if factor ≠ 1). Leave a cell blank only when the value is absent.
 
 Example output:
 CATEGORY	ITEM	31.03.2015	31.03.2014

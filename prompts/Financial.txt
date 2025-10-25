@@ -14,7 +14,7 @@ Your task:
    - Treat "billion"/"bn" → multiply by 1,000,000,000.
    - If multiple scales appear, use the most specific instruction attached to the statement table (e.g., "($ in millions)" overrides a generic cover note).
    - If no clear scale is stated, do not multiply (use factor 1).
-   - Apply the factor to every numeric cell in the extracted table, including subtotals and negative values. Preserve blanks as blanks.
+   - Remove commas or spaces from every numeric cell before scaling, then apply the factor to EVERY numeric output value (including subtotals, negatives, repeated values, and 0/– entries). There must be no numbers left in the original units.
 
 3. Extract the Balance Sheet into a single, strictly tab-separated table with these columns: CATEGORY, ITEM, and one column per date in format DD.MM.YYYY.
    - Enclose every CATEGORY and ITEM entry in double quotes.
@@ -26,6 +26,7 @@ Your task:
 
 4. Parsing rules:
    - Remove all commas from numbers before applying the scale factor.
+   - After scaling, double-check that each numeric cell you output reflects the multiplier (if factor ≠ 1). Do not skip or partially scale any value.
    - Convert all CATEGORY and ITEM text to UPPER CASE and strip commas/tabs.
    - Replace any dash (–, —, -) in numeric cells with 0 before applying the factor.
    - If a value is in parentheses (e.g., (123.4)), output the negative of that value (after scaling).
