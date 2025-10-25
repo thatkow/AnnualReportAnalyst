@@ -1,24 +1,31 @@
-You are parsing an "Share Equity Statement"
+You are parsing a "Share Equity Statement" to extract only the final number of shares.
 
 Task:
-1. Extract the Statement into one tab-separated table with these columns: CATEGORY, ITEM, and one column per date in format DD.MM.YYYY.
-   CATEGORY = "SHARES"
-   ITEM = "NUMBER OF SHARES"
-   Each date column = the number of shares on issue for that date (as-is, without multiplication).
-   Extract the current year and the previous year only
+1. Identify whether the statement specifies a presentation scale such as "Amounts in thousands," "shares in millions," "(000s)," etc.
+   - "thousand" / "000" → multiply every numeric value by 1,000.
+   - "million" / "m" → multiply by 1,000,000.
+   - "billion" / "bn" → multiply by 1,000,000,000.
+   - If multiple scales appear, use the one directly tied to the table (e.g., "shares (in millions)" overrides a generic note).
+   - If no clear scale, use factor 1.
+   - Remove commas or spaces from every numeric cell before scaling.
+   - You must always output scaled numbers. If the scale is ($000s), output 130 → 130000. Never return raw values.
+   - Apply this multiplier to every numeric cell you output, including negatives, parentheses, and 0/– entries.
 
-2. Number formatting:
-   - Remove commas.
-   - If no value is shown, leave cell blank (not 0).
+2. Locate the final number of shares on issue at the end of the year (after treasury stock adjustments if shown).
+   - Use the latest year and the previous year only.
+   - Apply the scale factor.
 
-3. Output rules:
-   - Use exactly one tab as the separator.
-   - Output one table, starting with headers.
-   - Do not output explanations, just the table.
+3. Output exactly one line of tab-separated values with these headers and values:
+CATEGORY	ITEM	<current_year>	<previous_year>
+SHARES	NUMBER OF SHARES	<value_current>	<value_previous>
 
-Example:
+4. Output rules:
+   - Use one tab per separator.
+   - No explanations or commentary.
+   - If a value is missing, leave blank (not 0).
+   - Remove commas before applying scale.
+   - After scaling, confirm both share values reflect the multiplier (if factor ≠ 1). Leave a cell blank only when the value is absent.
 
-CATEGORY	ITEM	30.06.2018	30.06.2017
-"SHARES"	"NUMBER OF SHARES"	19653493	15062845
-
-
+Example output:
+CATEGORY	ITEM	31.03.2015	31.03.2014
+SHARES	NUMBER OF SHARES	135273000	126601000
