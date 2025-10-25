@@ -366,7 +366,9 @@ class ReportApp:
         self.notebook = notebook
         review_container = ttk.Frame(notebook)
         notebook.add(review_container, text="Review")
-        pattern_section = CollapsibleFrame(review_container, "Regex patterns (one per line)")
+        pattern_section = CollapsibleFrame(
+            review_container, "Regex patterns (one per line)", initially_open=False
+        )
         pattern_section.pack(fill=tk.X, padx=8, pady=4)
         pattern_frame = ttk.Frame(pattern_section.content, padding=8)
         pattern_frame.pack(fill=tk.X)
@@ -834,6 +836,10 @@ class ReportApp:
         if not folder_path.exists():
             messagebox.showerror("Folder Not Found", f"The folder '{folder}' does not exist.")
             return
+
+        company_name = self.company_var.get().strip()
+        if company_name:
+            self._load_assigned_pages(company_name)
 
         self._clear_entries()
         pattern_map, year_patterns = self._gather_patterns()
@@ -1532,8 +1538,7 @@ class ReportApp:
             return
 
         self.scraped_inner.columnconfigure(0, weight=1)
-        self.scraped_inner.columnconfigure(1, weight=1)
-        self.scraped_inner.columnconfigure(2, weight=1)
+        self.scraped_inner.columnconfigure(1, weight=2)
         row_index = 0
         header_added = False
         for entry in self.pdf_entries:
@@ -1554,7 +1559,7 @@ class ReportApp:
                     continue
                 if not header_added:
                     header_frame = ttk.Frame(self.scraped_inner)
-                    header_frame.grid(row=row_index, column=0, columnspan=3, sticky="ew", padx=8, pady=(8, 0))
+                    header_frame.grid(row=row_index, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 0))
                     ttk.Label(
                         header_frame,
                         text="Original PDF Page",
@@ -1562,22 +1567,19 @@ class ReportApp:
                     ).grid(row=0, column=0, sticky="w")
                     ttk.Label(
                         header_frame,
-                        text="Raw Text",
-                        font=("TkDefaultFont", 10, "bold"),
-                    ).grid(row=0, column=1, sticky="w")
-                    ttk.Label(
-                        header_frame,
                         text="Converted CSV",
                         font=("TkDefaultFont", 10, "bold"),
-                    ).grid(row=0, column=2, sticky="w")
+                    ).grid(row=0, column=1, sticky="w")
                     header_frame.columnconfigure(0, weight=1)
                     header_frame.columnconfigure(1, weight=1)
-                    header_frame.columnconfigure(2, weight=1)
                     row_index += 1
                     header_added = True
                 header_frame = ttk.Frame(self.scraped_inner)
-                header_frame.grid(row=row_index, column=0, columnspan=3, sticky="ew", padx=8, pady=(8, 0))
+                header_frame.grid(row=row_index, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 0))
                 header_frame.columnconfigure(0, weight=1)
+                header_frame.columnconfigure(1, weight=0)
+                header_frame.columnconfigure(2, weight=0)
+                header_frame.columnconfigure(3, weight=0)
                 ttk.Label(
                     header_frame,
                     text=f"{entry.path.name} - {category} (Page {int(page_index) + 1})",
@@ -1593,18 +1595,22 @@ class ReportApp:
                 ).grid(row=0, column=1, sticky="e", padx=(0, 4))
                 ttk.Button(
                     header_frame,
+                    text="View Raw Text",
+                    command=lambda e=entry, p=int(page_index): self._show_raw_text_dialog(e, p),
+                    width=14,
+                ).grid(row=0, column=2, sticky="e", padx=(0, 4))
+                ttk.Button(
+                    header_frame,
                     text="Delete",
                     command=lambda d=doc_dir, c=category: self._delete_scrape_output(d, c),
                     width=10,
-                ).grid(row=0, column=2, sticky="e")
+                ).grid(row=0, column=3, sticky="e")
                 row_index += 1
 
                 image_frame = ttk.Frame(self.scraped_inner, padding=8)
                 image_frame.grid(row=row_index, column=0, sticky="nsew", padx=4)
-                text_frame = ttk.Frame(self.scraped_inner, padding=8)
-                text_frame.grid(row=row_index, column=1, sticky="nsew", padx=4)
                 table_frame = ttk.Frame(self.scraped_inner, padding=8)
-                table_frame.grid(row=row_index, column=2, sticky="nsew", padx=4)
+                table_frame.grid(row=row_index, column=1, sticky="nsew", padx=4)
                 self.scraped_inner.rowconfigure(row_index, weight=1)
 
                 photo = self._render_page(entry.doc, int(page_index), 350)
@@ -1618,21 +1624,6 @@ class ReportApp:
                     )
                 else:
                     ttk.Label(image_frame, text="Preview unavailable").pack(expand=True, fill=tk.BOTH)
-
-                raw_text = ""
-                try:
-                    page = entry.doc.load_page(int(page_index))
-                    raw_text = page.get_text("text")
-                except Exception:
-                    raw_text = "Could not load page text."
-
-                text_container = tk.Text(text_frame, wrap="word", height=25)
-                text_container.insert("1.0", raw_text)
-                text_container.configure(state="disabled")
-                text_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_container.yview)
-                text_container.configure(yscrollcommand=text_scroll.set)
-                text_container.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
-                text_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
                 rows = self._read_csv_rows(csv_path)
                 table_frame.columnconfigure(0, weight=1)
@@ -1668,7 +1659,8 @@ class ReportApp:
                             values = list(data)
                             if len(values) < len(columns):
                                 values.extend([""] * (len(columns) - len(values)))
-                            tree.insert("", tk.END, values=values)
+                            display_values = [self._format_table_value(value) for value in values]
+                            tree.insert("", tk.END, values=display_values)
 
                 row_index += 1
 
@@ -1943,6 +1935,43 @@ class ReportApp:
             except Exception as exc:
                 messagebox.showwarning("Combine CSV", f"Could not save combined CSV: {exc}")
 
+    def _show_raw_text_dialog(self, entry: PDFEntry, page_index: int) -> None:
+        try:
+            page = entry.doc.load_page(page_index)
+            page_text = page.get_text("text")
+        except Exception as exc:
+            page_text = f"Unable to load the parsed page text for page {page_index + 1}: {exc}"
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Raw Text - {entry.path.name} (Page {page_index + 1})")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        content_frame = ttk.Frame(dialog, padding=(12, 12, 12, 0))
+        content_frame.pack(fill=tk.BOTH, expand=True)
+
+        text_widget = tk.Text(content_frame, wrap="word", width=80, height=25)
+        text_widget.insert("1.0", page_text)
+        text_widget.configure(font=("TkFixedFont", 9), state="disabled")
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(content_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        button_frame = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        button_frame.pack(fill=tk.X)
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(
+            button_frame,
+            text="Copy",
+            command=lambda: self._copy_to_clipboard(page_text),
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.wait_visibility()
+        dialog.focus_set()
+
     def _show_prompt_preview(self, entry: PDFEntry, category: str, page_index: int) -> None:
         company = self.company_var.get()
         if not company:
@@ -2008,6 +2037,36 @@ class ReportApp:
             messagebox.showwarning(
                 "Copy Failed", "Could not access the clipboard to copy the prompt preview."
             )
+
+    def _format_table_value(self, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            return ""
+
+        suffix = ""
+        normalized = stripped
+        if normalized.endswith("%"):
+            suffix = "%"
+            normalized = normalized[:-1]
+
+        prefix = ""
+        if normalized and normalized[0] in "$€£¥":
+            prefix = normalized[0]
+            normalized = normalized[1:]
+
+        normalized = normalized.strip()
+        if normalized.startswith("(") and normalized.endswith(")") and len(normalized) > 2:
+            normalized = f"-{normalized[1:-1]}"
+
+        normalized = normalized.replace(",", "")
+
+        try:
+            numeric_value = float(normalized)
+        except ValueError:
+            return stripped
+
+        formatted = f"{numeric_value:.6e}"
+        return f"{prefix}{formatted}{suffix}"
 
     def _load_doc_metadata(self, doc_dir: Path) -> Dict[str, Any]:
         metadata_path = doc_dir / "metadata.json"
