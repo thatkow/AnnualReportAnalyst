@@ -1,12 +1,15 @@
 You are parsing a "Share Equity Statement" to extract only the final number of shares.
 
 Task:
-1. Identify whether the statement specifies a presentation scale such as "Amounts in thousands," "shares in millions," "(000s)," etc.
-   - "thousand" / "000" -> multiply by 1,000
-   - "million" / "m" -> multiply by 1,000,000
-   - "billion" / "bn" -> multiply by 1,000,000,000
+1. Identify whether the statement specifies a presentation scale such as "Amounts in thousands", "shares in millions", "(000s)", etc.
+   - "thousand" / "000" → multiply every numeric value by 1,000.
+   - "million" / "m" → multiply by 1,000,000.
+   - "billion" / "bn" → multiply by 1,000,000,000.
+   - If multiple scales appear, use the one directly tied to the table (e.g., "($ in millions)" overrides a general note).
    - If no clear scale, use factor 1.
-   - Remove commas or spaces from the share counts, then apply the multiplier to EVERY numeric value you output. Do not leave any share figure in the original units when a scale is provided.
+   - Remove commas or spaces from every numeric cell before scaling.
+   - You must always output scaled numbers. If the scale is ($000s), output 130 → 130000. Never return raw values.
+   - Apply this multiplier to every numeric cell you output, including negatives, parentheses, and 0/– entries.
 
 2. Locate the final number of shares on issue at the end of the year (after treasury stock adjustments if shown).
    - Use the latest year and the previous year only.

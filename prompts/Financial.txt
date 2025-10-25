@@ -9,12 +9,14 @@ Your task:
    - Stop when the next primary statement begins (e.g., Income Statement, Cash Flows).
 
 2. Before extracting numbers, determine whether the statement indicates a presentation scale such as "Amounts in thousands", "USD millions", "€m", "AUD $ million", "All figures are in thousands", etc.
-   - Treat "thousand"/"000" → multiply every numeric value by 1,000.
-   - Treat "million"/"m" → multiply by 1,000,000.
-   - Treat "billion"/"bn" → multiply by 1,000,000,000.
-   - If multiple scales appear, use the most specific instruction attached to the statement table (e.g., "($ in millions)" overrides a generic cover note).
-   - If no clear scale is stated, do not multiply (use factor 1).
-   - Remove commas or spaces from every numeric cell before scaling, then apply the factor to EVERY numeric output value (including subtotals, negatives, repeated values, and 0/– entries). There must be no numbers left in the original units.
+   - "thousand" / "000" → multiply every numeric value by 1,000.
+   - "million" / "m" → multiply by 1,000,000.
+   - "billion" / "bn" → multiply by 1,000,000,000.
+   - If multiple scales appear, use the one directly tied to the table (e.g., "($ in millions)" overrides a general note).
+   - If no clear scale, use factor 1.
+   - Remove commas or spaces from every numeric cell before scaling.
+   - You must always output scaled numbers. If the scale is ($000s), output 130 → 130000. Never return raw values.
+   - Apply this multiplier to every numeric cell you output, including negatives, parentheses, and 0/– entries.
 
 3. Extract the Balance Sheet into a single, strictly tab-separated table with these columns: CATEGORY, ITEM, and one column per date in format DD.MM.YYYY.
    - Enclose every CATEGORY and ITEM entry in double quotes.

@@ -453,6 +453,12 @@ class ReportApp:
         self.scrape_button.pack(side=tk.LEFT, padx=(8, 0))
         self.scrape_progress = ttk.Progressbar(scraped_controls, orient=tk.HORIZONTAL, mode="determinate", length=200)
         self.scrape_progress.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
+        self.delete_all_button = ttk.Button(
+            scraped_controls,
+            text="Delete All",
+            command=self._delete_all_scraped,
+        )
+        self.delete_all_button.pack(side=tk.RIGHT, padx=(8, 0))
         self.scraped_canvas = tk.Canvas(scraped_container)
         self.scraped_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scraped_scrollbar = ttk.Scrollbar(scraped_container, orient=tk.VERTICAL, command=self.scraped_canvas.yview)
@@ -2126,6 +2132,34 @@ class ReportApp:
         self._refresh_scraped_tab()
         if errors:
             messagebox.showwarning("Delete Output", "\n".join(errors))
+
+    def _delete_all_scraped(self) -> None:
+        company = self.company_var.get()
+        if not company:
+            messagebox.showinfo("Delete Scraped Data", "Select a company before deleting scraped results.")
+            return
+
+        scrape_root = self.companies_dir / company / "openapiscrape"
+        if not scrape_root.exists():
+            messagebox.showinfo("Delete Scraped Data", "No scraped results found for the selected company.")
+            return
+
+        confirm = messagebox.askyesno(
+            "Delete Scraped Data",
+            "Are you sure you want to delete all scraped files for this company?",
+            icon="warning",
+        )
+        if not confirm:
+            return
+
+        try:
+            shutil.rmtree(scrape_root)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            messagebox.showwarning("Delete Scraped Data", f"Could not delete scraped data: {exc}")
+
+        self._refresh_scraped_tab()
 
     def _read_csv_rows(self, csv_path: Path) -> List[List[str]]:
         try:
