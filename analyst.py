@@ -11,6 +11,7 @@ see how individual entries contribute to each reporting period.
 from __future__ import annotations
 
 import csv
+import math
 import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -401,6 +402,40 @@ class FinanceDataset:
             if sources:
                 segment.sources = sources
 
+    def aggregate_totals(
+        self, periods: Sequence[str], *, series: str
+    ) -> Tuple[List[float], List[bool]]:
+        if series == self.FINANCE_LABEL:
+            segments = self.finance_segments
+        elif series == self.INCOME_LABEL:
+            segments = self.income_segments
+        else:
+            return [0.0] * len(periods), [False] * len(periods)
+
+        period_index = {label: idx for idx, label in enumerate(self.periods)}
+        totals: List[float] = []
+        has_data: List[bool] = []
+
+        for label in periods:
+            idx = period_index.get(label)
+            if idx is None:
+                totals.append(0.0)
+                has_data.append(False)
+                continue
+
+            total = 0.0
+            present = False
+            for segment in segments:
+                if idx >= len(segment.values):
+                    continue
+                present = True
+                total += segment.values[idx]
+
+            totals.append(total)
+            has_data.append(present)
+
+        return totals, has_data
+
     def has_data(self) -> bool:
         return bool(self.finance_segments or self.income_segments)
 
@@ -416,6 +451,8 @@ class FinancePlotFrame(ttk.Frame):
     """Container that renders stacked bar plots for one or more companies."""
 
     _PLOT_WIDTH = 0.82
+    MODE_STACKED = "stacked"
+    MODE_LINE = "line"
 
     def __init__(self, parent: tk.Widget) -> None:
         super().__init__(parent)
@@ -426,6 +463,7 @@ class FinancePlotFrame(ttk.Frame):
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         self.hover_helper = BarHoverHelper(self.axis)
         self.hover_helper.attach(self.canvas, context_callback=self._show_context_menu)
+        self.display_mode = self.MODE_STACKED
         self.datasets: "OrderedDict[str, FinanceDataset]" = OrderedDict()
         self.periods: Optional[List[str]] = None
         self._periods_by_key: "OrderedDict[Tuple[str, str, str], List[str]]" = OrderedDict()
@@ -454,9 +492,25 @@ class FinancePlotFrame(ttk.Frame):
         self.axis.set_xticks([])
         self.axis.set_yticks([])
         self.axis.axhline(0, color="#333333", linewidth=0.8)
+        context_callback = (
+            self._show_context_menu if self.display_mode == self.MODE_STACKED else None
+        )
+        self.hover_helper.attach(self.canvas, context_callback=context_callback)
+        if self.display_mode != self.MODE_STACKED:
+            self.hover_helper.clear()
         self.figure.tight_layout()
         self.canvas.draw()
-        self.hover_helper.attach(self.canvas, context_callback=self._show_context_menu)
+
+    def set_display_mode(self, mode: str) -> None:
+        if mode not in {self.MODE_STACKED, self.MODE_LINE}:
+            return
+        if self.display_mode == mode:
+            return
+        self.display_mode = mode
+        if self.datasets:
+            self._render()
+        else:
+            self._render_empty()
 
     def _next_color_pair(self) -> Tuple[str, str]:
         index = len(self._company_colors)
@@ -542,194 +596,255 @@ class FinancePlotFrame(ttk.Frame):
             self._render_empty()
             return
 
-        group_width = self._PLOT_WIDTH
-        bar_width = group_width / max(2 * num_companies, 1)
-        start_offset = -group_width / 2
-
         self.axis.clear()
-        hover_helper = BarHoverHelper(self.axis)
-        hover_helper.attach(self.canvas, context_callback=self._show_context_menu)
+        hover_helper = self.hover_helper
+        mode = self.display_mode
+        context_callback = self._show_context_menu if mode == self.MODE_STACKED else None
+        hover_helper.attach(self.canvas, context_callback=context_callback)
+        if mode != self.MODE_STACKED:
+            hover_helper.clear()
 
-        legend_handles: List[Patch] = []
+        legend_handles: List[Any] = []
 
-        for company_index, (company, dataset) in enumerate(self.datasets.items()):
-            finance_color, income_color = self._company_colors.setdefault(
-                company, self._next_color_pair()
-            )
-            base_offset = start_offset + (2 * company_index) * bar_width
-            finance_positions = [
-                index + base_offset + 0.5 * bar_width for index in period_indices
-            ]
-            income_positions = [
-                index + base_offset + 1.5 * bar_width for index in period_indices
-            ]
+        if mode == self.MODE_STACKED:
+            group_width = self._PLOT_WIDTH
+            bar_width = group_width / max(2 * num_companies, 1)
+            start_offset = -group_width / 2
 
-            finance_segment_values: List[Tuple[RowSegment, List[float]]] = []
-            finance_nonzero = [False] * len(periods)
-            for segment in dataset.finance_segments:
-                segment_period_index = {
-                    label: idx for idx, label in enumerate(segment.periods)
-                }
-                segment_values = [
-                    segment.values[segment_period_index[label]]
-                    if label in segment_period_index
-                    and segment_period_index[label] < len(segment.values)
-                    else 0.0
-                    for label in periods
-                ]
-                for idx, value in enumerate(segment_values):
-                    if value != 0:
-                        finance_nonzero[idx] = True
-                finance_segment_values.append((segment, segment_values))
-
-            finance_active_indices = [
-                idx for idx, flag in enumerate(finance_nonzero) if flag
-            ]
-            finance_positions_active = [
-                finance_positions[idx] for idx in finance_active_indices
-            ]
-            finance_periods_active = [
-                periods[idx] for idx in finance_active_indices
-            ]
-            finance_pos_totals = [0.0] * len(finance_active_indices)
-            finance_neg_totals = [0.0] * len(finance_active_indices)
-
-            if finance_active_indices:
-                for segment, segment_values in finance_segment_values:
-                    filtered_values = [
-                        segment_values[idx] for idx in finance_active_indices
-                    ]
-                    if not any(value != 0 for value in filtered_values):
-                        continue
-                    bottoms = self._compute_bottoms(
-                        filtered_values, finance_pos_totals, finance_neg_totals
-                    )
-                    rectangles = self.axis.bar(
-                        finance_positions_active,
-                        filtered_values,
-                        width=bar_width,
-                        bottom=bottoms,
-                        color=dataset.color_for_key(segment.key),
-                        edgecolor=finance_color,
-                        linewidth=0.8,
-                    )
-                    hover_helper.add_segment(
-                        rectangles,
-                        segment,
-                        finance_periods_active,
-                        company,
-                        values=filtered_values,
-                    )
-
-            income_segment_values: List[Tuple[RowSegment, List[float]]] = []
-            income_nonzero = [False] * len(periods)
-            for segment in dataset.income_segments:
-                segment_period_index = {
-                    label: idx for idx, label in enumerate(segment.periods)
-                }
-                segment_values = [
-                    segment.values[segment_period_index[label]]
-                    if label in segment_period_index
-                    and segment_period_index[label] < len(segment.values)
-                    else 0.0
-                    for label in periods
-                ]
-                for idx, value in enumerate(segment_values):
-                    if value != 0:
-                        income_nonzero[idx] = True
-                income_segment_values.append((segment, segment_values))
-
-            income_active_indices = [
-                idx for idx, flag in enumerate(income_nonzero) if flag
-            ]
-            income_positions_active = [
-                income_positions[idx] for idx in income_active_indices
-            ]
-            income_periods_active = [
-                periods[idx] for idx in income_active_indices
-            ]
-            income_pos_totals = [0.0] * len(income_active_indices)
-            income_neg_totals = [0.0] * len(income_active_indices)
-
-            if income_active_indices:
-                for segment, segment_values in income_segment_values:
-                    filtered_values = [
-                        segment_values[idx] for idx in income_active_indices
-                    ]
-                    if not any(value != 0 for value in filtered_values):
-                        continue
-                    bottoms = self._compute_bottoms(
-                        filtered_values, income_pos_totals, income_neg_totals
-                    )
-                    rectangles = self.axis.bar(
-                        income_positions_active,
-                        filtered_values,
-                        width=bar_width,
-                        bottom=bottoms,
-                        color=dataset.color_for_key(segment.key),
-                        edgecolor=income_color,
-                        linewidth=0.8,
-                    )
-                    hover_helper.add_segment(
-                        rectangles,
-                        segment,
-                        income_periods_active,
-                        company,
-                        values=filtered_values,
-                    )
-
-            if finance_active_indices:
-                finance_totals = [
-                    pos + neg for pos, neg in zip(finance_pos_totals, finance_neg_totals)
-                ]
-                self.axis.scatter(
-                    finance_positions_active,
-                    finance_totals,
-                    color=finance_color,
-                    marker="o",
-                    s=36,
-                    zorder=5,
+            for company_index, (company, dataset) in enumerate(self.datasets.items()):
+                finance_color, income_color = self._company_colors.setdefault(
+                    company, self._next_color_pair()
                 )
-                legend_handles.append(
-                    Patch(
-                        facecolor="white",
-                        edgecolor=finance_color,
-                        linewidth=1.0,
+                base_offset = start_offset + (2 * company_index) * bar_width
+                finance_positions = [
+                    index + base_offset + 0.5 * bar_width for index in period_indices
+                ]
+                income_positions = [
+                    index + base_offset + 1.5 * bar_width for index in period_indices
+                ]
+
+                finance_segment_values: List[Tuple[RowSegment, List[float]]] = []
+                finance_nonzero = [False] * len(periods)
+                for segment in dataset.finance_segments:
+                    segment_period_index = {
+                        label: idx for idx, label in enumerate(segment.periods)
+                    }
+                    segment_values = [
+                        segment.values[segment_period_index[label]]
+                        if label in segment_period_index
+                        and segment_period_index[label] < len(segment.values)
+                        else 0.0
+                        for label in periods
+                    ]
+                    for idx, value in enumerate(segment_values):
+                        if value != 0:
+                            finance_nonzero[idx] = True
+                    finance_segment_values.append((segment, segment_values))
+
+                finance_active_indices = [
+                    idx for idx, flag in enumerate(finance_nonzero) if flag
+                ]
+                finance_positions_active = [
+                    finance_positions[idx] for idx in finance_active_indices
+                ]
+                finance_periods_active = [
+                    periods[idx] for idx in finance_active_indices
+                ]
+                finance_pos_totals = [0.0] * len(finance_active_indices)
+                finance_neg_totals = [0.0] * len(finance_active_indices)
+
+                if finance_active_indices:
+                    for segment, segment_values in finance_segment_values:
+                        filtered_values = [
+                            segment_values[idx] for idx in finance_active_indices
+                        ]
+                        if not any(value != 0 for value in filtered_values):
+                            continue
+                        bottoms = self._compute_bottoms(
+                            filtered_values, finance_pos_totals, finance_neg_totals
+                        )
+                        rectangles = self.axis.bar(
+                            finance_positions_active,
+                            filtered_values,
+                            width=bar_width,
+                            bottom=bottoms,
+                            color=dataset.color_for_key(segment.key),
+                            edgecolor=finance_color,
+                            linewidth=0.8,
+                        )
+                        hover_helper.add_segment(
+                            rectangles,
+                            segment,
+                            finance_periods_active,
+                            company,
+                            values=filtered_values,
+                        )
+
+                income_segment_values: List[Tuple[RowSegment, List[float]]] = []
+                income_nonzero = [False] * len(periods)
+                for segment in dataset.income_segments:
+                    segment_period_index = {
+                        label: idx for idx, label in enumerate(segment.periods)
+                    }
+                    segment_values = [
+                        segment.values[segment_period_index[label]]
+                        if label in segment_period_index
+                        and segment_period_index[label] < len(segment.values)
+                        else 0.0
+                        for label in periods
+                    ]
+                    for idx, value in enumerate(segment_values):
+                        if value != 0:
+                            income_nonzero[idx] = True
+                    income_segment_values.append((segment, segment_values))
+
+                income_active_indices = [
+                    idx for idx, flag in enumerate(income_nonzero) if flag
+                ]
+                income_positions_active = [
+                    income_positions[idx] for idx in income_active_indices
+                ]
+                income_periods_active = [
+                    periods[idx] for idx in income_active_indices
+                ]
+                income_pos_totals = [0.0] * len(income_active_indices)
+                income_neg_totals = [0.0] * len(income_active_indices)
+
+                if income_active_indices:
+                    for segment, segment_values in income_segment_values:
+                        filtered_values = [
+                            segment_values[idx] for idx in income_active_indices
+                        ]
+                        if not any(value != 0 for value in filtered_values):
+                            continue
+                        bottoms = self._compute_bottoms(
+                            filtered_values, income_pos_totals, income_neg_totals
+                        )
+                        rectangles = self.axis.bar(
+                            income_positions_active,
+                            filtered_values,
+                            width=bar_width,
+                            bottom=bottoms,
+                            color=dataset.color_for_key(segment.key),
+                            edgecolor=income_color,
+                            linewidth=0.8,
+                        )
+                        hover_helper.add_segment(
+                            rectangles,
+                            segment,
+                            income_periods_active,
+                            company,
+                            values=filtered_values,
+                        )
+
+                if finance_active_indices:
+                    finance_totals = [
+                        pos + neg for pos, neg in zip(finance_pos_totals, finance_neg_totals)
+                    ]
+                    self.axis.scatter(
+                        finance_positions_active,
+                        finance_totals,
+                        color=finance_color,
+                        marker="o",
+                        s=36,
+                        zorder=5,
+                    )
+                    legend_handles.append(
+                        Patch(
+                            facecolor="white",
+                            edgecolor=finance_color,
+                            linewidth=1.0,
+                            label=f"{company} {FinanceDataset.FINANCE_LABEL}",
+                        )
+                    )
+
+                if income_active_indices:
+                    income_totals = [
+                        pos + neg for pos, neg in zip(income_pos_totals, income_neg_totals)
+                    ]
+                    self.axis.scatter(
+                        income_positions_active,
+                        income_totals,
+                        color=income_color,
+                        marker="o",
+                        s=36,
+                        zorder=5,
+                    )
+                    legend_handles.append(
+                        Patch(
+                            facecolor="white",
+                            edgecolor=income_color,
+                            linewidth=1.0,
+                            label=f"{company} {FinanceDataset.INCOME_LABEL}",
+                        )
+                    )
+
+            if period_indices:
+                left_limit = period_indices[0] + start_offset
+                right_limit = (
+                    period_indices[-1]
+                    + start_offset
+                    + 2 * num_companies * bar_width
+                )
+                padding = bar_width
+                self.axis.set_xlim(left_limit - padding, right_limit + padding)
+                self.axis.set_xticks(period_indices)
+                self.axis.set_xticklabels(periods, rotation=45, ha="right")
+            else:
+                self.axis.set_xlim(-0.6, 0.6)
+                self.axis.set_xticks([])
+
+        else:
+            x_positions = period_indices
+            for company, dataset in self.datasets.items():
+                finance_color, income_color = self._company_colors.setdefault(
+                    company, self._next_color_pair()
+                )
+
+                finance_totals, finance_presence = dataset.aggregate_totals(
+                    periods, series=FinanceDataset.FINANCE_LABEL
+                )
+                finance_points = [
+                    value if finance_presence[idx] else math.nan
+                    for idx, value in enumerate(finance_totals)
+                ]
+                if any(finance_presence):
+                    line = self.axis.plot(
+                        x_positions,
+                        finance_points,
+                        linestyle=":",
+                        marker="o",
+                        color=finance_color,
                         label=f"{company} {FinanceDataset.FINANCE_LABEL}",
                     )
-                )
+                    legend_handles.append(line[0])
 
-            if income_active_indices:
-                income_totals = [
-                    pos + neg for pos, neg in zip(income_pos_totals, income_neg_totals)
-                ]
-                self.axis.scatter(
-                    income_positions_active,
-                    income_totals,
-                    color=income_color,
-                    marker="o",
-                    s=36,
-                    zorder=5,
+                income_totals, income_presence = dataset.aggregate_totals(
+                    periods, series=FinanceDataset.INCOME_LABEL
                 )
-                legend_handles.append(
-                    Patch(
-                        facecolor="white",
-                        edgecolor=income_color,
-                        linewidth=1.0,
+                income_points = [
+                    value if income_presence[idx] else math.nan
+                    for idx, value in enumerate(income_totals)
+                ]
+                if any(income_presence):
+                    line = self.axis.plot(
+                        x_positions,
+                        income_points,
+                        linestyle=":",
+                        marker="o",
+                        color=income_color,
                         label=f"{company} {FinanceDataset.INCOME_LABEL}",
                     )
-                )
+                    legend_handles.append(line[0])
 
-        if period_indices:
-            left_limit = period_indices[0] + start_offset
-            right_limit = period_indices[-1] + start_offset + 2 * num_companies * bar_width
-            padding = bar_width
-            self.axis.set_xlim(left_limit - padding, right_limit + padding)
-            self.axis.set_xticks(period_indices)
-            self.axis.set_xticklabels(periods, rotation=45, ha="right")
-        else:
-            self.axis.set_xlim(-0.6, 0.6)
-            self.axis.set_xticks([])
+            if period_indices:
+                self.axis.set_xticks(period_indices)
+                self.axis.set_xticklabels(periods, rotation=45, ha="right")
+                if period_indices:
+                    self.axis.set_xlim(-0.5, len(period_indices) - 0.5)
+            else:
+                self.axis.set_xlim(-0.6, 0.6)
+                self.axis.set_xticks([])
 
         self.axis.axhline(0, color="#333333", linewidth=0.8)
         self.axis.set_ylabel("Value per Share")
@@ -740,11 +855,13 @@ class FinancePlotFrame(ttk.Frame):
             self.axis.set_title("Finance vs Income Statement")
 
         if legend_handles:
-            self.axis.legend(handles=legend_handles, loc="upper left", ncol=2)
+            legend_kwargs = {"loc": "upper left"}
+            if mode == self.MODE_STACKED:
+                legend_kwargs["ncol"] = 2
+            self.axis.legend(handles=legend_handles, **legend_kwargs)
 
         self.figure.tight_layout()
         self.canvas.draw()
-        self.hover_helper = hover_helper
 
     def _ensure_context_menu(self) -> tk.Menu:
         if self._context_menu is None:
@@ -893,6 +1010,15 @@ class BarHoverHelper:
             self._button_connection_id = canvas.mpl_connect("button_press_event", self._on_button_press)
         else:
             self._button_connection_id = None
+        self._active_rectangle = None
+        self._annotation.set_visible(False)
+
+    def clear(self) -> None:
+        self._rectangles.clear()
+        self._active_rectangle = None
+        self._annotation.set_visible(False)
+        if self._canvas is not None:
+            self._canvas.draw_idle()
 
     def _format_text(self, metadata: Dict[str, Any]) -> str:
         value = metadata.get("value", 0.0)
@@ -911,6 +1037,43 @@ class BarHoverHelper:
             f"Item: {item}\n"
             f"{period}: {formatted_value}"
         )
+
+    def _position_annotation(self, x: float, y: float, value: float) -> None:
+        xlim = self.axis.get_xlim()
+        ylim = self.axis.get_ylim()
+        x_range = xlim[1] - xlim[0] if xlim[1] != xlim[0] else 1.0
+        y_range = ylim[1] - ylim[0] if ylim[1] != ylim[0] else 1.0
+
+        offset_x = 12
+        ha = "left"
+        right_threshold = xlim[1] - 0.08 * x_range
+        left_threshold = xlim[0] + 0.08 * x_range
+        if x >= right_threshold:
+            offset_x = -12
+            ha = "right"
+        elif x <= left_threshold:
+            offset_x = 12
+            ha = "left"
+
+        if value >= 0:
+            offset_y = 12
+            va = "bottom"
+            top_threshold = ylim[1] - 0.08 * y_range
+            if y >= top_threshold:
+                offset_y = -12
+                va = "top"
+        else:
+            offset_y = -12
+            va = "top"
+            bottom_threshold = ylim[0] + 0.08 * y_range
+            if y <= bottom_threshold:
+                offset_y = 12
+                va = "bottom"
+
+        self._annotation.xy = (x, y)
+        self._annotation.xytext = (offset_x, offset_y)
+        self._annotation.set_ha(ha)
+        self._annotation.set_va(va)
 
     def _on_motion(self, event) -> None:
         if self._canvas is None:
@@ -931,12 +1094,12 @@ class BarHoverHelper:
                 self._annotation.set_visible(True)
             self._active_rectangle = rect
             center_x = rect.get_x() + rect.get_width() / 2
-            value = metadata.get("value", 0.0)
+            value = float(metadata.get("value", 0.0))
             if value >= 0:
                 anchor_y = rect.get_y() + rect.get_height()
             else:
                 anchor_y = rect.get_y()
-            self._annotation.xy = (center_x, anchor_y)
+            self._position_annotation(center_x, anchor_y, value)
             self._canvas.draw_idle()
             return
 
@@ -976,6 +1139,7 @@ class FinanceAnalystApp:
         self.companies_dir = self.base_dir / "companies"
 
         self.company_var = tk.StringVar()
+        self.mode_var = tk.StringVar(value=FinancePlotFrame.MODE_STACKED)
 
         self._build_ui()
         self._refresh_company_list()
@@ -999,8 +1163,31 @@ class FinanceAnalystApp:
         self.open_button = ttk.Button(controls, text="Add", command=self._open_selected_company)
         self.open_button.pack(side=tk.LEFT)
 
+        mode_frame = ttk.Frame(outer)
+        mode_frame.pack(fill=tk.X, pady=(0, 12))
+
+        ttk.Label(mode_frame, text="View:").pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            mode_frame,
+            text="Stacked bar components",
+            variable=self.mode_var,
+            value=FinancePlotFrame.MODE_STACKED,
+            command=self._on_mode_change,
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Radiobutton(
+            mode_frame,
+            text="Dotted Line",
+            variable=self.mode_var,
+            value=FinancePlotFrame.MODE_LINE,
+            command=self._on_mode_change,
+        ).pack(side=tk.LEFT, padx=(6, 0))
+
         self.plot_frame = FinancePlotFrame(outer)
         self.plot_frame.pack(fill=tk.BOTH, expand=True)
+
+    def _on_mode_change(self) -> None:
+        mode = self.mode_var.get()
+        self.plot_frame.set_display_mode(mode)
 
     def _maximize_window(self) -> None:
         try:
