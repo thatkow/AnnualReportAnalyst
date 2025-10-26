@@ -331,6 +331,8 @@ class ReportApp:
         self.combined_pdf_order: List[Path] = []
         self.combined_result_tree: Optional[ttk.Treeview] = None
         self.combined_max_data_columns: int = 0
+        self.combined_header_label_widgets: Dict[int, List[Tuple[str, ttk.Label]]] = {}
+        self.combined_label_trace_ids: Dict[int, str] = {}
 
         self._build_ui()
         self._load_pattern_config()
@@ -1717,6 +1719,15 @@ class ReportApp:
             child.destroy()
         for child in self.combined_result_frame.winfo_children():
             child.destroy()
+        for idx, trace_id in list(self.combined_label_trace_ids.items()):
+            var = self.combined_column_label_vars.get(idx)
+            if var is not None:
+                try:
+                    var.trace_remove("write", trace_id)
+                except tk.TclError:
+                    pass
+        self.combined_label_trace_ids.clear()
+        self.combined_header_label_widgets.clear()
         self.combined_csv_sources.clear()
         self.combined_pdf_order = []
         self.combined_result_tree = None
@@ -1749,7 +1760,8 @@ class ReportApp:
             ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
             return
 
-        table_rows: List[Tuple[PDFEntry, str, str, str, List[str]]] = []
+        type_header_map: Dict[str, Dict[Path, Dict[str, Any]]] = {}
+        type_heading_labels: Dict[str, Tuple[str, str]] = {}
         pdf_entries_with_data: List[PDFEntry] = []
         default_headers: Optional[List[str]] = None
         max_data_columns = 0
@@ -1801,32 +1813,31 @@ class ReportApp:
                 if category_index is None or item_index is None:
                     continue
                 data_rows = rows[1:] if len(rows) > 1 else []
+                category_heading_text = (
+                    headings_row[category_index] if category_index < len(headings_row) else "Category"
+                )
+                item_heading_text = (
+                    headings_row[item_index] if item_index < len(headings_row) else "Item"
+                )
                 self.combined_csv_sources[(entry.path, category)] = {
                     "rows": data_rows,
                     "category_index": category_index,
                     "item_index": item_index,
                     "data_indices": data_indices,
                     "headings": [headings_row[i] if i < len(headings_row) else "" for i in data_indices],
-                    "category_heading": headings_row[category_index]
-                    if category_index < len(headings_row)
-                    else "Category",
-                    "item_heading": headings_row[item_index]
-                    if item_index < len(headings_row)
-                    else "Item",
+                    "category_heading": category_heading_text,
+                    "item_heading": item_heading_text,
                 }
-                table_rows.append(
-                    (
-                        entry,
-                        category,
-                        headings_row[category_index]
-                        if category_index < len(headings_row)
-                        else "Category",
-                        headings_row[item_index]
-                        if item_index < len(headings_row)
-                        else "Item",
-                        display_headers or ["(no data columns)"],
-                    )
+                header_entry = type_header_map.setdefault(category, {}).setdefault(entry.path, {})
+                header_entry.update(
+                    {
+                        "headers": display_headers[:],
+                        "category_heading": category_heading_text,
+                        "item_heading": item_heading_text,
+                    }
                 )
+                if category not in type_heading_labels:
+                    type_heading_labels[category] = (category_heading_text, item_heading_text)
                 if default_headers is None and display_headers:
                     default_headers = display_headers[:]
                 max_data_columns = max(max_data_columns, len(display_headers))
@@ -1860,79 +1871,138 @@ class ReportApp:
             if stale_idx >= max_data_columns:
                 self.combined_column_label_vars.pop(stale_idx, None)
 
-        base_columns = ["PDF", "Type", "Category", "Item"]
-        total_columns = len(base_columns) + max_data_columns
+        base_columns = ["Type", "Category", "Item"]
+        pdf_count = len(self.combined_pdf_order)
+        total_columns = len(base_columns) + pdf_count * max_data_columns
         for column_index in range(total_columns):
             weight = 1 if column_index >= len(base_columns) else 0
             self.combined_header_frame.columnconfigure(column_index, weight=weight)
 
+        default_category_heading = "Category"
+        default_item_heading = "Item"
+        for category in COLUMNS:
+            headings = type_heading_labels.get(category)
+            if headings:
+                if headings[0].strip():
+                    default_category_heading = headings[0]
+                if headings[1].strip():
+                    default_item_heading = headings[1]
+                break
+
         current_row = 0
         if max_data_columns:
-            ttk.Label(
-                self.combined_header_frame,
-                text="Final column labels:",
-                font=("TkDefaultFont", 10, "bold"),
-            ).grid(
+            final_label_container = ttk.Frame(self.combined_header_frame)
+            final_label_container.grid(
                 row=current_row,
                 column=0,
-                columnspan=len(base_columns),
-                padx=4,
-                pady=(0, 4),
+                columnspan=max(1, total_columns),
                 sticky="w",
+                pady=(0, 6),
             )
+            ttk.Label(
+                final_label_container,
+                text="Final column labels:",
+                font=("TkDefaultFont", 10, "bold"),
+            ).pack(side=tk.LEFT, padx=(0, 8))
             for idx in range(max_data_columns):
                 var = self.combined_column_label_vars.get(idx)
-                entry = ttk.Entry(self.combined_header_frame, textvariable=var, width=18)
-                entry.grid(
-                    row=current_row,
-                    column=len(base_columns) + idx,
-                    padx=4,
-                    pady=(0, 4),
-                    sticky="ew",
-                )
+                entry = ttk.Entry(final_label_container, textvariable=var, width=18)
+                entry.pack(side=tk.LEFT, padx=(0, 4))
             current_row += 1
 
-        for column_index, label_text in enumerate(base_columns):
+        column_label_values: List[str] = []
+        for idx in range(max_data_columns):
+            var = self.combined_column_label_vars.get(idx)
+            value = var.get().strip() if var else ""
+            if not value:
+                value = f"Value {idx + 1}"
+            column_label_values.append(value)
+
+        for column_index, label_text in enumerate(["Type", default_category_heading, default_item_heading]):
             ttk.Label(
                 self.combined_header_frame,
                 text=label_text,
                 font=("TkDefaultFont", 10, "bold"),
             ).grid(row=current_row, column=column_index, padx=4, pady=(0, 4), sticky="w")
 
-        for idx in range(max_data_columns):
-            ttk.Label(
-                self.combined_header_frame,
-                text=f"Column {idx + 1}",
-                font=("TkDefaultFont", 10, "bold"),
-            ).grid(
-                row=current_row,
-                column=len(base_columns) + idx,
-                padx=4,
-                pady=(0, 4),
-                sticky="w",
-            )
+        self.combined_header_label_widgets = {}
+        column_position = len(base_columns)
+        for pdf_path in self.combined_pdf_order:
+            pdf_label = pdf_path.stem
+            for idx, base_label in enumerate(column_label_values):
+                if max_data_columns == 0:
+                    break
+                header_text = f"{pdf_label}.{base_label}"
+                label_widget = ttk.Label(
+                    self.combined_header_frame,
+                    text=header_text,
+                    font=("TkDefaultFont", 10, "bold"),
+                )
+                label_widget.grid(
+                    row=current_row,
+                    column=column_position,
+                    padx=4,
+                    pady=(0, 4),
+                    sticky="w",
+                )
+                self.combined_header_label_widgets.setdefault(idx, []).append((pdf_label, label_widget))
+                column_position += 1
 
         current_row += 1
-        for entry, category, category_heading, item_heading, headers in table_rows:
-            base_values = [entry.path.stem, category, category_heading, item_heading]
-            for column_index, value in enumerate(base_values):
-                ttk.Label(self.combined_header_frame, text=value).grid(
-                    row=current_row,
-                    column=column_index,
-                    padx=4,
-                    pady=4,
-                    sticky="w",
-                )
-            for idx in range(max_data_columns):
-                header_text = headers[idx] if idx < len(headers) else ""
-                ttk.Label(self.combined_header_frame, text=header_text).grid(
-                    row=current_row,
-                    column=len(base_columns) + idx,
-                    padx=4,
-                    pady=4,
-                    sticky="w",
-                )
+        for category in COLUMNS:
+            header_by_pdf = type_header_map.get(category, {})
+            if not header_by_pdf and category not in type_heading_labels:
+                continue
+            category_heading_text = default_category_heading
+            item_heading_text = default_item_heading
+            for entry_meta in header_by_pdf.values():
+                category_heading_text = entry_meta.get("category_heading", category_heading_text)
+                item_heading_text = entry_meta.get("item_heading", item_heading_text)
+                break
+            ttk.Label(self.combined_header_frame, text=category).grid(
+                row=current_row,
+                column=0,
+                padx=4,
+                pady=4,
+                sticky="w",
+            )
+            ttk.Label(self.combined_header_frame, text=category_heading_text).grid(
+                row=current_row,
+                column=1,
+                padx=4,
+                pady=4,
+                sticky="w",
+            )
+            ttk.Label(self.combined_header_frame, text=item_heading_text).grid(
+                row=current_row,
+                column=2,
+                padx=4,
+                pady=4,
+                sticky="w",
+            )
+            column_position = len(base_columns)
+            for pdf_path in self.combined_pdf_order:
+                headers = header_by_pdf.get(pdf_path, {}).get("headers", [])
+                for idx in range(max_data_columns):
+                    header_text = headers[idx] if idx < len(headers) else ""
+                    ttk.Label(self.combined_header_frame, text=header_text).grid(
+                        row=current_row,
+                        column=column_position,
+                        padx=4,
+                        pady=4,
+                        sticky="w",
+                    )
+                    column_position += 1
             current_row += 1
+
+        for idx in range(max_data_columns):
+            var = self.combined_column_label_vars.get(idx)
+            if var is None or idx not in self.combined_header_label_widgets:
+                continue
+            trace_id = var.trace_add(
+                "write", lambda *_args, position=idx: self._update_combined_column_headers(position)
+            )
+            self.combined_label_trace_ids[idx] = trace_id
 
         if hasattr(self, "combine_confirm_button"):
             self.combine_confirm_button.state(["!disabled"])
@@ -1940,25 +2010,40 @@ class ReportApp:
         if auto_update and self.combined_pdf_order and self.combined_csv_sources and self.combined_result_tree is None:
             self._confirm_combined_table(auto=True)
 
+    def _update_combined_column_headers(self, position: int) -> None:
+        widgets = self.combined_header_label_widgets.get(position)
+        if not widgets:
+            return
+        var = self.combined_column_label_vars.get(position)
+        if var is None:
+            return
+        value = var.get().strip() or f"Value {position + 1}"
+        for pdf_label, label_widget in widgets:
+            label_widget.configure(text=f"{pdf_label}.{value}")
+
     def _confirm_combined_table(self, auto: bool = False) -> None:
         if not self.combined_pdf_order or not self.combined_csv_sources:
             if not auto:
                 messagebox.showinfo("Combine Results", "No scraped data is available to combine.")
             return
 
-        data_column_names: List[str] = []
+        base_column_labels: List[str] = []
         for idx in range(self.combined_max_data_columns):
             var = self.combined_column_label_vars.get(idx)
             label_value = var.get().strip() if var else ""
             if not label_value:
                 label_value = f"Value {idx + 1}"
-            data_column_names.append(label_value)
+            base_column_labels.append(label_value)
 
-        ordered_columns = ["PDF", "Type", "Category", "Item", *data_column_names]
-        combined_records: List[Dict[str, str]] = []
-
+        ordered_columns = ["Type", "Category", "Item"]
         for path in self.combined_pdf_order:
             pdf_label = path.stem
+            for label_value in base_column_labels:
+                ordered_columns.append(f"{pdf_label}.{label_value}")
+
+        record_map: Dict[Tuple[str, str, str], Dict[Tuple[Path, int], str]] = {}
+
+        for path in self.combined_pdf_order:
             for category in COLUMNS:
                 source = self.combined_csv_sources.get((path, category))
                 if not source:
@@ -1974,24 +2059,36 @@ class ReportApp:
                 for row in rows:
                     if category_index >= len(row) or item_index >= len(row):
                         continue
-                    record: Dict[str, str] = {
-                        "PDF": pdf_label,
-                        "Type": category,
-                        "Category": row[category_index],
-                        "Item": row[item_index],
-                    }
+                    category_value = row[category_index]
+                    item_value = row[item_index]
+                    key = (category, category_value, item_value)
+                    value_map = record_map.setdefault(key, {})
                     for position in range(self.combined_max_data_columns):
                         value = ""
                         if position < len(data_indices):
                             data_index = data_indices[position]
                             if data_index < len(row):
                                 value = row[data_index]
-                        if position < len(data_column_names):
-                            column_name = data_column_names[position]
-                        else:
-                            column_name = f"Value {position + 1}"
-                        record[column_name] = value
-                    combined_records.append(record)
+                        value_map[(path, position)] = value
+
+        combined_records: List[Dict[str, str]] = []
+        for category in COLUMNS:
+            category_keys = [key for key in record_map if key[0] == category]
+            category_keys.sort(key=lambda item: (item[1], item[2]))
+            for key in category_keys:
+                _type, category_value, item_value = key
+                value_map = record_map.get(key, {})
+                record: Dict[str, str] = {
+                    "Type": category,
+                    "Category": category_value,
+                    "Item": item_value,
+                }
+                for path in self.combined_pdf_order:
+                    pdf_label = path.stem
+                    for position, base_label in enumerate(base_column_labels):
+                        column_name = f"{pdf_label}.{base_label}"
+                        record[column_name] = value_map.get((path, position), "")
+                combined_records.append(record)
 
         if not combined_records:
             if not auto:
@@ -2018,7 +2115,10 @@ class ReportApp:
 
         for column_name in ordered_columns:
             tree.heading(column_name, text=column_name)
-            tree.column(column_name, anchor="w", stretch=True, width=160)
+            if column_name in {"Type", "Category", "Item"}:
+                tree.column(column_name, anchor="w", stretch=True, width=160)
+            else:
+                tree.column(column_name, anchor="center", stretch=True, width=140)
 
         for record in combined_records:
             values = [record.get(column_name, "") for column_name in ordered_columns]
