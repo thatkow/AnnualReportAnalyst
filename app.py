@@ -10,7 +10,7 @@ import sys
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -41,6 +41,7 @@ NOTE_BACKGROUND_COLORS = {
     "negated": "#4da6ff",
     "share_count": "#ffb6c1",
 }
+HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{6})$")
 DEFAULT_NOTE_KEY_BINDINGS = {
     "": "`",
     "excluded": "1",
@@ -365,7 +366,8 @@ class ReportApp:
         self.combined_column_name_map: Dict[str, Tuple[Path, str]] = {}
         self.combined_base_column_widths: Dict[str, int] = {}
         self.combined_other_column_width: Optional[int] = None
-        self.auto_size_dates_button: Optional[ttk.Button] = None
+        self.type_category_color_map: Dict[str, str] = {}
+        self.type_category_color_labels: Dict[str, str] = {}
         self.note_assignments: Dict[Tuple[str, str, str], str] = {}
         self.note_assignments_path: Optional[Path] = None
         self.note_key_bindings: Dict[str, str] = DEFAULT_NOTE_KEY_BINDINGS.copy()
@@ -525,13 +527,6 @@ class ReportApp:
             state="disabled",
         )
         self.combine_confirm_button.pack(side=tk.RIGHT)
-        self.auto_size_dates_button = ttk.Button(
-            combined_controls,
-            text="Auto Size Dates",
-            command=lambda: self._auto_size_combined_date_columns(ignore_config=True),
-        )
-        self.auto_size_dates_button.pack(side=tk.RIGHT, padx=(0, 8))
-        self.auto_size_dates_button.state(["disabled"])
         ttk.Button(
             combined_controls,
             text="Load Assignments",
@@ -772,6 +767,10 @@ class ReportApp:
         configuration_menu.add_command(
             label="Configure Combined Column Widths",
             command=self._configure_combined_column_widths,
+        )
+        configuration_menu.add_command(
+            label="Configure Type/Category Colors",
+            command=self._configure_type_category_colors,
         )
         menubar.add_cascade(label="Configuration", menu=configuration_menu)
         try:
@@ -1028,6 +1027,197 @@ class ReportApp:
         window.bind("<Escape>", lambda _e: _close())
         window.bind("<Return>", lambda _e: _on_save())
 
+        window.protocol("WM_DELETE_WINDOW", _close)
+
+    def _configure_type_category_colors(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Configure Type/Category Colors")
+        window.transient(self.root)
+        window.grab_set()
+
+        container = ttk.Frame(window, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            container,
+            text=(
+                "Assign background colors to Type or Category values. "
+                "Rows matching these values will use the configured color when no note color overrides it."
+            ),
+            wraplength=460,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        tree = ttk.Treeview(
+            container,
+            columns=("value", "color"),
+            show="headings",
+            height=8,
+            selectmode="browse",
+        )
+        tree.heading("value", text="Value")
+        tree.heading("color", text="Color")
+        tree.column("value", anchor="w", width=220)
+        tree.column("color", anchor="center", width=120)
+        tree.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        y_scroll = ttk.Scrollbar(container, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=y_scroll.set)
+        y_scroll.grid(row=1, column=1, sticky="ns", pady=(12, 0))
+
+        working_map = dict(self.type_category_color_map)
+        working_labels = dict(self.type_category_color_labels)
+
+        def _refresh_tree() -> None:
+            for child in tree.get_children(""):
+                tree.delete(child)
+            entries: List[Tuple[str, str, str]] = []
+            for norm_key, color in working_map.items():
+                label = working_labels.get(norm_key, norm_key)
+                entries.append((label, color, norm_key))
+            for label, color, norm_key in sorted(entries, key=lambda item: item[0].lower()):
+                tree.insert("", tk.END, iid=norm_key, values=(label, color))
+
+        def _prompt_value(initial: str = "") -> Optional[Tuple[str, str]]:
+            value = simpledialog.askstring(
+                "Value",
+                "Enter the Type or Category value to color:",
+                parent=window,
+                initialvalue=initial,
+            )
+            if value is None:
+                return None
+            normalized = self._normalize_type_category_value(value)
+            if not normalized:
+                messagebox.showerror(
+                    "Invalid Value",
+                    "A non-empty value is required.",
+                    parent=window,
+                )
+                return None
+            trimmed = value.strip()
+            return normalized, trimmed
+
+        def _select_key() -> Optional[str]:
+            selection = tree.selection()
+            if not selection:
+                return None
+            return selection[0]
+
+        def _on_add() -> None:
+            result = _prompt_value()
+            if result is None:
+                return
+            normalized, label = result
+            if normalized in working_map:
+                messagebox.showerror(
+                    "Duplicate Value",
+                    "A color is already configured for that value.",
+                    parent=window,
+                )
+                return
+            _, color_hex = colorchooser.askcolor(parent=window, title="Choose Color")
+            if not color_hex:
+                return
+            normalized_color = self._normalize_hex_color(color_hex)
+            if not normalized_color:
+                messagebox.showerror(
+                    "Invalid Color",
+                    "Please choose a valid RGB color.",
+                    parent=window,
+                )
+                return
+            working_map[normalized] = normalized_color
+            working_labels[normalized] = label
+            _refresh_tree()
+
+        def _on_edit() -> None:
+            key = _select_key()
+            if key is None:
+                messagebox.showinfo("Edit Color", "Select a value to edit first.", parent=window)
+                return
+            current_label = working_labels.get(key, key)
+            result = _prompt_value(current_label)
+            if result is None:
+                return
+            new_key, new_label = result
+            if new_key != key and new_key in working_map:
+                messagebox.showerror(
+                    "Duplicate Value",
+                    "Another entry already uses that value.",
+                    parent=window,
+                )
+                return
+            initial_color = working_map.get(key, "#ffffff")
+            _, color_hex = colorchooser.askcolor(
+                parent=window,
+                title="Choose Color",
+                initialcolor=initial_color,
+            )
+            if color_hex:
+                normalized_color = self._normalize_hex_color(color_hex)
+                if not normalized_color:
+                    messagebox.showerror(
+                        "Invalid Color",
+                        "Please choose a valid RGB color.",
+                        parent=window,
+                    )
+                    return
+            else:
+                normalized_color = working_map.get(key)
+                if not normalized_color:
+                    return
+            if new_key != key:
+                working_map.pop(key, None)
+                working_labels.pop(key, None)
+            working_map[new_key] = normalized_color
+            working_labels[new_key] = new_label
+            _refresh_tree()
+            tree.selection_set(new_key)
+
+        def _on_remove() -> None:
+            key = _select_key()
+            if key is None:
+                messagebox.showinfo("Remove Color", "Select a value to remove first.", parent=window)
+                return
+            if not messagebox.askyesno(
+                "Remove Color",
+                "Remove the selected color mapping?",
+                parent=window,
+            ):
+                return
+            working_map.pop(key, None)
+            working_labels.pop(key, None)
+            _refresh_tree()
+
+        _refresh_tree()
+
+        button_row = ttk.Frame(container)
+        button_row.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
+
+        ttk.Button(button_row, text="Remove", command=_on_remove).pack(side=tk.RIGHT)
+        ttk.Button(button_row, text="Edit", command=_on_edit).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(button_row, text="Add", command=_on_add).pack(side=tk.RIGHT, padx=(0, 8))
+
+        def _close() -> None:
+            window.grab_release()
+            window.destroy()
+
+        def _on_save() -> None:
+            self.type_category_color_map = {key: value for key, value in working_map.items() if value}
+            self.type_category_color_labels = {
+                key: working_labels.get(key, key) for key in self.type_category_color_map
+            }
+            self._persist_type_category_colors()
+            self._refresh_type_category_colors()
+            _close()
+
+        ttk.Button(button_row, text="Cancel", command=_close).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(button_row, text="Save", command=_on_save).pack(side=tk.RIGHT, padx=(0, 8))
+
+        window.bind("<Escape>", lambda _e: _close())
+        window.bind("<Return>", lambda _e: _on_save())
         window.protocol("WM_DELETE_WINDOW", _close)
 
     def _collect_recent_downloads(self) -> List[Path]:
@@ -1497,6 +1687,88 @@ class ReportApp:
         existing_tags = list(tree.item(item_id, "tags") or ())
         other_tags = [tag for tag in existing_tags if not tag.startswith("note_value_")]
         tree.item(item_id, tags=tuple(other_tags + [tag_name]))
+
+    def _normalize_type_category_value(self, value: Any) -> str:
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+        elif value is None:
+            normalized = ""
+        else:
+            normalized = str(value).strip().lower()
+        return normalized
+
+    def _normalize_hex_color(self, color: str) -> Optional[str]:
+        if not isinstance(color, str):
+            return None
+        candidate = color.strip()
+        if not candidate:
+            return None
+        if not candidate.startswith("#"):
+            candidate = f"#{candidate}"
+        if HEX_COLOR_RE.match(candidate):
+            return candidate.lower()
+        return None
+
+    def _contrast_foreground_for_color(self, color: str) -> str:
+        hex_color = color.lstrip("#")
+        if len(hex_color) != 6:
+            return "#000000"
+        try:
+            r = int(hex_color[0:2], 16)
+            g = int(hex_color[2:4], 16)
+            b = int(hex_color[4:6], 16)
+        except ValueError:
+            return "#000000"
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        return "#000000" if luminance > 0.6 else "#ffffff"
+
+    def _apply_type_category_color_tag(self, item_id: str, type_value: Any, category_value: Any) -> None:
+        tree = self.combined_result_tree
+        if tree is None or not item_id:
+            return
+        target_value = ""
+        color_value = ""
+        for candidate in (type_value, category_value):
+            normalized = self._normalize_type_category_value(candidate)
+            if normalized and normalized in self.type_category_color_map:
+                candidate_color = self._normalize_hex_color(self.type_category_color_map[normalized])
+                if candidate_color:
+                    target_value = normalized
+                    color_value = candidate_color
+                    break
+        existing_tags = list(tree.item(item_id, "tags") or ())
+        filtered_tags = [tag for tag in existing_tags if not tag.startswith("type_category_color_")]
+        if not target_value or not color_value:
+            if len(filtered_tags) != len(existing_tags):
+                tree.item(item_id, tags=tuple(filtered_tags))
+            return
+        tag_key = re.sub(r"[^0-9a-zA-Z]+", "_", target_value) or "value"
+        tag_name = f"type_category_color_{tag_key}"
+        foreground = self._contrast_foreground_for_color(color_value)
+        tree.tag_configure(tag_name, background=color_value, foreground=foreground)
+        tree.item(item_id, tags=tuple(filtered_tags + [tag_name]))
+
+    def _refresh_type_category_colors(self) -> None:
+        tree = self.combined_result_tree
+        if tree is None or not self.combined_ordered_columns:
+            return
+        try:
+            type_index = self.combined_ordered_columns.index("Type")
+        except ValueError:
+            type_index = None
+        try:
+            category_index = self.combined_ordered_columns.index("Category")
+        except ValueError:
+            category_index = None
+        for item_id in tree.get_children(""):
+            values = list(tree.item(item_id, "values") or [])
+            type_value = values[type_index] if type_index is not None and type_index < len(values) else ""
+            category_value = (
+                values[category_index]
+                if category_index is not None and category_index < len(values)
+                else ""
+            )
+            self._apply_type_category_color_tag(item_id, type_value, category_value)
 
     def _update_combined_notes(self) -> None:
         tree = self.combined_result_tree
@@ -2458,8 +2730,6 @@ class ReportApp:
         self.combined_column_defaults.clear()
         self.combined_labels_by_pdf.clear()
         self.combined_column_name_map.clear()
-        if self.auto_size_dates_button is not None:
-            self.auto_size_dates_button.state(["disabled"])
 
     def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
         if not hasattr(self, "combined_header_frame"):
@@ -2874,6 +3144,11 @@ class ReportApp:
                         str(note_key[1]),
                         str(note_key[2]),
                     )
+            self._apply_type_category_color_tag(
+                item_id,
+                record.get("Type", ""),
+                record.get("Category", ""),
+            )
             note_value = record.get("Note", "")
             if not isinstance(note_value, str):
                 note_value = str(note_value or "")
@@ -2908,16 +3183,7 @@ class ReportApp:
         tree.bind("<Button-5>", _tree_mousewheel)
 
         self._refresh_combined_column_widths()
-
-        has_data_columns = any(
-            column_name not in {"Type", "Category", "Item", "Note"}
-            for column_name in ordered_columns
-        )
-        if self.auto_size_dates_button is not None:
-            if has_data_columns:
-                self.auto_size_dates_button.state(["!disabled"])
-            else:
-                self.auto_size_dates_button.state(["disabled"])
+        self._refresh_type_category_colors()
 
         company = self.company_var.get()
         if company:
@@ -2952,7 +3218,7 @@ class ReportApp:
     def _refresh_combined_column_widths(self) -> None:
         self._destroy_note_editor()
         self._apply_combined_base_column_widths()
-        self._auto_size_combined_date_columns()
+        self._apply_combined_other_column_widths()
 
     def _apply_combined_base_column_widths(self) -> None:
         tree = self.combined_result_tree
@@ -3007,6 +3273,22 @@ class ReportApp:
             self.config_data.pop("combined_other_column_width", None)
         self._write_config()
 
+    def _persist_type_category_colors(self) -> None:
+        if self.type_category_color_map:
+            stored: Dict[str, str] = {}
+            for normalized, color in self.type_category_color_map.items():
+                if not color:
+                    continue
+                label = self.type_category_color_labels.get(normalized, normalized)
+                stored[label] = color
+            if stored:
+                self.config_data["combined_type_category_colors"] = stored
+            else:
+                self.config_data.pop("combined_type_category_colors", None)
+        else:
+            self.config_data.pop("combined_type_category_colors", None)
+        self._write_config()
+
     def _store_combined_base_column_widths(self) -> None:
         tree = self.combined_result_tree
         if tree is None:
@@ -3028,7 +3310,7 @@ class ReportApp:
         if changed:
             self._persist_combined_base_column_widths()
 
-    def _auto_size_combined_date_columns(self, ignore_config: bool = False) -> None:
+    def _apply_combined_other_column_widths(self) -> None:
         tree = self.combined_result_tree
         if tree is None or not self.combined_ordered_columns:
             return
@@ -3038,24 +3320,16 @@ class ReportApp:
             if column_name not in {"Type", "Category", "Item", "Note"}
         ]
         if not date_columns:
-            if self.auto_size_dates_button is not None:
-                self.auto_size_dates_button.state(["disabled"])
             return
         self._destroy_note_editor()
         tree.update_idletasks()
-        if (
-            not ignore_config
-            and isinstance(self.combined_other_column_width, int)
-            and self.combined_other_column_width > 0
-        ):
+        if isinstance(self.combined_other_column_width, int) and self.combined_other_column_width > 0:
             for column_name in date_columns:
                 tree.column(
                     column_name,
                     width=self.combined_other_column_width,
                     minwidth=max(20, self.combined_other_column_width),
                 )
-            if self.auto_size_dates_button is not None:
-                self.auto_size_dates_button.state(["!disabled"])
             return
         tree_font = self._get_tree_font(tree)
         for column_name in date_columns:
@@ -3067,8 +3341,6 @@ class ReportApp:
                 max_width = max(max_width, tree_font.measure(str(value_text)))
             desired_width = max(max_width + 24, 120)
             tree.column(column_name, width=desired_width, minwidth=max(20, desired_width))
-        if self.auto_size_dates_button is not None:
-            self.auto_size_dates_button.state(["!disabled"])
 
     def _show_raw_text_dialog(self, entry: PDFEntry, page_index: int) -> None:
         try:
@@ -3601,6 +3873,7 @@ class ReportApp:
                     self.combined_other_column_width = int(other_width_value)
                 else:
                     self.combined_other_column_width = None
+                self._load_type_category_colors_from_config(data.get("combined_type_category_colors"))
         except Exception as exc:  # pragma: no cover - guard for IO issues
             messagebox.showwarning("Load Patterns", f"Could not load pattern configuration: {exc}")
             self._config_loaded = True
@@ -3633,6 +3906,28 @@ class ReportApp:
         self._ensure_download_settings()
         self._apply_last_company_selection()
         self._config_loaded = True
+
+    def _load_type_category_colors_from_config(self, raw: Any) -> None:
+        self.type_category_color_map = {}
+        self.type_category_color_labels = {}
+        if isinstance(raw, dict):
+            items = raw.items()
+        elif isinstance(raw, list):
+            items = []
+            for entry in raw:
+                if isinstance(entry, dict):
+                    value = entry.get("value")
+                    color = entry.get("color")
+                    items.append((value, color))
+        else:
+            return
+        for key, color in items:  # type: ignore[misc]
+            normalized_key = self._normalize_type_category_value(key)
+            normalized_color = self._normalize_hex_color(str(color)) if color is not None else None
+            if not normalized_key or not normalized_color:
+                continue
+            self.type_category_color_map[normalized_key] = normalized_color
+            self.type_category_color_labels[normalized_key] = str(key).strip()
 
     def _apply_configured_note_key_bindings(self) -> None:
         raw_bindings = self.config_data.get("combined_note_key_bindings")
@@ -3725,6 +4020,19 @@ class ReportApp:
             self.config_data["combined_other_column_width"] = int(self.combined_other_column_width)
         else:
             self.config_data.pop("combined_other_column_width", None)
+        if self.type_category_color_map:
+            stored: Dict[str, str] = {}
+            for normalized, color in self.type_category_color_map.items():
+                if not color:
+                    continue
+                label = self.type_category_color_labels.get(normalized, normalized)
+                stored[label] = color
+            if stored:
+                self.config_data["combined_type_category_colors"] = stored
+            else:
+                self.config_data.pop("combined_type_category_colors", None)
+        else:
+            self.config_data.pop("combined_type_category_colors", None)
         try:
             with self.pattern_config_path.open("w", encoding="utf-8") as fh:
                 json.dump(self.config_data, fh, indent=2)
