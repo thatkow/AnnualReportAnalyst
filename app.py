@@ -398,6 +398,7 @@ class ReportApp:
         self.combined_preview_detail_var = tk.StringVar(
             master=self.root, value="Select a row to view the PDF page."
         )
+        self._combined_zoom_save_job: Optional[str] = None
         self.type_color_map: Dict[str, str] = {}
         self.type_color_labels: Dict[str, str] = {}
         self.category_color_map: Dict[str, str] = {}
@@ -1835,6 +1836,7 @@ class ReportApp:
         self.note_assignments_path = path
         self.note_assignments = self._read_note_assignments_file(path)
         self._update_combined_notes()
+        self._apply_reference_sort_to_combined()
 
     def _ensure_note_assignments_path(self) -> Optional[Path]:
         if self.note_assignments_path is not None:
@@ -1865,6 +1867,7 @@ class ReportApp:
         self.note_assignments = assignments
         self._write_note_assignments()
         self._update_combined_notes()
+        self._apply_reference_sort_to_combined()
         return True
 
     def _prompt_import_note_assignments(self) -> None:
@@ -3615,6 +3618,13 @@ class ReportApp:
 
         records.sort(key=_sort_key)
 
+    def _apply_reference_sort_to_combined(self) -> None:
+        if not self.combined_all_records:
+            return
+        self._sort_combined_records(self.combined_all_records)
+        if self.combined_ordered_columns:
+            self._update_combined_tree_display()
+
     def _append_type_item_category_csv(self) -> None:
         if not self.combined_all_records:
             messagebox.showinfo(
@@ -3774,9 +3784,9 @@ class ReportApp:
         x_scroll.grid(row=1, column=0, columnspan=2, sticky="ew")
         tree.configure(xscrollcommand=x_scroll.set)
 
-        preview_container = ttk.Frame(split_pane, padding=(12, 0))
+        preview_container = ttk.Frame(split_pane, padding=0)
         preview_container.columnconfigure(0, weight=1)
-        preview_container.rowconfigure(2, weight=1)
+        preview_container.rowconfigure(0, weight=1)
         split_pane.add(preview_container, weight=1)
 
         def _lock_split_position(event: tk.Event) -> None:  # type: ignore[override]
@@ -3808,66 +3818,13 @@ class ReportApp:
 
         self.root.after_idle(_initial_split_adjustment)
         self.combined_preview_frame = preview_container
-        preview_container.columnconfigure(0, weight=1)
-        preview_container.rowconfigure(3, weight=1)
-
-        ttk.Label(preview_container, text="PDF Preview", font=("TkDefaultFont", 10, "bold")).grid(
-            row=0, column=0, sticky="w"
-        )
-        ttk.Label(
-            preview_container,
-            textvariable=self.combined_preview_detail_var,
-            justify=tk.LEFT,
-            wraplength=380,
-        ).grid(row=1, column=0, sticky="w", pady=(4, 4))
-
-        zoom_controls = ttk.Frame(preview_container)
-        zoom_controls.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-        zoom_controls.columnconfigure(1, weight=1)
-
-        ttk.Label(zoom_controls, text="Zoom").grid(row=0, column=0, padx=(0, 8))
-
-        zoom_scale = ttk.Scale(
-            zoom_controls,
-            from_=0.5,
-            to=3.0,
-            orient=tk.HORIZONTAL,
-            variable=self.combined_preview_zoom_var,
-            command=lambda value: self._on_combined_preview_zoom_scale(float(value)),
-        )
-        zoom_scale.grid(row=0, column=1, sticky="ew")
-
-        ttk.Label(
-            zoom_controls,
-            textvariable=self.combined_preview_zoom_display_var,
-            width=6,
-            anchor="e",
-        ).grid(row=0, column=2, padx=8)
-
-        ttk.Button(
-            zoom_controls,
-            text="-",
-            width=3,
-            command=lambda: self._adjust_combined_preview_zoom(-0.1),
-        ).grid(row=0, column=3, padx=(0, 4))
-        ttk.Button(
-            zoom_controls,
-            text="Reset",
-            command=self._reset_combined_preview_zoom,
-        ).grid(row=0, column=4, padx=(0, 4))
-        ttk.Button(
-            zoom_controls,
-            text="+",
-            width=3,
-            command=lambda: self._adjust_combined_preview_zoom(0.1),
-        ).grid(row=0, column=5)
 
         canvas = tk.Canvas(preview_container, highlightthickness=0, borderwidth=0)
-        canvas.grid(row=3, column=0, sticky="nsew")
+        canvas.grid(row=0, column=0, sticky="nsew")
         y_scroll = ttk.Scrollbar(preview_container, orient=tk.VERTICAL, command=canvas.yview)
-        y_scroll.grid(row=3, column=1, sticky="ns")
+        y_scroll.grid(row=0, column=1, sticky="ns")
         x_scroll = ttk.Scrollbar(preview_container, orient=tk.HORIZONTAL, command=canvas.xview)
-        x_scroll.grid(row=4, column=0, sticky="ew")
+        x_scroll.grid(row=1, column=0, columnspan=2, sticky="ew")
         canvas.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
         self.combined_preview_canvas = canvas
         self.combined_preview_canvas_image = None
@@ -3916,12 +3873,54 @@ class ReportApp:
         save_frame = ttk.Frame(table_container)
         save_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         save_frame.columnconfigure(0, weight=1)
+
+        zoom_controls = ttk.Frame(save_frame)
+        zoom_controls.grid(row=0, column=0, sticky="ew")
+        zoom_controls.columnconfigure(1, weight=1)
+
+        ttk.Label(zoom_controls, text="Zoom").grid(row=0, column=0, padx=(0, 8))
+
+        zoom_scale = ttk.Scale(
+            zoom_controls,
+            from_=0.5,
+            to=3.0,
+            orient=tk.HORIZONTAL,
+            variable=self.combined_preview_zoom_var,
+            command=lambda value: self._on_combined_preview_zoom_scale(float(value)),
+        )
+        zoom_scale.grid(row=0, column=1, sticky="ew")
+
+        ttk.Label(
+            zoom_controls,
+            textvariable=self.combined_preview_zoom_display_var,
+            width=6,
+            anchor="e",
+        ).grid(row=0, column=2, padx=8)
+
+        ttk.Button(
+            zoom_controls,
+            text="-",
+            width=3,
+            command=lambda: self._adjust_combined_preview_zoom(-0.1),
+        ).grid(row=0, column=3, padx=(0, 4))
+        ttk.Button(
+            zoom_controls,
+            text="Reset",
+            command=self._reset_combined_preview_zoom,
+        ).grid(row=0, column=4, padx=(0, 4))
+        ttk.Button(
+            zoom_controls,
+            text="+",
+            width=3,
+            command=lambda: self._adjust_combined_preview_zoom(0.1),
+        ).grid(row=0, column=5)
+
         save_button = ttk.Button(
             save_frame,
             text="Save Combined CSV",
             command=self._save_combined_csv,
         )
-        save_button.grid(row=0, column=0, sticky="e")
+        save_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
         self.combined_save_button = save_button
 
         for record in records:
@@ -4054,17 +4053,36 @@ class ReportApp:
         percent = int(round(zoom * 100))
         self.combined_preview_zoom_display_var.set(f"{percent}%")
 
+    def _schedule_combined_zoom_persist(self) -> None:
+        if not self._config_loaded:
+            return
+        if self._combined_zoom_save_job is not None:
+            try:
+                self.root.after_cancel(self._combined_zoom_save_job)
+            except Exception:
+                pass
+
+        def _persist() -> None:
+            self._combined_zoom_save_job = None
+            zoom_value = max(0.5, min(3.0, float(self.combined_preview_zoom_var.get())))
+            self.combined_preview_zoom_var.set(zoom_value)
+            self._write_config()
+
+        self._combined_zoom_save_job = self.root.after(250, _persist)
+
     def _adjust_combined_preview_zoom(self, delta: float) -> None:
         zoom = self.combined_preview_zoom_var.get() + delta
         zoom = max(0.5, min(3.0, zoom))
         self.combined_preview_zoom_var.set(zoom)
         self._update_combined_preview_zoom_display()
         self._rerender_combined_preview()
+        self._schedule_combined_zoom_persist()
 
     def _reset_combined_preview_zoom(self) -> None:
         self.combined_preview_zoom_var.set(1.0)
         self._update_combined_preview_zoom_display()
         self._rerender_combined_preview()
+        self._schedule_combined_zoom_persist()
 
     def _on_combined_preview_zoom_scale(self, value: float) -> None:
         zoom = max(0.5, min(3.0, float(value)))
@@ -4072,6 +4090,7 @@ class ReportApp:
             self.combined_preview_zoom_var.set(zoom)
         self._update_combined_preview_zoom_display()
         self._rerender_combined_preview()
+        self._schedule_combined_zoom_persist()
 
     def _rerender_combined_preview(self) -> None:
         target = self.combined_preview_target
@@ -4089,7 +4108,17 @@ class ReportApp:
         detail_text = f"{entry.path.name} — {key[0]} (Page {page_index + 1})"
         zoom = self.combined_preview_zoom_var.get()
         self._update_combined_preview_zoom_display()
-        target_width = max(120, int(480 * zoom))
+        canvas.update_idletasks()
+        canvas_width = canvas.winfo_width()
+        if canvas_width <= 2:
+            try:
+                parent_width = canvas.master.winfo_width() if canvas.master else 0
+            except Exception:
+                parent_width = 0
+            canvas_width = max(canvas_width, parent_width)
+        if canvas_width <= 2:
+            canvas_width = 480
+        target_width = max(120, int(canvas_width * zoom))
         photo = self._render_page(entry.doc, page_index, target_width)
         if photo is None:
             canvas.delete("all")
@@ -5050,6 +5079,11 @@ class ReportApp:
                     self.combined_other_column_width = int(other_width_value)
                 else:
                     self.combined_other_column_width = None
+                zoom_value = data.get("combined_preview_zoom")
+                if isinstance(zoom_value, (int, float)):
+                    zoom = max(0.5, min(3.0, float(zoom_value)))
+                    self.combined_preview_zoom_var.set(zoom)
+                self._update_combined_preview_zoom_display()
                 self._load_type_category_colors_from_config(data)
         except Exception as exc:  # pragma: no cover - guard for IO issues
             messagebox.showwarning("Load Patterns", f"Could not load pattern configuration: {exc}")
@@ -5394,6 +5428,11 @@ class ReportApp:
             self.config_data["combined_other_column_width"] = int(self.combined_other_column_width)
         else:
             self.config_data.pop("combined_other_column_width", None)
+        zoom_value = float(self.combined_preview_zoom_var.get())
+        if 0.5 <= zoom_value <= 3.0:
+            self.config_data["combined_preview_zoom"] = round(zoom_value, 3)
+        else:
+            self.config_data.pop("combined_preview_zoom", None)
         def _build_store(
             color_map: Dict[str, str], labels: Dict[str, str]
         ) -> Dict[str, str]:
