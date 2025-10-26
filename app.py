@@ -3773,7 +3773,7 @@ class ReportApp:
             self._export_final_combined_csv()
             messagebox.showinfo(
                 "Iterate blank notes only",
-                "All notes are currently assigned. Turn off the filter to review every row.",
+                "All notes assigned. Do you wish to finalize and save report?",
             )
             self._combined_blank_notification_shown = True
 
