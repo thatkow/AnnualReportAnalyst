@@ -3388,7 +3388,9 @@ class ReportApp:
         self._destroy_note_editor()
         for child in self.combined_result_frame.winfo_children():
             child.destroy()
-        self.combined_column_ids = {name: f"#{index + 1}" for index, name in enumerate(columns)}
+        # Use the column names directly as identifiers so cell-level tagging and
+        # geometry queries can reliably reference the correct Treeview column.
+        self.combined_column_ids = {name: name for name in columns}
         self.combined_note_cell_tags.clear()
         self.combined_type_cell_tags.clear()
         self.combined_category_cell_tags.clear()
@@ -3439,6 +3441,10 @@ class ReportApp:
         self.combined_preview_image = None
         self._clear_combined_preview()
 
+        other_has_fixed_width = (
+            isinstance(self.combined_other_column_width, int)
+            and self.combined_other_column_width > 0
+        )
         for column_name in columns:
             tree.heading(column_name, text=column_name)
             if column_name in {"Type", "Category", "Item"}:
@@ -3446,7 +3452,11 @@ class ReportApp:
             elif column_name == "Note":
                 tree.column(column_name, anchor="center", stretch=False, minwidth=120)
             else:
-                tree.column(column_name, anchor="center", stretch=True)
+                tree.column(
+                    column_name,
+                    anchor="center",
+                    stretch=not other_has_fixed_width,
+                )
 
         note_index = None
         if "Note" in columns:
@@ -3805,6 +3815,7 @@ class ReportApp:
                     column_name,
                     width=stored_width,
                     minwidth=max(20, stored_width),
+                    stretch=False,
                 )
                 continue
             max_width = tree_font.measure(column_name)
@@ -3816,7 +3827,12 @@ class ReportApp:
                 desired_width = max(max_width + 32, reference_width + 32, 120)
             else:
                 desired_width = max(max_width + 24, 160)
-            tree.column(column_name, width=desired_width, minwidth=max(20, desired_width))
+            tree.column(
+                column_name,
+                width=desired_width,
+                minwidth=max(20, desired_width),
+                stretch=False,
+            )
         other_width = self.combined_other_column_width
         if isinstance(other_width, int) and other_width > 0:
             for column_name in self.combined_ordered_columns:
@@ -3826,6 +3842,7 @@ class ReportApp:
                     column_name,
                     width=other_width,
                     minwidth=max(20, other_width),
+                    stretch=False,
                 )
 
     def _persist_combined_base_column_widths(self) -> None:
@@ -3913,6 +3930,7 @@ class ReportApp:
                     column_name,
                     width=self.combined_other_column_width,
                     minwidth=max(20, self.combined_other_column_width),
+                    stretch=False,
                 )
             return
         tree_font = self._get_tree_font(tree)
@@ -3924,7 +3942,12 @@ class ReportApp:
                     value_text = ""
                 max_width = max(max_width, tree_font.measure(str(value_text)))
             desired_width = max(max_width + 24, 120)
-            tree.column(column_name, width=desired_width, minwidth=max(20, desired_width))
+            tree.column(
+                column_name,
+                width=desired_width,
+                minwidth=max(20, desired_width),
+                stretch=False,
+            )
 
     def _show_raw_text_dialog(self, entry: PDFEntry, page_index: int) -> None:
         try:
