@@ -361,11 +361,15 @@ class ReportApp:
         self.combined_note_column_id: Optional[str] = None
         self.combined_note_editor_item: Optional[str] = None
         self.combined_ordered_columns: List[str] = []
+        self.combined_all_records: List[Dict[str, str]] = []
+        self.combined_record_lookup: Dict[Tuple[str, str, str], Dict[str, str]] = {}
         self.combined_column_defaults: Dict[Tuple[Path, int], str] = {}
         self.combined_labels_by_pdf: Dict[Path, List[str]] = {}
         self.combined_column_name_map: Dict[str, Tuple[Path, str]] = {}
         self.combined_base_column_widths: Dict[str, int] = {}
         self.combined_other_column_width: Optional[int] = None
+        self.combined_show_blank_notes_var = tk.BooleanVar(master=self.root, value=False)
+        self.combined_result_message: Optional[str] = None
         self.type_category_color_map: Dict[str, str] = {}
         self.type_category_color_labels: Dict[str, str] = {}
         self.note_assignments: Dict[Tuple[str, str, str], str] = {}
@@ -533,6 +537,12 @@ class ReportApp:
             combined_controls,
             text="Load Assignments",
             command=self._prompt_import_note_assignments,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Checkbutton(
+            combined_controls,
+            text="Show only blank notes",
+            variable=self.combined_show_blank_notes_var,
+            command=self._on_combined_show_blank_notes_toggle,
         ).pack(side=tk.RIGHT, padx=(0, 8))
         combined_canvas = tk.Canvas(combined_container)
         combined_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -1973,6 +1983,17 @@ class ReportApp:
         self._destroy_note_editor()
 
     def _update_combined_notes(self) -> None:
+        for key, record in self.combined_record_lookup.items():
+            raw_note = self.note_assignments.get(key, "")
+            if isinstance(raw_note, str):
+                note_value = raw_note.strip().lower()
+            else:
+                note_value = str(raw_note or "").strip().lower()
+            if note_value and note_value not in self.note_options:
+                self._register_note_option(note_value)
+            if note_value and note_value not in self.note_options:
+                note_value = ""
+            record["Note"] = note_value
         tree = self.combined_result_tree
         if tree is None:
             return
@@ -1997,6 +2018,11 @@ class ReportApp:
                 tree.item(item_id, values=values)
             self._apply_note_value_tag(item_id, note_value)
         self._destroy_note_editor()
+        if self.combined_show_blank_notes_var.get():
+            try:
+                self.root.after_idle(self._update_combined_tree_display)
+            except tk.TclError:
+                pass
 
     def _on_combined_tree_click(self, event: tk.Event) -> None:  # type: ignore[override]
         tree = self.combined_result_tree
@@ -2249,7 +2275,13 @@ class ReportApp:
             self.note_assignments[key] = normalized_value
         else:
             self.note_assignments.pop(key, None)
+        self._update_combined_record_note_value(key, normalized_value)
         self._write_note_assignments()
+        if self.combined_show_blank_notes_var.get():
+            try:
+                self.root.after_idle(self._update_combined_tree_display)
+            except tk.TclError:
+                pass
 
     def _apply_saved_selection(self, entry: PDFEntry) -> None:
         key = entry.path.name
@@ -2952,9 +2984,12 @@ class ReportApp:
         self.combined_note_record_keys.clear()
         self.combined_note_column_id = None
         self.combined_ordered_columns = []
+        self.combined_all_records = []
+        self.combined_record_lookup = {}
         self.combined_column_defaults.clear()
         self.combined_labels_by_pdf.clear()
         self.combined_column_name_map.clear()
+        self.combined_result_message = None
 
     def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
         if not hasattr(self, "combined_header_frame"):
@@ -3221,6 +3256,152 @@ class ReportApp:
         if auto_update and self.combined_pdf_order and self.combined_csv_sources and self.combined_result_tree is None:
             self._confirm_combined_table(auto=True)
 
+    def _filter_combined_records(self, records: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        if not records:
+            return []
+        if not self.combined_show_blank_notes_var.get():
+            return records
+        filtered: List[Dict[str, str]] = []
+        for record in records:
+            note_value = record.get("Note", "")
+            if isinstance(note_value, str):
+                normalized = note_value.strip()
+            else:
+                normalized = str(note_value or "").strip()
+            if not normalized:
+                filtered.append(record)
+        return filtered
+
+    def _update_combined_tree_display(self) -> None:
+        if not self.combined_ordered_columns:
+            return
+        records = self._filter_combined_records(self.combined_all_records)
+        self._render_combined_tree(records)
+
+    def _on_combined_show_blank_notes_toggle(self) -> None:
+        if not self.combined_ordered_columns:
+            return
+        self._update_combined_tree_display()
+
+    def _render_combined_tree(
+        self,
+        records: List[Dict[str, str]],
+        ordered_columns: Optional[List[str]] = None,
+    ) -> None:
+        if ordered_columns is not None:
+            self.combined_ordered_columns = ordered_columns[:]
+        if not self.combined_ordered_columns:
+            return
+        columns = self.combined_ordered_columns
+        self._destroy_note_editor()
+        for child in self.combined_result_frame.winfo_children():
+            child.destroy()
+        result_container = ttk.Frame(self.combined_result_frame)
+        result_container.pack(fill=tk.BOTH, expand=True)
+        result_container.columnconfigure(0, weight=1)
+        result_container.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(result_container, columns=columns, show="headings")
+        tree.grid(row=0, column=0, sticky="nsew")
+        tree.configure(height=max(len(records), 1))
+
+        def _combined_xscroll(*args: Any) -> None:
+            tree.xview(*args)
+            self._destroy_note_editor()
+
+        x_scroll = ttk.Scrollbar(result_container, orient=tk.HORIZONTAL, command=_combined_xscroll)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        tree.configure(xscrollcommand=x_scroll.set)
+
+        for column_name in columns:
+            tree.heading(column_name, text=column_name)
+            if column_name in {"Type", "Category", "Item"}:
+                tree.column(column_name, anchor="w", stretch=False)
+            elif column_name == "Note":
+                tree.column(column_name, anchor="center", stretch=False, minwidth=120)
+            else:
+                tree.column(column_name, anchor="center", stretch=True)
+
+        note_index = None
+        if "Note" in columns:
+            note_index = columns.index("Note")
+            self.combined_note_column_id = f"#{note_index + 1}"
+        else:
+            self.combined_note_column_id = None
+        self.combined_note_record_keys.clear()
+        self._configure_note_tags(tree)
+        self.combined_result_tree = tree
+
+        for record in records:
+            values = [record.get(column_name, "") for column_name in columns]
+            item_id = tree.insert("", tk.END, values=values)
+            if note_index is not None and item_id:
+                note_key = (
+                    record.get("Type", ""),
+                    record.get("Category", ""),
+                    record.get("Item", ""),
+                )
+                if all(note_key):
+                    self.combined_note_record_keys[item_id] = (
+                        str(note_key[0]),
+                        str(note_key[1]),
+                        str(note_key[2]),
+                    )
+            self._apply_type_category_color_tag(
+                item_id,
+                record.get("Type", ""),
+                record.get("Category", ""),
+            )
+            note_value = record.get("Note", "")
+            if not isinstance(note_value, str):
+                note_value = str(note_value or "")
+            self._apply_note_value_tag(item_id, note_value)
+
+        tree.bind("<Button-1>", self._on_combined_tree_click)
+        tree.bind("<ButtonRelease-1>", self._on_combined_tree_release, add="+")
+        tree.bind("<Configure>", lambda _e: self._destroy_note_editor())
+        tree.bind("<<TreeviewSelect>>", lambda _e: self._destroy_note_editor())
+        tree.bind("<Tab>", self._on_combined_tree_tab)
+        tree.bind("<Shift-Tab>", self._on_combined_tree_shift_tab)
+        tree.bind("<ISO_Left_Tab>", self._on_combined_tree_shift_tab)
+        tree.bind("<Prior>", lambda _e: self._on_combined_tree_page(-10))
+        tree.bind("<Next>", lambda _e: self._on_combined_tree_page(10))
+        tree.bind("<Return>", self._on_combined_tree_return)
+        tree.bind("<Key>", self._on_combined_tree_key)
+
+        def _tree_mousewheel(event: tk.Event) -> str:  # type: ignore[override]
+            self._destroy_note_editor()
+            if event.delta:
+                delta = -int(event.delta / 120)
+                if delta:
+                    self.combined_canvas.yview_scroll(delta, "units")
+            elif getattr(event, "num", None) == 4:
+                self.combined_canvas.yview_scroll(-1, "units")
+            elif getattr(event, "num", None) == 5:
+                self.combined_canvas.yview_scroll(1, "units")
+            return "break"
+
+        tree.bind("<MouseWheel>", _tree_mousewheel)
+        tree.bind("<Button-4>", _tree_mousewheel)
+        tree.bind("<Button-5>", _tree_mousewheel)
+
+        self._refresh_combined_column_widths()
+        self._refresh_type_category_colors()
+        self._render_combined_result_message()
+
+    def _render_combined_result_message(self) -> None:
+        if not self.combined_result_message:
+            return
+        ttk.Label(
+            self.combined_result_frame,
+            text=self.combined_result_message,
+        ).pack(anchor="w", padx=8, pady=(4, 0))
+
+    def _update_combined_record_note_value(self, key: Tuple[str, str, str], value: str) -> None:
+        record = self.combined_record_lookup.get(key)
+        if record is None:
+            return
+        record["Note"] = value
+
     def _confirm_combined_table(self, auto: bool = False) -> None:
         if not self.combined_pdf_order or not self.combined_csv_sources:
             if not auto:
@@ -3324,100 +3505,21 @@ class ReportApp:
                 )
             return
 
-        for child in self.combined_result_frame.winfo_children():
-            child.destroy()
-
-        result_container = ttk.Frame(self.combined_result_frame)
-        result_container.pack(fill=tk.BOTH, expand=True)
-        result_container.columnconfigure(0, weight=1)
-        result_container.rowconfigure(0, weight=1)
-
-        tree = ttk.Treeview(result_container, columns=ordered_columns, show="headings")
-        tree.grid(row=0, column=0, sticky="nsew")
-        tree.configure(height=max(len(combined_records), 1))
-        def _combined_xscroll(*args: Any) -> None:
-            tree.xview(*args)
-            self._destroy_note_editor()
-
-        x_scroll = ttk.Scrollbar(result_container, orient=tk.HORIZONTAL, command=_combined_xscroll)
-        x_scroll.grid(row=1, column=0, sticky="ew")
-        tree.configure(xscrollcommand=x_scroll.set)
-
-        for column_name in ordered_columns:
-            tree.heading(column_name, text=column_name)
-            if column_name in {"Type", "Category", "Item"}:
-                tree.column(column_name, anchor="w", stretch=False)
-            elif column_name == "Note":
-                tree.column(column_name, anchor="center", stretch=False, minwidth=120)
-            else:
-                tree.column(column_name, anchor="center", stretch=True)
-
-        self.combined_ordered_columns = ordered_columns[:]
-        note_index = None
-        if "Note" in ordered_columns:
-            note_index = ordered_columns.index("Note")
-            self.combined_note_column_id = f"#{note_index + 1}"
-        else:
-            self.combined_note_column_id = None
-        self.combined_note_record_keys.clear()
-        self._configure_note_tags(tree)
-        self.combined_result_tree = tree
-
+        self.combined_result_message = None
+        self.combined_all_records = combined_records
+        record_lookup: Dict[Tuple[str, str, str], Dict[str, str]] = {}
         for record in combined_records:
-            values = [record.get(column_name, "") for column_name in ordered_columns]
-            item_id = tree.insert("", tk.END, values=values)
-            if note_index is not None and item_id:
-                note_key = (
-                    record.get("Type", ""),
-                    record.get("Category", ""),
-                    record.get("Item", ""),
-                )
-                if all(note_key):
-                    self.combined_note_record_keys[item_id] = (
-                        str(note_key[0]),
-                        str(note_key[1]),
-                        str(note_key[2]),
-                    )
-            self._apply_type_category_color_tag(
-                item_id,
-                record.get("Type", ""),
-                record.get("Category", ""),
+            key = (
+                str(record.get("Type", "")),
+                str(record.get("Category", "")),
+                str(record.get("Item", "")),
             )
-            note_value = record.get("Note", "")
-            if not isinstance(note_value, str):
-                note_value = str(note_value or "")
-            self._apply_note_value_tag(item_id, note_value)
+            if all(key):
+                record_lookup[key] = record
+        self.combined_record_lookup = record_lookup
 
-        tree.bind("<Button-1>", self._on_combined_tree_click)
-        tree.bind("<ButtonRelease-1>", self._on_combined_tree_release, add="+")
-        tree.bind("<Configure>", lambda _e: self._destroy_note_editor())
-        tree.bind("<<TreeviewSelect>>", lambda _e: self._destroy_note_editor())
-        tree.bind("<Tab>", self._on_combined_tree_tab)
-        tree.bind("<Shift-Tab>", self._on_combined_tree_shift_tab)
-        tree.bind("<ISO_Left_Tab>", self._on_combined_tree_shift_tab)
-        tree.bind("<Prior>", lambda _e: self._on_combined_tree_page(-10))
-        tree.bind("<Next>", lambda _e: self._on_combined_tree_page(10))
-        tree.bind("<Return>", self._on_combined_tree_return)
-        tree.bind("<Key>", self._on_combined_tree_key)
-
-        def _tree_mousewheel(event: tk.Event) -> str:  # type: ignore[override]
-            self._destroy_note_editor()
-            if event.delta:
-                delta = -int(event.delta / 120)
-                if delta:
-                    self.combined_canvas.yview_scroll(delta, "units")
-            elif getattr(event, "num", None) == 4:
-                self.combined_canvas.yview_scroll(-1, "units")
-            elif getattr(event, "num", None) == 5:
-                self.combined_canvas.yview_scroll(1, "units")
-            return "break"
-
-        tree.bind("<MouseWheel>", _tree_mousewheel)
-        tree.bind("<Button-4>", _tree_mousewheel)
-        tree.bind("<Button-5>", _tree_mousewheel)
-
-        self._refresh_combined_column_widths()
-        self._refresh_type_category_colors()
+        display_records = self._filter_combined_records(combined_records)
+        self._render_combined_tree(display_records, ordered_columns)
 
         company = self.company_var.get()
         if company:
@@ -3436,10 +3538,8 @@ class ReportApp:
                 for record in combined_records:
                     csv_rows.append([record.get(column_name, "") for column_name in ordered_columns])
                 self._write_csv_rows(csv_rows, combined_path)
-                ttk.Label(
-                    self.combined_result_frame,
-                    text=f"Combined CSV saved to: {combined_path}",
-                ).pack(anchor="w", padx=8, pady=(4, 0))
+                self.combined_result_message = f"Combined CSV saved to: {combined_path}"
+                self._render_combined_result_message()
             except Exception as exc:
                 messagebox.showwarning("Combine Results", f"Could not save combined CSV: {exc}")
 
