@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import webbrowser
+from datetime import datetime
 
 import matplotlib
 
@@ -255,6 +256,27 @@ class FinanceDataset:
                     raise ValueError(
                         f"share_count value for period '{self.periods[index]}' is zero"
                     )
+
+            sort_indices = list(range(len(self.periods)))
+            try:
+                parsed_periods = [
+                    datetime.strptime(self.periods[idx].strip(), "%d.%m.%Y")
+                    for idx in sort_indices
+                ]
+            except ValueError:
+                parsed_periods = []
+
+            if parsed_periods:
+                sort_indices = [
+                    index
+                    for _, index in sorted(
+                        zip(parsed_periods, sort_indices), key=lambda pair: pair[0]
+                    )
+                ]
+                self.periods = [self.periods[idx] for idx in sort_indices]
+                share_counts = [share_counts[idx] for idx in sort_indices]
+                for segment in self.finance_segments + self.income_segments:
+                    segment.values = [segment.values[idx] for idx in sort_indices]
 
             for segment in self.finance_segments + self.income_segments:
                 segment.values = [
