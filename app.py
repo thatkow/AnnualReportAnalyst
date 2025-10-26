@@ -41,6 +41,12 @@ DEFAULT_NOTE_BACKGROUND_COLORS = {
     "negated": "#4da6ff",
     "share_count": "#ffb6c1",
 }
+DEFAULT_NOTE_LABELS = {
+    "": "Clear note",
+    "excluded": "Excluded",
+    "negated": "Negated",
+    "share_count": "Share Count",
+}
 HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{6})$")
 DEFAULT_NOTE_KEY_BINDINGS = {
     "": "`",
@@ -392,6 +398,7 @@ class ReportApp:
         self.note_options: List[str] = list(DEFAULT_NOTE_OPTIONS)
         self.note_background_colors: Dict[str, str] = DEFAULT_NOTE_BACKGROUND_COLORS.copy()
         self.note_key_bindings: Dict[str, str] = DEFAULT_NOTE_KEY_BINDINGS.copy()
+        self.note_display_labels: Dict[str, str] = DEFAULT_NOTE_LABELS.copy()
 
         self._build_ui()
         self._load_pattern_config()
@@ -930,9 +937,22 @@ class ReportApp:
             row["frame"].destroy()
             _regrid_rows()
 
-        def _create_row(note_value: str, *, display_name: Optional[str] = None, allow_remove: bool = True) -> None:
+        def _create_row(
+            note_value: str,
+            *,
+            display_name: Optional[str] = None,
+            allow_remove: bool = True,
+        ) -> None:
             normalized = note_value.strip().lower() if note_value else ""
-            display = display_name or label_map.get(normalized, normalized or "Clear note")
+            stored_label = self.note_display_labels.get(normalized)
+            if stored_label is None:
+                if normalized in DEFAULT_NOTE_LABELS:
+                    stored_label = DEFAULT_NOTE_LABELS[normalized]
+                elif normalized:
+                    stored_label = normalized
+                else:
+                    stored_label = "Clear note"
+            display = display_name or label_map.get(normalized, stored_label or (normalized or "Clear note"))
             frame = ttk.Frame(rows_container)
             frame.grid(row=len(rows) + 1, column=0, sticky="ew", pady=4)
             frame.columnconfigure(2, weight=1)
@@ -951,6 +971,7 @@ class ReportApp:
             row_data: Dict[str, Any] = {
                 "value": normalized,
                 "display": display,
+                "label_value": display_name if display_name is not None else stored_label,
                 "frame": frame,
                 "entry": entry,
                 "color_var": color_var,
@@ -1018,6 +1039,7 @@ class ReportApp:
             new_bindings: Dict[str, str] = {}
             new_colors: Dict[str, str] = {}
             used_shortcuts: Set[str] = set()
+            label_values: Dict[str, str] = {}
             for row in rows:
                 value = row["value"]
                 entry_widget: tk.Entry = row["entry"]
@@ -1046,17 +1068,40 @@ class ReportApp:
                 new_order.append(value)
                 new_bindings[value] = normalized_shortcut or ""
                 new_colors[value] = normalized_color or ""
+                label_text = row.get("label_value")
+                if not label_text:
+                    if value in DEFAULT_NOTE_LABELS:
+                        label_text = DEFAULT_NOTE_LABELS[value]
+                    elif value:
+                        label_text = value
+                    else:
+                        label_text = "Clear note"
+                label_values[value] = label_text
             if "" not in new_order:
                 new_order.insert(0, "")
                 new_bindings.setdefault("", "")
                 new_colors.setdefault("", "")
+                label_values.setdefault("", "Clear note")
             else:
                 new_order = [""] + [value for value in new_order if value]
+                label_values.setdefault("", "Clear note")
             sanitized_bindings = {value: new_bindings.get(value, "") for value in new_order}
             sanitized_colors = {value: new_colors.get(value, "") for value in new_order}
+            sanitized_labels = {}
+            for value in new_order:
+                label_text = label_values.get(value)
+                if not label_text:
+                    if value in DEFAULT_NOTE_LABELS:
+                        label_text = DEFAULT_NOTE_LABELS[value]
+                    elif value:
+                        label_text = value
+                    else:
+                        label_text = "Clear note"
+                sanitized_labels[value] = label_text
             self.note_options = new_order
             self.note_key_bindings = sanitized_bindings
             self.note_background_colors = sanitized_colors
+            self.note_display_labels = sanitized_labels
             valid_values = set(new_order)
             removed_assignment = False
             for key, note_value in list(self.note_assignments.items()):
@@ -4564,37 +4609,61 @@ class ReportApp:
     def _apply_configured_note_key_bindings(self) -> None:
         note_order: List[str] = []
         seen: Set[str] = set()
+        display_labels: Dict[str, str] = {}
 
-        def _add_option(value: Any) -> None:
-            if isinstance(value, str):
+        def _add_option(value: Any, *, display: Optional[str] = None) -> str:
+            if value is None:
+                normalized_value = ""
+                source_text = ""
+            elif isinstance(value, str):
                 normalized_value = value.strip().lower()
+                source_text = value.strip()
             else:
                 normalized_value = str(value).strip().lower()
+                source_text = str(value).strip()
             if not normalized_value:
                 normalized_value = ""
             if normalized_value in seen:
-                return
+                if display:
+                    display_labels.setdefault(normalized_value, display)
+                elif source_text:
+                    display_labels.setdefault(normalized_value, source_text)
+                return normalized_value
             if normalized_value:
                 note_order.append(normalized_value)
             else:
                 note_order.insert(0, "")
             seen.add(normalized_value)
+            label_text = display
+            if not label_text:
+                if normalized_value in DEFAULT_NOTE_LABELS:
+                    label_text = DEFAULT_NOTE_LABELS[normalized_value]
+                elif source_text:
+                    label_text = source_text
+                elif not normalized_value:
+                    label_text = "Clear note"
+                else:
+                    label_text = normalized_value
+            display_labels[normalized_value] = label_text
+            return normalized_value
 
         configured_colors: Dict[str, str] = {}
         configured_bindings: Dict[str, str] = {}
 
-        _add_option("")
+        _add_option("", display=DEFAULT_NOTE_LABELS.get(""))
 
         raw_settings = self.config_data.get("combined_note_settings")
         if isinstance(raw_settings, list):
             for entry in raw_settings:
                 if not isinstance(entry, dict):
                     continue
-                value = entry.get("value", "")
-                _add_option(value)
-                normalized_value = value.strip().lower() if isinstance(value, str) else str(value).strip().lower()
-                if not normalized_value:
-                    normalized_value = ""
+                raw_value = entry.get("normalized", entry.get("value", ""))
+                display_value = (
+                    entry.get("label")
+                    or entry.get("display")
+                    or entry.get("name")
+                )
+                normalized_value = _add_option(raw_value, display=display_value)
                 color = entry.get("color")
                 normalized_color = self._normalize_hex_color(str(color)) if color else None
                 if normalized_color:
@@ -4609,10 +4678,7 @@ class ReportApp:
         raw_bindings = self.config_data.get("combined_note_key_bindings")
         if isinstance(raw_bindings, dict):
             for value, shortcut in raw_bindings.items():
-                _add_option(value)
-                normalized_value = value.strip().lower() if isinstance(value, str) else str(value).strip().lower()
-                if not normalized_value:
-                    normalized_value = ""
+                normalized_value = _add_option(value)
                 normalized_shortcut = (
                     self._normalize_note_binding_value(str(shortcut)) if shortcut else ""
                 )
@@ -4620,7 +4686,7 @@ class ReportApp:
                     configured_bindings[normalized_value] = normalized_shortcut
 
         for default_value in DEFAULT_NOTE_OPTIONS:
-            _add_option(default_value)
+            _add_option(default_value, display=DEFAULT_NOTE_LABELS.get(default_value))
 
         self.note_options = note_order
         defaults_colors = DEFAULT_NOTE_BACKGROUND_COLORS.copy()
@@ -4642,6 +4708,21 @@ class ReportApp:
         for value, shortcut in configured_bindings.items():
             if value not in self.note_key_bindings:
                 self.note_key_bindings[value] = shortcut or ""
+
+        self.note_display_labels = {}
+        for value in note_order:
+            label_text = display_labels.get(value)
+            if not label_text:
+                if value in DEFAULT_NOTE_LABELS:
+                    label_text = DEFAULT_NOTE_LABELS[value]
+                elif value:
+                    label_text = value
+                else:
+                    label_text = "Clear note"
+            self.note_display_labels[value] = label_text
+        for value, label_text in display_labels.items():
+            if value not in self.note_display_labels:
+                self.note_display_labels[value] = label_text
 
         self._update_note_settings_config_entries()
         self._refresh_note_tags()
@@ -4731,6 +4812,7 @@ class ReportApp:
 
         sanitized_colors: Dict[str, str] = {}
         sanitized_bindings: Dict[str, str] = {}
+        sanitized_labels: Dict[str, str] = {}
         for value in sanitized_order:
             raw_color = self.note_background_colors.get(value, DEFAULT_NOTE_BACKGROUND_COLORS.get(value, ""))
             normalized_color = self._normalize_hex_color(raw_color) if raw_color else None
@@ -4742,20 +4824,33 @@ class ReportApp:
                 self._normalize_note_binding_value(str(stored_shortcut)) if stored_shortcut else ""
             )
             sanitized_bindings[value] = normalized_shortcut or ""
+            label_text = self.note_display_labels.get(value)
+            if not label_text:
+                if value in DEFAULT_NOTE_LABELS:
+                    label_text = DEFAULT_NOTE_LABELS[value]
+                elif value:
+                    label_text = value
+                else:
+                    label_text = "Clear note"
+            sanitized_labels[value] = label_text
 
         self.note_options = sanitized_order
         self.note_background_colors = sanitized_colors
         self.note_key_bindings = sanitized_bindings
+        self.note_display_labels = sanitized_labels
 
         settings_payload: List[Dict[str, str]] = []
         for value in sanitized_order:
-            entry: Dict[str, str] = {"value": value}
+            entry: Dict[str, str] = {"value": value, "normalized": value}
             shortcut = sanitized_bindings.get(value, "")
             if shortcut:
                 entry["shortcut"] = shortcut
             color = sanitized_colors.get(value, "")
             if color:
                 entry["color"] = color
+            label_text = sanitized_labels.get(value, "")
+            if label_text:
+                entry["label"] = label_text
             settings_payload.append(entry)
 
         self.config_data["combined_note_settings"] = settings_payload
