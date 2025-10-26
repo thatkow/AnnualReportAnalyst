@@ -34,6 +34,13 @@ DEFAULT_PATTERNS = {
 }
 YEAR_DEFAULT_PATTERNS = [r"(\d{4})\s+Annual\s+Report"]
 NOTE_OPTIONS = ["", "excluded", "negated", "share_count"]
+MAX_COMBINED_DATE_COLUMNS = 2
+NOTE_BACKGROUND_COLORS = {
+    "": "",
+    "excluded": "#ff4d4f",
+    "negated": "#4da6ff",
+    "share_count": "#ffb6c1",
+}
 DEFAULT_NOTE_KEY_BINDINGS = {
     "": "`",
     "excluded": "1",
@@ -356,6 +363,7 @@ class ReportApp:
         self.combined_column_defaults: Dict[Tuple[Path, int], str] = {}
         self.combined_labels_by_pdf: Dict[Path, List[str]] = {}
         self.combined_column_name_map: Dict[str, Tuple[Path, str]] = {}
+        self.combined_base_column_widths: Dict[str, int] = {}
         self.auto_size_dates_button: Optional[ttk.Button] = None
         self.note_assignments: Dict[Tuple[str, str, str], str] = {}
         self.note_assignments_path: Optional[Path] = None
@@ -1309,7 +1317,7 @@ class ReportApp:
         if value is None:
             return ""
         if isinstance(value, (int, float)):
-            return f"{float(value):.2f}"
+            return f"{float(value):.2e}"
         text = str(value).strip()
         if not text:
             return ""
@@ -1330,8 +1338,34 @@ class ReportApp:
         numeric = self._parse_numeric_value(normalized)
         if numeric is None:
             return text
-        formatted = f"{numeric:.2f}"
+        formatted = f"{numeric:.2e}"
         return f"{prefix}{formatted}{suffix}"
+
+    def _note_tag_for_value(self, value: str) -> str:
+        normalized = value.strip().lower() if isinstance(value, str) else ""
+        if normalized not in NOTE_BACKGROUND_COLORS:
+            normalized = ""
+        return f"note_value_{normalized or 'blank'}"
+
+    def _configure_note_tags(self, tree: ttk.Treeview) -> None:
+        for note_value, color in NOTE_BACKGROUND_COLORS.items():
+            tag_name = self._note_tag_for_value(note_value)
+            kwargs: Dict[str, Any] = {"background": color or ""}
+            if color:
+                if note_value == "share_count":
+                    kwargs["foreground"] = "#000000"
+                else:
+                    kwargs["foreground"] = "#ffffff"
+            tree.tag_configure(tag_name, **kwargs)
+
+    def _apply_note_value_tag(self, item_id: str, value: str) -> None:
+        tree = self.combined_result_tree
+        if tree is None:
+            return
+        tag_name = self._note_tag_for_value(value)
+        existing_tags = list(tree.item(item_id, "tags") or ())
+        other_tags = [tag for tag in existing_tags if not tag.startswith("note_value_")]
+        tree.item(item_id, tags=tuple(other_tags + [tag_name]))
 
     def _update_combined_notes(self) -> None:
         tree = self.combined_result_tree
@@ -1348,6 +1382,7 @@ class ReportApp:
             if values[note_index] != note_value:
                 values[note_index] = note_value
                 tree.item(item_id, values=values)
+            self._apply_note_value_tag(item_id, note_value)
         self._destroy_note_editor()
 
     def _on_combined_tree_click(self, event: tk.Event) -> None:  # type: ignore[override]
@@ -1446,6 +1481,9 @@ class ReportApp:
             return None
         self._apply_note_binding_to_selection(note_value)
         return "break"
+
+    def _on_combined_tree_release(self, _: tk.Event) -> None:  # type: ignore[override]
+        self._store_combined_base_column_widths()
 
     def _on_combined_tree_tab(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
         return self._move_combined_selection(1)
@@ -1575,6 +1613,7 @@ class ReportApp:
             if values[note_index] != value:
                 values[note_index] = value
                 tree.item(item_id, values=values)
+        self._apply_note_value_tag(item_id, value)
         key = self.combined_note_record_keys.get(item_id)
         if not key:
             return
@@ -2365,6 +2404,9 @@ class ReportApp:
                     else:
                         data_indices.append(idx)
                         display_headers.append(heading.strip() or f"Column {idx + 1}")
+                if len(display_headers) > MAX_COMBINED_DATE_COLUMNS:
+                    display_headers = display_headers[:MAX_COMBINED_DATE_COLUMNS]
+                    data_indices = data_indices[:MAX_COMBINED_DATE_COLUMNS]
                 if category_index is None or item_index is None:
                     continue
                 data_rows = rows[1:] if len(rows) > 1 else []
@@ -2417,7 +2459,7 @@ class ReportApp:
             return
 
         self.combined_pdf_order = [entry.path for entry in pdf_entries_with_data]
-        self.combined_max_data_columns = max_data_columns
+        self.combined_max_data_columns = min(max_data_columns, MAX_COMBINED_DATE_COLUMNS)
         logger.info(
             "Combined PDF order: %s with max data columns=%d",
             [path.name for path in self.combined_pdf_order],
@@ -2683,6 +2725,8 @@ class ReportApp:
         else:
             self.combined_note_column_id = None
         self.combined_note_record_keys.clear()
+        self._configure_note_tags(tree)
+        self.combined_result_tree = tree
 
         for record in combined_records:
             values = [record.get(column_name, "") for column_name in ordered_columns]
@@ -2699,8 +2743,13 @@ class ReportApp:
                         str(note_key[1]),
                         str(note_key[2]),
                     )
+            note_value = record.get("Note", "")
+            if not isinstance(note_value, str):
+                note_value = str(note_value or "")
+            self._apply_note_value_tag(item_id, note_value)
 
         tree.bind("<Button-1>", self._on_combined_tree_click)
+        tree.bind("<ButtonRelease-1>", self._on_combined_tree_release, add="+")
         tree.bind("<Configure>", lambda _e: self._destroy_note_editor())
         tree.bind("<<TreeviewSelect>>", lambda _e: self._destroy_note_editor())
         tree.bind("<Tab>", self._on_combined_tree_tab)
@@ -2726,8 +2775,6 @@ class ReportApp:
         tree.bind("<MouseWheel>", _tree_mousewheel)
         tree.bind("<Button-4>", _tree_mousewheel)
         tree.bind("<Button-5>", _tree_mousewheel)
-
-        self.combined_result_tree = tree
 
         self._apply_combined_base_column_widths()
         self._auto_size_combined_date_columns()
@@ -2778,20 +2825,61 @@ class ReportApp:
             return
         tree.update_idletasks()
         tree_font = self._get_tree_font(tree)
+        updated = False
         for column_name in self.combined_ordered_columns:
-            if column_name in {"Type", "Category", "Item"}:
-                max_width = tree_font.measure(column_name)
-                for item_id in tree.get_children(""):
-                    value_text = tree.set(item_id, column_name) or ""
-                    max_width = max(max_width, tree_font.measure(str(value_text)))
-                tree.column(column_name, width=max(max_width + 24, 160))
-            elif column_name == "Note":
-                max_width = tree_font.measure(column_name)
-                for item_id in tree.get_children(""):
-                    value_text = tree.set(item_id, column_name) or ""
-                    max_width = max(max_width, tree_font.measure(str(value_text)))
+            if column_name not in {"Type", "Category", "Item", "Note"}:
+                continue
+            stored_width = self.combined_base_column_widths.get(column_name)
+            if stored_width:
+                tree.column(column_name, width=stored_width)
+                continue
+            max_width = tree_font.measure(column_name)
+            for item_id in tree.get_children(""):
+                value_text = tree.set(item_id, column_name) or ""
+                max_width = max(max_width, tree_font.measure(str(value_text)))
+            if column_name == "Note":
                 reference_width = tree_font.measure("share_count")
-                tree.column(column_name, width=max(max_width + 32, reference_width + 32, 120))
+                desired_width = max(max_width + 32, reference_width + 32, 120)
+            else:
+                desired_width = max(max_width + 24, 160)
+            tree.column(column_name, width=desired_width)
+            if desired_width > 0:
+                self.combined_base_column_widths[column_name] = int(desired_width)
+                updated = True
+        if updated:
+            self._persist_combined_base_column_widths()
+
+    def _persist_combined_base_column_widths(self) -> None:
+        if not self.combined_base_column_widths:
+            self.config_data.pop("combined_base_column_widths", None)
+        else:
+            self.config_data["combined_base_column_widths"] = {
+                column: int(width)
+                for column, width in self.combined_base_column_widths.items()
+                if column in {"Type", "Category", "Item", "Note"} and width > 0
+            }
+        self._write_config()
+
+    def _store_combined_base_column_widths(self) -> None:
+        tree = self.combined_result_tree
+        if tree is None:
+            return
+        changed = False
+        for column_name in ("Type", "Category", "Item", "Note"):
+            if column_name not in self.combined_ordered_columns:
+                continue
+            try:
+                column_info = tree.column(column_name)
+            except tk.TclError:
+                continue
+            width = int(column_info.get("width", 0)) if isinstance(column_info, dict) else 0
+            if width <= 0:
+                continue
+            if self.combined_base_column_widths.get(column_name) != width:
+                self.combined_base_column_widths[column_name] = width
+                changed = True
+        if changed:
+            self._persist_combined_base_column_widths()
 
     def _auto_size_combined_date_columns(self) -> None:
         tree = self.combined_result_tree
@@ -3337,6 +3425,16 @@ class ReportApp:
             with self.pattern_config_path.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
                 self.config_data = data
+                stored_widths = data.get("combined_base_column_widths")
+                if isinstance(stored_widths, dict):
+                    valid_widths: Dict[str, int] = {}
+                    for column_name in ("Type", "Category", "Item", "Note"):
+                        width_value = stored_widths.get(column_name)
+                        if isinstance(width_value, (int, float)) and width_value > 0:
+                            valid_widths[column_name] = int(width_value)
+                    self.combined_base_column_widths = valid_widths
+                else:
+                    self.combined_base_column_widths = {}
         except Exception as exc:  # pragma: no cover - guard for IO issues
             messagebox.showwarning("Load Patterns", f"Could not load pattern configuration: {exc}")
             self._config_loaded = True
@@ -3451,6 +3549,11 @@ class ReportApp:
     def _write_config(self) -> None:
         self.config_data["combined_note_key_bindings"] = {
             option: self.note_key_bindings.get(option, "") for option in NOTE_OPTIONS
+        }
+        self.config_data["combined_base_column_widths"] = {
+            column: int(width)
+            for column, width in self.combined_base_column_widths.items()
+            if column in {"Type", "Category", "Item", "Note"} and width > 0
         }
         try:
             with self.pattern_config_path.open("w", encoding="utf-8") as fh:
