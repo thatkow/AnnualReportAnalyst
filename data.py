@@ -33,16 +33,18 @@ DEFAULT_PATTERNS = {
     "Shares": ["Movements in issued capital"],
 }
 YEAR_DEFAULT_PATTERNS = [r"(\d{4})\s+Annual\s+Report"]
-DEFAULT_NOTE_OPTIONS = ["", "excluded", "negated", "share_count"]
+DEFAULT_NOTE_OPTIONS = ["", "asis", "excluded", "negated", "share_count"]
 MAX_COMBINED_DATE_COLUMNS = 2
 DEFAULT_NOTE_BACKGROUND_COLORS = {
     "": "",
+    "asis": "",
     "excluded": "#ff4d4f",
     "negated": "#4da6ff",
     "share_count": "#ffb6c1",
 }
 DEFAULT_NOTE_LABELS = {
     "": "Clear note",
+    "asis": "As Is",
     "excluded": "Excluded",
     "negated": "Negated",
     "share_count": "Share Count",
@@ -50,9 +52,10 @@ DEFAULT_NOTE_LABELS = {
 HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{6})$")
 DEFAULT_NOTE_KEY_BINDINGS = {
     "": "`",
-    "excluded": "1",
-    "negated": "2",
-    "share_count": "3",
+    "asis": "1",
+    "excluded": "2",
+    "negated": "3",
+    "share_count": "4",
 }
 SPECIAL_KEYSYM_ALIASES = {
     "`": "grave",

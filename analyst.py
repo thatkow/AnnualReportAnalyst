@@ -1,17 +1,18 @@
 """Standalone analyst application for combined CSV summaries.
 
-This lightweight Tkinter application lets reviewers choose a company that has a
-``combined.csv`` file in ``companies/<company>/``. When a company is opened, the
-app creates a new tab containing side-by-side bar charts for Finance and Income
-Statement sections. Each bar is stacked by the underlying rows from the
-``combined.csv`` file so reviewers can see how individual entries contribute to
-each reporting period.
+This lightweight Tkinter application lets reviewers choose companies that have
+``combined.csv`` files in ``companies/<company>/``. When a company is opened, it
+is added to a shared set of side-by-side Finance and Income Statement charts so
+reviewers can compare multiple companies without switching tabs. Each bar is
+stacked by the underlying rows from the ``combined.csv`` file so reviewers can
+see how individual entries contribute to each reporting period.
 """
 
 from __future__ import annotations
 
 import csv
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -238,12 +239,25 @@ class FinanceDataset:
         return self._color_cache[key]
 
 
-class FinanceNotebook(ttk.Notebook):
-    """Notebook that renders stacked bar plots for each company."""
+class FinancePlotFrame(ttk.Frame):
+    """Container that renders stacked bar plots for one or more companies."""
+
+    _PLOT_WIDTH = 0.82
 
     def __init__(self, parent: tk.Widget) -> None:
         super().__init__(parent)
-        self._open_tabs: Dict[str, tk.Widget] = {}
+        self.figure = Figure(figsize=(8, 5), dpi=100)
+        self.axis = self.figure.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.hover_helper = BarHoverHelper(self.axis)
+        self.hover_helper.attach(self.canvas)
+        self.datasets: "OrderedDict[str, FinanceDataset]" = OrderedDict()
+        self.periods: Optional[List[str]] = None
+        self._company_colors: Dict[str, Tuple[str, str]] = {}
+        self._palette = list(cm.get_cmap("tab10").colors)
+        self._render_empty()
 
     @staticmethod
     def _compute_bottoms(values: Sequence[float], pos_totals: List[float], neg_totals: List[float]) -> List[float]:
@@ -258,98 +272,169 @@ class FinanceNotebook(ttk.Notebook):
             bottoms.append(bottom)
         return bottoms
 
-    def show_company(self, company: str, dataset: FinanceDataset) -> None:
-        if company in self._open_tabs:
-            self.select(self._open_tabs[company])
+    def _render_empty(self) -> None:
+        self.axis.clear()
+        self.axis.set_title("Select a company to begin analysis")
+        self.axis.set_xticks([])
+        self.axis.set_yticks([])
+        self.axis.axhline(0, color="#333333", linewidth=0.8)
+        self.figure.tight_layout()
+        self.canvas.draw()
+
+    def _next_color_pair(self) -> Tuple[str, str]:
+        index = len(self._company_colors)
+        if not self._palette:
+            return ("#1f77b4", "#ff7f0e")
+        finance_index = (2 * index) % len(self._palette)
+        income_index = (finance_index + 1) % len(self._palette)
+        finance_color = colors.to_hex(self._palette[finance_index])
+        income_color = colors.to_hex(self._palette[income_index])
+        return finance_color, income_color
+
+    def clear_companies(self) -> None:
+        self.datasets.clear()
+        self.periods = None
+        self._render_empty()
+
+    def add_company(self, company: str, dataset: FinanceDataset) -> bool:
+        if self.periods is None:
+            self.periods = list(dataset.periods)
+        elif list(dataset.periods) != self.periods:
+            raise ValueError(
+                "All loaded companies must have matching reporting periods to compare."
+            )
+
+        is_new_company = company not in self.datasets
+        if is_new_company and company not in self._company_colors:
+            self._company_colors[company] = self._next_color_pair()
+
+        self.datasets[company] = dataset
+        # Preserve insertion order by moving refreshed companies to the end.
+        self.datasets.move_to_end(company)
+        self._render()
+        return is_new_company
+
+    def _render(self) -> None:
+        if not self.datasets:
+            self._render_empty()
             return
 
-        frame = ttk.Frame(self)
-        figure = Figure(figsize=(8, 5), dpi=100)
-        axis = figure.add_subplot(111)
-        periods = dataset.periods
+        periods = self.periods or []
         period_indices = list(range(len(periods)))
-        bar_width = 0.38
-        finance_positions = [index - bar_width / 2 for index in period_indices]
-        income_positions = [index + bar_width / 2 for index in period_indices]
+        num_companies = len(self.datasets)
+        if num_companies == 0:
+            self._render_empty()
+            return
 
-        hover_helper = BarHoverHelper(axis)
+        group_width = self._PLOT_WIDTH
+        bar_width = group_width / max(2 * num_companies, 1)
+        start_offset = -group_width / 2
 
-        finance_pos_totals = [0.0] * len(periods)
-        finance_neg_totals = [0.0] * len(periods)
-        income_pos_totals = [0.0] * len(periods)
-        income_neg_totals = [0.0] * len(periods)
+        self.axis.clear()
+        hover_helper = BarHoverHelper(self.axis)
 
-        for segment in dataset.finance_segments:
-            bottoms = self._compute_bottoms(segment.values, finance_pos_totals, finance_neg_totals)
-            rectangles = axis.bar(
+        legend_handles: List[Patch] = []
+
+        for company_index, (company, dataset) in enumerate(self.datasets.items()):
+            finance_color, income_color = self._company_colors.setdefault(company, self._next_color_pair())
+            base_offset = start_offset + (2 * company_index) * bar_width
+            finance_positions = [index + base_offset + 0.5 * bar_width for index in period_indices]
+            income_positions = [index + base_offset + 1.5 * bar_width for index in period_indices]
+
+            finance_pos_totals = [0.0] * len(periods)
+            finance_neg_totals = [0.0] * len(periods)
+            income_pos_totals = [0.0] * len(periods)
+            income_neg_totals = [0.0] * len(periods)
+
+            for segment in dataset.finance_segments:
+                bottoms = self._compute_bottoms(segment.values, finance_pos_totals, finance_neg_totals)
+                rectangles = self.axis.bar(
+                    finance_positions,
+                    segment.values,
+                    width=bar_width,
+                    bottom=bottoms,
+                    color=dataset.color_for_key(segment.key),
+                    edgecolor=finance_color,
+                    linewidth=0.8,
+                )
+                hover_helper.add_segment(rectangles, segment, periods, company)
+
+            for segment in dataset.income_segments:
+                bottoms = self._compute_bottoms(segment.values, income_pos_totals, income_neg_totals)
+                rectangles = self.axis.bar(
+                    income_positions,
+                    segment.values,
+                    width=bar_width,
+                    bottom=bottoms,
+                    color=dataset.color_for_key(segment.key),
+                    edgecolor=income_color,
+                    linewidth=0.8,
+                )
+                hover_helper.add_segment(rectangles, segment, periods, company)
+
+            finance_totals = [pos + neg for pos, neg in zip(finance_pos_totals, finance_neg_totals)]
+            income_totals = [pos + neg for pos, neg in zip(income_pos_totals, income_neg_totals)]
+
+            self.axis.scatter(
                 finance_positions,
-                segment.values,
-                width=bar_width,
-                bottom=bottoms,
-                color=dataset.color_for_key(segment.key),
-                edgecolor="#1f77b4",
-                linewidth=0.8,
+                finance_totals,
+                color=finance_color,
+                marker="o",
+                s=36,
+                zorder=5,
             )
-            hover_helper.add_segment(rectangles, segment, periods)
-
-        for segment in dataset.income_segments:
-            bottoms = self._compute_bottoms(segment.values, income_pos_totals, income_neg_totals)
-            rectangles = axis.bar(
+            self.axis.scatter(
                 income_positions,
-                segment.values,
-                width=bar_width,
-                bottom=bottoms,
-                color=dataset.color_for_key(segment.key),
-                edgecolor="#ff7f0e",
-                linewidth=0.8,
+                income_totals,
+                color=income_color,
+                marker="o",
+                s=36,
+                zorder=5,
             )
-            hover_helper.add_segment(rectangles, segment, periods)
 
-        finance_totals = [pos + neg for pos, neg in zip(finance_pos_totals, finance_neg_totals)]
-        income_totals = [pos + neg for pos, neg in zip(income_pos_totals, income_neg_totals)]
+            legend_handles.extend(
+                [
+                    Patch(
+                        facecolor="white",
+                        edgecolor=finance_color,
+                        linewidth=1.0,
+                        label=f"{company} {FinanceDataset.FINANCE_LABEL}",
+                    ),
+                    Patch(
+                        facecolor="white",
+                        edgecolor=income_color,
+                        linewidth=1.0,
+                        label=f"{company} {FinanceDataset.INCOME_LABEL}",
+                    ),
+                ]
+            )
 
-        axis.scatter(
-            finance_positions,
-            finance_totals,
-            color="#1f77b4",
-            marker="o",
-            s=36,
-            zorder=5,
-        )
-        axis.scatter(
-            income_positions,
-            income_totals,
-            color="#ff7f0e",
-            marker="o",
-            s=36,
-            zorder=5,
-        )
+        if period_indices:
+            left_limit = period_indices[0] + start_offset
+            right_limit = period_indices[-1] + start_offset + 2 * num_companies * bar_width
+            padding = bar_width
+            self.axis.set_xlim(left_limit - padding, right_limit + padding)
+            self.axis.set_xticks(period_indices)
+            self.axis.set_xticklabels(periods, rotation=45, ha="right")
+        else:
+            self.axis.set_xlim(-0.6, 0.6)
+            self.axis.set_xticks([])
 
-        axis.axhline(0, color="#333333", linewidth=0.8)
-        axis.set_ylabel("Value")
-        axis.set_title(f"{company} Finance vs Income Statement")
-        axis.set_xticks(period_indices)
-        axis.set_xticklabels(periods, rotation=45, ha="right")
-        axis.set_xlim(-0.6, len(periods) - 0.4 if periods else 0.6)
+        self.axis.axhline(0, color="#333333", linewidth=0.8)
+        self.axis.set_ylabel("Value per Share")
+        if self.datasets:
+            companies_list = ", ".join(self.datasets.keys())
+            self.axis.set_title(f"Finance vs Income Statement — {companies_list}")
+        else:
+            self.axis.set_title("Finance vs Income Statement")
 
-        legend_handles = [
-            Patch(facecolor="white", edgecolor="#1f77b4", linewidth=1.0, label=FinanceDataset.FINANCE_LABEL),
-            Patch(facecolor="white", edgecolor="#ff7f0e", linewidth=1.0, label=FinanceDataset.INCOME_LABEL),
-        ]
-        axis.legend(handles=legend_handles, loc="upper left")
-        figure.tight_layout()
+        if legend_handles:
+            self.axis.legend(handles=legend_handles, loc="upper left", ncol=2)
 
-        canvas = FigureCanvasTkAgg(figure, master=frame)
-        canvas.draw()
-        canvas_widget = canvas.get_tk_widget()
-        canvas_widget.pack(fill=tk.BOTH, expand=True)
-
-        hover_helper.attach(canvas)
-        frame._hover_helper = hover_helper  # type: ignore[attr-defined]
-
-        self.add(frame, text=company)
-        self._open_tabs[company] = frame
-        self.select(frame)
+        self.figure.tight_layout()
+        self.canvas.draw()
+        hover_helper.attach(self.canvas)
+        self.hover_helper = hover_helper
 
 
 class BarHoverHelper:
@@ -371,7 +456,13 @@ class BarHoverHelper:
         self._connection_id: Optional[int] = None
         self._active_rectangle: Optional[Rectangle] = None
 
-    def add_segment(self, bar_container, segment: RowSegment, periods: Sequence[str]) -> None:
+    def add_segment(
+        self,
+        bar_container,
+        segment: RowSegment,
+        periods: Sequence[str],
+        company: str,
+    ) -> None:
         for index, rect in enumerate(bar_container.patches):
             metadata: Dict[str, Any] = {
                 "key": segment.key,
@@ -381,6 +472,7 @@ class BarHoverHelper:
                 "item": segment.item,
                 "period": periods[index] if index < len(periods) else str(index),
                 "value": segment.values[index] if index < len(segment.values) else 0.0,
+                "company": company,
             }
             self._rectangles.append((rect, metadata))
 
@@ -398,7 +490,9 @@ class BarHoverHelper:
         item = metadata.get("item") or "—"
         key = metadata.get("key") or "—"
         period = metadata.get("period") or "Period"
+        company = metadata.get("company") or "—"
         return (
+            f"Company: {company}\n"
             f"Key: {key}\n"
             f"Type: {type_value}\n"
             f"Category: {category}\n"
@@ -471,11 +565,11 @@ class FinanceAnalystApp:
         )
         self.company_combo.pack(side=tk.LEFT, padx=(6, 6))
 
-        self.open_button = ttk.Button(controls, text="Open", command=self._open_selected_company)
+        self.open_button = ttk.Button(controls, text="Add", command=self._open_selected_company)
         self.open_button.pack(side=tk.LEFT)
 
-        self.notebook = FinanceNotebook(outer)
-        self.notebook.pack(fill=tk.BOTH, expand=True)
+        self.plot_frame = FinancePlotFrame(outer)
+        self.plot_frame.pack(fill=tk.BOTH, expand=True)
 
     def _maximize_window(self) -> None:
         try:
@@ -526,7 +620,13 @@ class FinanceAnalystApp:
                 "The selected combined.csv does not contain Finance or Income data.",
             )
             return
-        self.notebook.show_company(company, dataset)
+        try:
+            added = self.plot_frame.add_company(company, dataset)
+        except ValueError as exc:
+            messagebox.showerror("Load Company", str(exc))
+            return
+        if not added:
+            messagebox.showinfo("Load Company", f"{company} data refreshed on the chart.")
 
 
 def main() -> None:
