@@ -545,59 +545,75 @@ class ReportApp:
         combined_container = ttk.Frame(notebook)
         self.combined_frame = combined_container
         notebook.add(combined_container, text="Combined")
-        combined_controls = ttk.Frame(combined_container, padding=8)
-        combined_controls.pack(fill=tk.X)
+
+        self.combined_notebook = ttk.Notebook(combined_container)
+        self.combined_notebook.pack(fill=tk.BOTH, expand=True)
+
+        labels_tab = ttk.Frame(self.combined_notebook)
+        self.combined_labels_tab = labels_tab
+        self.combined_notebook.add(labels_tab, text="Labels")
+
+        labels_controls = ttk.Frame(labels_tab, padding=8)
+        labels_controls.pack(fill=tk.X)
         ttk.Label(
-            combined_controls,
+            labels_controls,
             text="Review scraped headers, adjust the final column labels, and click Parse to build the combined table.",
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.combine_confirm_button = ttk.Button(
-            combined_controls,
+            labels_controls,
             text="Parse",
-            command=self._confirm_combined_table,
+            command=self._on_confirm_combined_clicked,
             state="disabled",
         )
         self.combine_confirm_button.pack(side=tk.RIGHT)
+
+        labels_canvas = tk.Canvas(labels_tab)
+        labels_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        def _labels_canvas_yview(*args: Any) -> None:
+            self._destroy_note_editor()
+            labels_canvas.yview(*args)
+
+        def _labels_canvas_xview(*args: Any) -> None:
+            self._destroy_note_editor()
+            labels_canvas.xview(*args)
+
+        labels_vscroll = ttk.Scrollbar(labels_tab, orient=tk.VERTICAL, command=_labels_canvas_yview)
+        labels_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        labels_hscroll = ttk.Scrollbar(labels_tab, orient=tk.HORIZONTAL, command=_labels_canvas_xview)
+        labels_hscroll.pack(side=tk.BOTTOM, fill=tk.X)
+        labels_canvas.configure(yscrollcommand=labels_vscroll.set, xscrollcommand=labels_hscroll.set)
+        self.combined_labels_canvas = labels_canvas
+        self.combined_labels_inner = ttk.Frame(labels_canvas)
+        self.combined_labels_window = labels_canvas.create_window((0, 0), window=self.combined_labels_inner, anchor="nw")
+        self.combined_labels_inner.bind(
+            "<Configure>",
+            lambda _e: labels_canvas.configure(scrollregion=labels_canvas.bbox("all")),
+        )
+        self.combined_header_frame = ttk.Frame(self.combined_labels_inner, padding=8)
+        self.combined_header_frame.grid(row=0, column=0, sticky="nsew")
+        self.combined_labels_inner.columnconfigure(0, weight=1)
+
+        combined_tab = ttk.Frame(self.combined_notebook)
+        self.combined_results_tab = combined_tab
+        self.combined_notebook.add(combined_tab, text="Combined")
+
+        combined_controls = ttk.Frame(combined_tab, padding=8)
+        combined_controls.pack(fill=tk.X)
         ttk.Button(
             combined_controls,
             text="Load Assignments",
             command=self._prompt_import_note_assignments,
-        ).pack(side=tk.RIGHT, padx=(0, 8))
+        ).pack(side=tk.RIGHT)
         ttk.Checkbutton(
             combined_controls,
             text="Show only blank notes",
             variable=self.combined_show_blank_notes_var,
             command=self._on_combined_show_blank_notes_toggle,
         ).pack(side=tk.RIGHT, padx=(0, 8))
-        combined_canvas = tk.Canvas(combined_container)
-        combined_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        def _combined_canvas_yview(*args: Any) -> None:
-            self._destroy_note_editor()
-            combined_canvas.yview(*args)
-
-        def _combined_canvas_xview(*args: Any) -> None:
-            self._destroy_note_editor()
-            combined_canvas.xview(*args)
-
-        combined_vscroll = ttk.Scrollbar(combined_container, orient=tk.VERTICAL, command=_combined_canvas_yview)
-        combined_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
-        combined_hscroll = ttk.Scrollbar(combined_container, orient=tk.HORIZONTAL, command=_combined_canvas_xview)
-        combined_hscroll.pack(side=tk.BOTTOM, fill=tk.X)
-        combined_canvas.configure(yscrollcommand=combined_vscroll.set, xscrollcommand=combined_hscroll.set)
-        self.combined_canvas = combined_canvas
-        self.combined_inner = ttk.Frame(combined_canvas)
-        self.combined_window = combined_canvas.create_window((0, 0), window=self.combined_inner, anchor="nw")
-        self.combined_inner.bind(
-            "<Configure>",
-            lambda _e: combined_canvas.configure(scrollregion=combined_canvas.bbox("all")),
-        )
-        self.combined_header_frame = ttk.Frame(self.combined_inner, padding=8)
-        self.combined_header_frame.grid(row=0, column=0, sticky="nsew")
-        self.combined_result_frame = ttk.Frame(self.combined_inner, padding=8)
-        self.combined_result_frame.grid(row=1, column=0, sticky="nsew")
-        self.combined_inner.columnconfigure(0, weight=1)
-        self.combined_inner.rowconfigure(1, weight=1)
+        self.combined_result_frame = ttk.Frame(combined_tab, padding=8)
+        self.combined_result_frame.pack(fill=tk.BOTH, expand=True)
 
     def _on_frame_configure(self, _: tk.Event) -> None:  # type: ignore[override]
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -3360,17 +3376,23 @@ class ReportApp:
             if stale_key not in desired_keys:
                 self.combined_column_label_vars.pop(stale_key, None)
 
-        base_columns = ["Type", "Category", "Item"]
-        pdf_count = len(self.combined_pdf_order)
-        total_columns = len(base_columns) + pdf_count * max_data_columns
+        displayed_categories: List[str] = []
+        for category in COLUMNS:
+            header_by_pdf = type_header_map.get(category, {})
+            if header_by_pdf or category in type_heading_labels:
+                displayed_categories.append(category)
+
+        if not displayed_categories:
+            displayed_categories = COLUMNS[:]
+
+        total_columns = 1 + len(displayed_categories)
         logger.info(
-            "Combined header grid layout -> base_columns=%d pdf_count=%d total_columns=%d",
-            len(base_columns),
-            pdf_count,
-            total_columns,
+            "Combined label grid layout -> rows for %d PDFs and %d categories",
+            len(self.combined_pdf_order),
+            len(displayed_categories),
         )
         for column_index in range(total_columns):
-            weight = 1 if column_index >= len(base_columns) else 0
+            weight = 1 if column_index > 0 else 0
             self.combined_header_frame.columnconfigure(column_index, weight=weight)
 
         default_category_heading = "Category"
@@ -3384,87 +3406,100 @@ class ReportApp:
                     default_item_heading = headings[1]
                 break
 
-        current_row = 0
+        category_heading_display: Dict[str, str] = {}
+        item_heading_display: Dict[str, str] = {}
+        for category in displayed_categories:
+            heading_values = type_heading_labels.get(category)
+            category_heading_text = default_category_heading
+            item_heading_text = default_item_heading
+            if heading_values:
+                if heading_values[0].strip():
+                    category_heading_text = heading_values[0]
+                if heading_values[1].strip():
+                    item_heading_text = heading_values[1]
+            else:
+                header_by_pdf = type_header_map.get(category, {})
+                for entry_meta in header_by_pdf.values():
+                    category_heading_text = entry_meta.get("category_heading", category_heading_text)
+                    item_heading_text = entry_meta.get("item_heading", item_heading_text)
+                    break
+            category_heading_display[category] = category_heading_text
+            item_heading_display[category] = item_heading_text
 
-        for column_index, label_text in enumerate(["Type", default_category_heading, default_item_heading]):
+        current_row = 0
+        ttk.Label(
+            self.combined_header_frame,
+            text="",
+        ).grid(row=current_row, column=0, padx=4, pady=(0, 4), sticky="w")
+        for column_index, category in enumerate(displayed_categories, start=1):
             ttk.Label(
                 self.combined_header_frame,
-                text=label_text,
+                text=category,
                 font=("TkDefaultFont", 10, "bold"),
             ).grid(row=current_row, column=column_index, padx=4, pady=(0, 4), sticky="w")
 
-        column_position = len(base_columns)
+        current_row += 1
+        ttk.Label(
+            self.combined_header_frame,
+            text="Type",
+            font=("TkDefaultFont", 10, "bold"),
+        ).grid(row=current_row, column=0, padx=4, pady=4, sticky="w")
+        for column_index, category in enumerate(displayed_categories, start=1):
+            ttk.Label(
+                self.combined_header_frame,
+                text=category,
+            ).grid(row=current_row, column=column_index, padx=4, pady=4, sticky="w")
+
+        current_row += 1
+        ttk.Label(
+            self.combined_header_frame,
+            text=default_category_heading,
+            font=("TkDefaultFont", 10, "bold"),
+        ).grid(row=current_row, column=0, padx=4, pady=4, sticky="w")
+        for column_index, category in enumerate(displayed_categories, start=1):
+            ttk.Label(
+                self.combined_header_frame,
+                text=category_heading_display.get(category, ""),
+            ).grid(row=current_row, column=column_index, padx=4, pady=4, sticky="w")
+
+        current_row += 1
+        ttk.Label(
+            self.combined_header_frame,
+            text=default_item_heading,
+            font=("TkDefaultFont", 10, "bold"),
+        ).grid(row=current_row, column=0, padx=4, pady=4, sticky="w")
+        for column_index, category in enumerate(displayed_categories, start=1):
+            ttk.Label(
+                self.combined_header_frame,
+                text=item_heading_display.get(category, ""),
+            ).grid(row=current_row, column=column_index, padx=4, pady=4, sticky="w")
+
         if max_data_columns:
             for pdf_path in self.combined_pdf_order:
                 pdf_label = pdf_path.stem
                 for idx in range(max_data_columns):
+                    current_row += 1
                     key = (pdf_path, idx)
                     var = self.combined_column_label_vars.get(key)
-                    if var is None:
-                        continue
-                    cell = ttk.Frame(self.combined_header_frame)
-                    cell.grid(
-                        row=current_row,
-                        column=column_position,
-                        padx=4,
-                        pady=(0, 4),
-                        sticky="w",
-                    )
+                    row_container = ttk.Frame(self.combined_header_frame)
+                    row_container.grid(row=current_row, column=0, padx=4, pady=4, sticky="nsew")
                     ttk.Label(
-                        cell,
+                        row_container,
                         text=pdf_label,
                         font=("TkDefaultFont", 10, "bold"),
                     ).pack(anchor="w")
-                    entry = ttk.Entry(cell, textvariable=var, width=18)
-                    entry.pack(anchor="w", fill=tk.X, pady=(2, 0))
-                    column_position += 1
-
-        current_row += 1
-        for category in COLUMNS:
-            header_by_pdf = type_header_map.get(category, {})
-            if not header_by_pdf and category not in type_heading_labels:
-                continue
-            category_heading_text = default_category_heading
-            item_heading_text = default_item_heading
-            for entry_meta in header_by_pdf.values():
-                category_heading_text = entry_meta.get("category_heading", category_heading_text)
-                item_heading_text = entry_meta.get("item_heading", item_heading_text)
-                break
-            ttk.Label(self.combined_header_frame, text=category).grid(
-                row=current_row,
-                column=0,
-                padx=4,
-                pady=4,
-                sticky="w",
-            )
-            ttk.Label(self.combined_header_frame, text=category_heading_text).grid(
-                row=current_row,
-                column=1,
-                padx=4,
-                pady=4,
-                sticky="w",
-            )
-            ttk.Label(self.combined_header_frame, text=item_heading_text).grid(
-                row=current_row,
-                column=2,
-                padx=4,
-                pady=4,
-                sticky="w",
-            )
-            column_position = len(base_columns)
-            for pdf_path in self.combined_pdf_order:
-                headers = header_by_pdf.get(pdf_path, {}).get("headers", [])
-                for idx in range(max_data_columns):
-                    header_text = headers[idx] if idx < len(headers) else ""
-                    ttk.Label(self.combined_header_frame, text=header_text).grid(
-                        row=current_row,
-                        column=column_position,
-                        padx=4,
-                        pady=4,
-                        sticky="w",
-                    )
-                    column_position += 1
-            current_row += 1
+                    if var is not None:
+                        entry = ttk.Entry(row_container, textvariable=var, width=22)
+                        entry.pack(anchor="w", fill=tk.X, pady=(2, 0))
+                    else:
+                        ttk.Label(row_container, text="").pack(anchor="w")
+                    for column_index, category in enumerate(displayed_categories, start=1):
+                        headers = type_header_map.get(category, {}).get(pdf_path, {}).get("headers", [])
+                        header_text = headers[idx] if idx < len(headers) else ""
+                        ttk.Label(
+                            self.combined_header_frame,
+                            text=header_text,
+                        ).grid(row=current_row, column=column_index, padx=4, pady=4, sticky="w")
 
         if hasattr(self, "combine_confirm_button"):
             self.combine_confirm_button.state(["!disabled"])
@@ -3714,14 +3749,17 @@ class ReportApp:
 
         tree = ttk.Treeview(tree_container, columns=columns, show="headings")
         tree.grid(row=0, column=0, sticky="nsew")
-        tree.configure(height=max(len(records), 1))
 
         def _combined_xscroll(*args: Any) -> None:
             tree.xview(*args)
             self._destroy_note_editor()
 
+        y_scroll = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        tree.configure(yscrollcommand=y_scroll.set)
+
         x_scroll = ttk.Scrollbar(tree_container, orient=tk.HORIZONTAL, command=_combined_xscroll)
-        x_scroll.grid(row=1, column=0, sticky="ew")
+        x_scroll.grid(row=1, column=0, columnspan=2, sticky="ew")
         tree.configure(xscrollcommand=x_scroll.set)
 
         preview_container = ttk.Frame(split_pane, padding=(12, 0))
@@ -3854,11 +3892,11 @@ class ReportApp:
             if event.delta:
                 delta = -int(event.delta / 120)
                 if delta:
-                    self.combined_canvas.yview_scroll(delta, "units")
+                    tree.yview_scroll(delta, "units")
             elif getattr(event, "num", None) == 4:
-                self.combined_canvas.yview_scroll(-1, "units")
+                tree.yview_scroll(-1, "units")
             elif getattr(event, "num", None) == 5:
-                self.combined_canvas.yview_scroll(1, "units")
+                tree.yview_scroll(1, "units")
             return "break"
 
         tree.bind("<MouseWheel>", _tree_mousewheel)
@@ -3873,6 +3911,14 @@ class ReportApp:
         else:
             self._clear_combined_preview()
         self._render_combined_result_message()
+
+    def _on_confirm_combined_clicked(self) -> None:
+        self._confirm_combined_table()
+        if self.combined_result_tree is not None:
+            try:
+                self.combined_notebook.select(self.combined_results_tab)
+            except tk.TclError:
+                pass
 
     def _render_combined_result_message(self) -> None:
         if not self.combined_result_message:
