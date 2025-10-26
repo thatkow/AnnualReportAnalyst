@@ -2295,31 +2295,63 @@ class ReportApp:
         item_id = selection[0] if selection else tree.focus()
         if not item_id:
             return "break"
-        pdf_entries: List[Tuple[str, str, str]] = []
         row_type = tree.set(item_id, "Type")
         row_category = tree.set(item_id, "Category")
         row_item = tree.set(item_id, "Item")
+        key = (str(row_type), str(row_category), str(row_item))
+
+        pdf_value_map: Dict[Path, List[Tuple[str, str]]] = {}
         for column_name in self.combined_ordered_columns:
             if column_name in {"Type", "Category", "Item", "Note"}:
-                continue
-            value_text = tree.set(item_id, column_name) or ""
-            if not str(value_text).strip():
                 continue
             mapping = self.combined_column_name_map.get(column_name)
             if not mapping:
                 continue
             pdf_path, label_value = mapping
-            pdf_entries.append((pdf_path.stem, label_value, str(value_text)))
+            value_text = tree.set(item_id, column_name) or ""
+            if not str(value_text).strip():
+                continue
+            pdf_value_map.setdefault(pdf_path, []).append((label_value, str(value_text)))
 
-        if not pdf_entries:
+        if not pdf_value_map:
             messagebox.showinfo(
                 "Row Values",
                 "No PDF columns contain a value for the selected row.",
             )
             return "break"
 
+        ordered_paths: List[Path] = list(self.combined_row_sources.get(key, []))
+        for path in pdf_value_map:
+            if path not in ordered_paths:
+                ordered_paths.append(path)
+
+        preview_items: List[Tuple[PDFEntry, Optional[int], Path, List[Tuple[str, str]]]] = []
+        category_key = str(row_type or "")
+        for path in ordered_paths:
+            values = pdf_value_map.get(path)
+            if not values:
+                continue
+            entry = self.pdf_entry_by_path.get(path)
+            if entry is None:
+                continue
+            page_index = None
+            if category_key:
+                page_index = self._get_selected_page_index(entry, category_key)
+                if page_index is None:
+                    matches = entry.matches.get(category_key, [])
+                    if matches:
+                        page_index = matches[0].page_index
+            preview_items.append((entry, page_index, path, values))
+
+        if not preview_items:
+            messagebox.showinfo(
+                "Row Values",
+                "No PDF pages are available for the selected row.",
+            )
+            return "break"
+
         dialog = tk.Toplevel(self.root)
-        dialog.title("Row PDF Values")
+        dialog.title("Row PDF Pages")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.focus_set()
@@ -2342,19 +2374,73 @@ class ReportApp:
             font=("TkDefaultFont", 10, "bold"),
         ).pack(anchor="w")
 
-        tree_frame = ttk.Frame(dialog, padding=(12, 0, 12, 0))
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        value_tree = ttk.Treeview(tree_frame, columns=("PDF", "Column", "Value"), show="headings", height=len(pdf_entries))
-        value_tree.pack(fill=tk.BOTH, expand=True)
-        for col_name, heading_text, anchor in (
-            ("PDF", "PDF", "w"),
-            ("Column", "Column", "w"),
-            ("Value", "Value", "e"),
-        ):
-            value_tree.heading(col_name, text=heading_text)
-            value_tree.column(col_name, anchor=anchor, stretch=True)
-        for pdf_label, column_label, value_text in pdf_entries:
-            value_tree.insert("", tk.END, values=(pdf_label, column_label, value_text))
+        content_frame = ttk.Frame(dialog, padding=(12, 0, 12, 0))
+        content_frame.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(content_frame, borderwidth=0)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(content_frame, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        inner = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(_: tk.Event) -> None:  # type: ignore[override]
+            bbox = canvas.bbox("all")
+            if bbox is not None:
+                canvas.configure(scrollregion=bbox)
+
+        inner.bind("<Configure>", _on_inner_configure)
+
+        preview_images: List[ImageTk.PhotoImage] = []
+        for entry, page_index, path, values in preview_items:
+            panel = ttk.Frame(inner, padding=(0, 12))
+            panel.pack(fill=tk.X, expand=True)
+            panel.columnconfigure(0, weight=1)
+
+            panel_header = ttk.Frame(panel)
+            panel_header.grid(row=0, column=0, sticky="ew")
+            if page_index is not None:
+                title_text = f"{path.name} — Page {page_index + 1}"
+            else:
+                title_text = f"{path.name} — Page not selected"
+            ttk.Label(panel_header, text=title_text, font=("TkDefaultFont", 10, "bold")).pack(side=tk.LEFT)
+            ttk.Button(
+                panel_header,
+                text="Open PDF",
+                command=lambda p=path, idx=page_index: self._open_pdf(p, idx),
+            ).pack(side=tk.RIGHT)
+
+            preview_label = ttk.Label(panel)
+            preview_label.grid(row=1, column=0, sticky="nsew", pady=(8, 4))
+            if page_index is not None:
+                photo = self._render_page(entry.doc, page_index, 420)
+            else:
+                photo = None
+            if photo is not None:
+                preview_label.configure(image=photo)
+                preview_label.image = photo  # type: ignore[attr-defined]
+                preview_images.append(photo)
+            else:
+                preview_label.configure(text="Preview unavailable", anchor="center")
+
+            value_lines = [f"{label}: {value}" for label, value in values]
+            if value_lines:
+                ttk.Label(
+                    panel,
+                    text="\n".join(value_lines),
+                    justify=tk.LEFT,
+                    wraplength=520,
+                ).grid(row=2, column=0, sticky="ew")
+
+            ttk.Separator(panel, orient=tk.HORIZONTAL).grid(row=3, column=0, sticky="ew", pady=(12, 0))
+
+        canvas.update_idletasks()
+        bbox = canvas.bbox(canvas_window)
+        if bbox is not None:
+            canvas.configure(scrollregion=bbox)
+
+        # Preserve image references on the dialog to avoid garbage collection.
+        dialog._preview_images = preview_images  # type: ignore[attr-defined]
 
         button_frame = ttk.Frame(dialog, padding=(12, 8, 12, 12))
         button_frame.pack(fill=tk.X)
