@@ -349,6 +349,7 @@ class ReportApp:
         self.combined_note_editor_item: Optional[str] = None
         self.combined_ordered_columns: List[str] = []
         self.combined_column_defaults: Dict[Tuple[Path, int], str] = {}
+        self.auto_size_dates_button: Optional[ttk.Button] = None
         self.note_assignments: Dict[Tuple[str, str, str], str] = {}
         self.note_assignments_path: Optional[Path] = None
         self.note_key_bindings: Dict[str, str] = DEFAULT_NOTE_KEY_BINDINGS.copy()
@@ -508,6 +509,13 @@ class ReportApp:
             state="disabled",
         )
         self.combine_confirm_button.pack(side=tk.RIGHT)
+        self.auto_size_dates_button = ttk.Button(
+            combined_controls,
+            text="Auto Size Dates",
+            command=self._auto_size_combined_date_columns,
+        )
+        self.auto_size_dates_button.pack(side=tk.RIGHT, padx=(0, 8))
+        self.auto_size_dates_button.state(["disabled"])
         ttk.Button(
             combined_controls,
             text="Load Assignments",
@@ -1294,14 +1302,29 @@ class ReportApp:
         if value is None:
             return ""
         if isinstance(value, (int, float)):
-            return f"{float(value):.6e}"
+            return f"{float(value):.2f}"
         text = str(value).strip()
         if not text:
             return ""
-        numeric = self._parse_numeric_value(text)
+        suffix = ""
+        normalized = text
+        if normalized.endswith("%"):
+            suffix = "%"
+            normalized = normalized[:-1]
+        prefix = ""
+        currency_symbols = "$€£¥"
+        for symbol in currency_symbols:
+            index = normalized.find(symbol)
+            if index != -1:
+                prefix = symbol
+                normalized = normalized[:index] + normalized[index + 1 :]
+                break
+        normalized = normalized.strip()
+        numeric = self._parse_numeric_value(normalized)
         if numeric is None:
             return text
-        return f"{numeric:.6e}"
+        formatted = f"{numeric:.2f}"
+        return f"{prefix}{formatted}{suffix}"
 
     def _update_combined_notes(self) -> None:
         tree = self.combined_result_tree
@@ -2163,6 +2186,8 @@ class ReportApp:
         self.combined_note_column_id = None
         self.combined_ordered_columns = []
         self.combined_column_defaults.clear()
+        if self.auto_size_dates_button is not None:
+            self.auto_size_dates_button.state(["disabled"])
 
     def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
         if not hasattr(self, "combined_header_frame"):
@@ -2565,27 +2590,18 @@ class ReportApp:
 
         self.combined_result_tree = tree
 
-        tree.update_idletasks()
-        try:
-            tree_font = tkfont.nametofont(tree.cget("font"))
-        except tk.TclError:
-            tree_font = tkfont.nametofont("TkDefaultFont")
-        for column_name in ordered_columns:
-            max_width = tree_font.measure(column_name)
-            for record in combined_records:
-                value_text = record.get(column_name, "")
-                if value_text is None:
-                    value_text = ""
-                max_width = max(max_width, tree_font.measure(str(value_text)))
-            padding = 32 if column_name == "Note" else 24
-            desired_width = max_width + padding
-            if column_name in {"Type", "Category", "Item"}:
-                desired_width = max(desired_width, 160)
-            elif column_name == "Note":
-                desired_width = max(desired_width, tree_font.measure("share_count") + padding, 120)
+        self._apply_combined_base_column_widths()
+        self._auto_size_combined_date_columns()
+
+        has_data_columns = any(
+            column_name not in {"Type", "Category", "Item", "Note"}
+            for column_name in ordered_columns
+        )
+        if self.auto_size_dates_button is not None:
+            if has_data_columns:
+                self.auto_size_dates_button.state(["!disabled"])
             else:
-                desired_width = max(desired_width, 120)
-            tree.column(column_name, width=desired_width)
+                self.auto_size_dates_button.state(["disabled"])
 
         company = self.company_var.get()
         if company:
@@ -2610,6 +2626,61 @@ class ReportApp:
                 ).pack(anchor="w", padx=8, pady=(4, 0))
             except Exception as exc:
                 messagebox.showwarning("Combine Results", f"Could not save combined CSV: {exc}")
+
+    def _get_tree_font(self, tree: ttk.Treeview) -> tkfont.Font:
+        try:
+            return tkfont.nametofont(tree.cget("font"))
+        except tk.TclError:
+            return tkfont.nametofont("TkDefaultFont")
+
+    def _apply_combined_base_column_widths(self) -> None:
+        tree = self.combined_result_tree
+        if tree is None or not self.combined_ordered_columns:
+            return
+        tree.update_idletasks()
+        tree_font = self._get_tree_font(tree)
+        for column_name in self.combined_ordered_columns:
+            if column_name in {"Type", "Category", "Item"}:
+                max_width = tree_font.measure(column_name)
+                for item_id in tree.get_children(""):
+                    value_text = tree.set(item_id, column_name) or ""
+                    max_width = max(max_width, tree_font.measure(str(value_text)))
+                tree.column(column_name, width=max(max_width + 24, 160))
+            elif column_name == "Note":
+                max_width = tree_font.measure(column_name)
+                for item_id in tree.get_children(""):
+                    value_text = tree.set(item_id, column_name) or ""
+                    max_width = max(max_width, tree_font.measure(str(value_text)))
+                reference_width = tree_font.measure("share_count")
+                tree.column(column_name, width=max(max_width + 32, reference_width + 32, 120))
+
+    def _auto_size_combined_date_columns(self) -> None:
+        tree = self.combined_result_tree
+        if tree is None or not self.combined_ordered_columns:
+            return
+        date_columns = [
+            column_name
+            for column_name in self.combined_ordered_columns
+            if column_name not in {"Type", "Category", "Item", "Note"}
+        ]
+        if not date_columns:
+            if self.auto_size_dates_button is not None:
+                self.auto_size_dates_button.state(["disabled"])
+            return
+        self._destroy_note_editor()
+        tree.update_idletasks()
+        tree_font = self._get_tree_font(tree)
+        for column_name in date_columns:
+            max_width = tree_font.measure(column_name)
+            for item_id in tree.get_children(""):
+                value_text = tree.set(item_id, column_name)
+                if value_text is None:
+                    value_text = ""
+                max_width = max(max_width, tree_font.measure(str(value_text)))
+            desired_width = max(max_width + 24, 120)
+            tree.column(column_name, width=desired_width)
+        if self.auto_size_dates_button is not None:
+            self.auto_size_dates_button.state(["!disabled"])
 
     def _show_raw_text_dialog(self, entry: PDFEntry, page_index: int) -> None:
         try:
@@ -3311,12 +3382,15 @@ class ReportApp:
                 if not prompts.get(category):
                     continue
                 existing = metadata.get(category)
-                txt_exists = False
+                file_exists = False
                 if isinstance(existing, dict):
-                    txt_name = existing.get("txt")
-                    if isinstance(txt_name, str) and txt_name:
-                        txt_exists = (doc_dir / txt_name).exists()
-                if txt_exists:
+                    for key in ("csv", "txt"):
+                        name = existing.get(key)
+                        if isinstance(name, str) and name:
+                            if (doc_dir / name).exists():
+                                file_exists = True
+                                break
+                if file_exists:
                     continue
                 entry_tasks.append((category, page_index))
 
@@ -3348,15 +3422,23 @@ class ReportApp:
                 return False, None, f"{job.entry_name} - {job.category}: {exc}"
 
             base_name = f"{job.entry_year or 'unknown'}_{job.category}"
-            txt_path = self._ensure_unique_path(job.doc_dir / f"{base_name}.txt")
+            csv_path = self._ensure_unique_path(job.doc_dir / f"{base_name}.csv")
+
+            rows = self._convert_response_to_rows(response_text)
+            if not rows:
+                rows = [["response"], [response_text]]
+            sanitized_rows = [
+                ["" if cell is None else str(cell) for cell in row]
+                for row in rows
+            ]
 
             try:
-                txt_path.write_text(response_text, encoding="utf-8")
+                self._write_csv_rows(sanitized_rows, csv_path)
             except Exception as exc:
                 return False, None, f"{job.entry_name} - {job.category}: Could not save response ({exc})"
 
             metadata_entry = {
-                "txt": txt_path.name,
+                "csv": csv_path.name,
                 "page_index": job.page_index,
                 "year": job.entry_year,
             }
