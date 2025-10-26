@@ -331,8 +331,6 @@ class ReportApp:
         self.combined_pdf_order: List[Path] = []
         self.combined_result_tree: Optional[ttk.Treeview] = None
         self.combined_max_data_columns: int = 0
-        self.combined_header_label_widgets: Dict[int, List[Tuple[str, ttk.Label]]] = {}
-        self.combined_label_trace_ids: Dict[int, str] = {}
 
         self._build_ui()
         self._load_pattern_config()
@@ -1719,15 +1717,6 @@ class ReportApp:
             child.destroy()
         for child in self.combined_result_frame.winfo_children():
             child.destroy()
-        for idx, trace_id in list(self.combined_label_trace_ids.items()):
-            var = self.combined_column_label_vars.get(idx)
-            if var is not None:
-                try:
-                    var.trace_remove("write", trace_id)
-                except tk.TclError:
-                    pass
-        self.combined_label_trace_ids.clear()
-        self.combined_header_label_widgets.clear()
         self.combined_csv_sources.clear()
         self.combined_pdf_order = []
         self.combined_result_tree = None
@@ -1890,33 +1879,6 @@ class ReportApp:
                 break
 
         current_row = 0
-        if max_data_columns:
-            final_label_container = ttk.Frame(self.combined_header_frame)
-            final_label_container.grid(
-                row=current_row,
-                column=0,
-                columnspan=max(1, total_columns),
-                sticky="w",
-                pady=(0, 6),
-            )
-            ttk.Label(
-                final_label_container,
-                text="Final column labels:",
-                font=("TkDefaultFont", 10, "bold"),
-            ).pack(side=tk.LEFT, padx=(0, 8))
-            for idx in range(max_data_columns):
-                var = self.combined_column_label_vars.get(idx)
-                entry = ttk.Entry(final_label_container, textvariable=var, width=18)
-                entry.pack(side=tk.LEFT, padx=(0, 4))
-            current_row += 1
-
-        column_label_values: List[str] = []
-        for idx in range(max_data_columns):
-            var = self.combined_column_label_vars.get(idx)
-            value = var.get().strip() if var else ""
-            if not value:
-                value = f"Value {idx + 1}"
-            column_label_values.append(value)
 
         for column_index, label_text in enumerate(["Type", default_category_heading, default_item_heading]):
             ttk.Label(
@@ -1925,28 +1887,30 @@ class ReportApp:
                 font=("TkDefaultFont", 10, "bold"),
             ).grid(row=current_row, column=column_index, padx=4, pady=(0, 4), sticky="w")
 
-        self.combined_header_label_widgets = {}
         column_position = len(base_columns)
-        for pdf_path in self.combined_pdf_order:
-            pdf_label = pdf_path.stem
-            for idx, base_label in enumerate(column_label_values):
-                if max_data_columns == 0:
-                    break
-                header_text = f"{pdf_label}.{base_label}"
-                label_widget = ttk.Label(
-                    self.combined_header_frame,
-                    text=header_text,
-                    font=("TkDefaultFont", 10, "bold"),
-                )
-                label_widget.grid(
-                    row=current_row,
-                    column=column_position,
-                    padx=4,
-                    pady=(0, 4),
-                    sticky="w",
-                )
-                self.combined_header_label_widgets.setdefault(idx, []).append((pdf_label, label_widget))
-                column_position += 1
+        if max_data_columns:
+            for pdf_path in self.combined_pdf_order:
+                pdf_label = pdf_path.stem
+                for idx in range(max_data_columns):
+                    var = self.combined_column_label_vars.get(idx)
+                    if var is None:
+                        continue
+                    cell = ttk.Frame(self.combined_header_frame)
+                    cell.grid(
+                        row=current_row,
+                        column=column_position,
+                        padx=4,
+                        pady=(0, 4),
+                        sticky="w",
+                    )
+                    ttk.Label(
+                        cell,
+                        text=pdf_label,
+                        font=("TkDefaultFont", 10, "bold"),
+                    ).pack(anchor="w")
+                    entry = ttk.Entry(cell, textvariable=var, width=18)
+                    entry.pack(anchor="w", fill=tk.X, pady=(2, 0))
+                    column_position += 1
 
         current_row += 1
         for category in COLUMNS:
@@ -1995,31 +1959,11 @@ class ReportApp:
                     column_position += 1
             current_row += 1
 
-        for idx in range(max_data_columns):
-            var = self.combined_column_label_vars.get(idx)
-            if var is None or idx not in self.combined_header_label_widgets:
-                continue
-            trace_id = var.trace_add(
-                "write", lambda *_args, position=idx: self._update_combined_column_headers(position)
-            )
-            self.combined_label_trace_ids[idx] = trace_id
-
         if hasattr(self, "combine_confirm_button"):
             self.combine_confirm_button.state(["!disabled"])
 
         if auto_update and self.combined_pdf_order and self.combined_csv_sources and self.combined_result_tree is None:
             self._confirm_combined_table(auto=True)
-
-    def _update_combined_column_headers(self, position: int) -> None:
-        widgets = self.combined_header_label_widgets.get(position)
-        if not widgets:
-            return
-        var = self.combined_column_label_vars.get(position)
-        if var is None:
-            return
-        value = var.get().strip() or f"Value {position + 1}"
-        for pdf_label, label_widget in widgets:
-            label_widget.configure(text=f"{pdf_label}.{value}")
 
     def _confirm_combined_table(self, auto: bool = False) -> None:
         if not self.combined_pdf_order or not self.combined_csv_sources:
