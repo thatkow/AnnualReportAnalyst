@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -19,6 +20,10 @@ import fitz  # PyMuPDF
 from PIL import Image, ImageTk
 import webbrowser
 import requests
+
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
 
 COLUMNS = ["Financial", "Income", "Shares"]
@@ -2369,6 +2374,13 @@ class ReportApp:
                 item_heading_text = (
                     headings_row[item_index] if item_index < len(headings_row) else "Item"
                 )
+                logger.info(
+                    "Combined header capture for %s | %s -> indices=%s headers=%s",
+                    entry.path.name,
+                    category,
+                    data_indices,
+                    display_headers,
+                )
                 self.combined_csv_sources[(entry.path, category)] = {
                     "rows": data_rows,
                     "category_index": category_index,
@@ -2406,6 +2418,11 @@ class ReportApp:
 
         self.combined_pdf_order = [entry.path for entry in pdf_entries_with_data]
         self.combined_max_data_columns = max_data_columns
+        logger.info(
+            "Combined PDF order: %s with max data columns=%d",
+            [path.name for path in self.combined_pdf_order],
+            self.combined_max_data_columns,
+        )
 
         desired_keys = set()
         for path in self.combined_pdf_order:
@@ -2427,6 +2444,12 @@ class ReportApp:
         base_columns = ["Type", "Category", "Item"]
         pdf_count = len(self.combined_pdf_order)
         total_columns = len(base_columns) + pdf_count * max_data_columns
+        logger.info(
+            "Combined header grid layout -> base_columns=%d pdf_count=%d total_columns=%d",
+            len(base_columns),
+            pdf_count,
+            total_columns,
+        )
         for column_index in range(total_columns):
             weight = 1 if column_index >= len(base_columns) else 0
             self.combined_header_frame.columnconfigure(column_index, weight=weight)
@@ -2552,8 +2575,10 @@ class ReportApp:
                 column_name = f"{pdf_label}.{label_value}"
                 ordered_columns.append(column_name)
                 column_name_map[column_name] = (path, label_value)
+            logger.info("Combined labels for %s -> %s", path.name, labels)
             column_labels_by_pdf[path] = labels
 
+        logger.info("Combined ordered columns: %s", ordered_columns)
         self.combined_labels_by_pdf = {path: labels[:] for path, labels in column_labels_by_pdf.items()}
         self.combined_column_name_map = column_name_map
 
@@ -2591,6 +2616,7 @@ class ReportApp:
         for category in COLUMNS:
             category_keys = [key for key in record_map if key[0] == category]
             category_keys.sort(key=lambda item: (item[1], item[2]))
+            logger.info("Combined category %s -> %d rows", category, len(category_keys))
             for key in category_keys:
                 _type, category_value, item_value = key
                 value_map = record_map.get(key, {})
@@ -2609,6 +2635,11 @@ class ReportApp:
                         record[column_name] = self._format_combined_value(raw_value)
                 combined_records.append(record)
 
+        logger.info(
+            "Combined result set -> %d records with %d columns",
+            len(combined_records),
+            len(ordered_columns),
+        )
         if not combined_records:
             if not auto:
                 messagebox.showinfo(
