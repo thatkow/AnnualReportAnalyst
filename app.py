@@ -1970,9 +1970,9 @@ class ReportApp:
     def _configure_note_tags(self, tree: ttk.Treeview) -> None:
         for note_value, color in self.note_background_colors.items():
             tag_name = self._note_tag_for_value(note_value)
-            kwargs: Dict[str, Any] = {"background": color or ""}
+            kwargs: Dict[str, Any] = {"background": ""}
             if color:
-                kwargs["foreground"] = self._foreground_for_color(color)
+                kwargs["foreground"] = color
             else:
                 kwargs["foreground"] = ""
             tree.tag_configure(tag_name, **kwargs)
@@ -2014,19 +2014,6 @@ class ReportApp:
             return candidate.lower()
         return None
 
-    def _contrast_foreground_for_color(self, color: str) -> str:
-        hex_color = color.lstrip("#")
-        if len(hex_color) != 6:
-            return "#000000"
-        try:
-            r = int(hex_color[0:2], 16)
-            g = int(hex_color[2:4], 16)
-            b = int(hex_color[4:6], 16)
-        except ValueError:
-            return "#000000"
-        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-        return "#000000" if luminance > 0.6 else "#ffffff"
-
     def _apply_type_color_tag(self, item_id: str, type_value: Any) -> None:
         tree = self.combined_result_tree
         if tree is None:
@@ -2046,8 +2033,7 @@ class ReportApp:
             return
         tag_key = re.sub(r"[^0-9a-zA-Z]+", "_", normalized) or "value"
         tag_name = f"type_color_{tag_key}"
-        foreground = self._contrast_foreground_for_color(color_value)
-        tree.tag_configure(tag_name, background=color_value, foreground=foreground)
+        tree.tag_configure(tag_name, background="", foreground=color_value)
         self._tree_cell_tag_add(tree, tag_name, item_id, column_id)
         self.combined_type_cell_tags[item_id] = tag_name
 
@@ -2070,8 +2056,7 @@ class ReportApp:
             return
         tag_key = re.sub(r"[^0-9a-zA-Z]+", "_", normalized) or "value"
         tag_name = f"category_color_{tag_key}"
-        foreground = self._contrast_foreground_for_color(color_value)
-        tree.tag_configure(tag_name, background=color_value, foreground=foreground)
+        tree.tag_configure(tag_name, background="", foreground=color_value)
         self._tree_cell_tag_add(tree, tag_name, item_id, column_id)
         self.combined_category_cell_tags[item_id] = tag_name
 
