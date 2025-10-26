@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import fitz  # PyMuPDF
 from PIL import Image, ImageTk
@@ -29,6 +29,16 @@ DEFAULT_PATTERNS = {
 }
 YEAR_DEFAULT_PATTERNS = [r"(\d{4})\s+Annual\s+Report"]
 NOTE_OPTIONS = ["", "excluded", "negated", "share_count"]
+DEFAULT_NOTE_KEY_BINDINGS = {
+    "": "`",
+    "excluded": "1",
+    "negated": "2",
+    "share_count": "3",
+}
+SPECIAL_KEYSYM_ALIASES = {
+    "`": "grave",
+    " ": "space",
+}
 
 
 @dataclass
@@ -341,9 +351,11 @@ class ReportApp:
         self.combined_column_defaults: Dict[Tuple[Path, int], str] = {}
         self.note_assignments: Dict[Tuple[str, str, str], str] = {}
         self.note_assignments_path: Optional[Path] = None
+        self.note_key_bindings: Dict[str, str] = DEFAULT_NOTE_KEY_BINDINGS.copy()
 
         self._build_ui()
         self._load_pattern_config()
+        self._apply_configured_note_key_bindings()
         if not self.embedded:
             self._maximize_window()
             self.root.after(0, self._load_pdfs_on_start)
@@ -729,6 +741,10 @@ class ReportApp:
             label="Set Download Window (minutes)",
             command=self._set_download_window,
         )
+        configuration_menu.add_command(
+            label="Configure Combined Note Keys",
+            command=self._configure_note_key_bindings,
+        )
         menubar.add_cascade(label="Configuration", menu=configuration_menu)
         try:
             self.root.configure(menu=menubar)
@@ -765,6 +781,100 @@ class ReportApp:
         self.recent_download_minutes_var.set(value)
         self.config_data["downloads_minutes"] = int(value)
         self._write_config()
+
+    def _normalize_note_binding_value(self, value: str) -> str:
+        if not value:
+            return ""
+        text = value.strip()
+        if not text:
+            return ""
+        first = text[0]
+        if not first.isprintable() or first.isspace():
+            return ""
+        return first.lower()
+
+    def _configure_note_key_bindings(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Configure Combined Note Keys")
+        window.transient(self.root)
+        window.grab_set()
+        container = ttk.Frame(window, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            container,
+            text=(
+                "Assign single-key shortcuts for editing Combined tab notes."
+                " Leave a field blank to disable its shortcut."
+            ),
+            wraplength=360,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        labels = {
+            "": "Clear note",
+            "excluded": "Set note to 'excluded'",
+            "negated": "Set note to 'negated'",
+            "share_count": "Set note to 'share_count'",
+        }
+        entries: Dict[str, tk.Entry] = {}
+        for index, note_value in enumerate(NOTE_OPTIONS, start=1):
+            ttk.Label(container, text=labels[note_value]).grid(row=index, column=0, sticky="w", pady=4)
+            entry = ttk.Entry(container, width=6)
+            entry.grid(row=index, column=1, sticky="w", pady=4, padx=(8, 0))
+            current = self.note_key_bindings.get(note_value, "")
+            if current:
+                entry.insert(0, current)
+            entries[note_value] = entry
+
+        button_row = ttk.Frame(container)
+        button_row.grid(row=len(NOTE_OPTIONS) + 1, column=0, columnspan=2, pady=(12, 0), sticky="e")
+
+        def _on_cancel() -> None:
+            window.grab_release()
+            window.destroy()
+
+        def _on_save() -> None:
+            new_bindings: Dict[str, str] = {}
+            used_keys: Set[str] = set()
+            for note_value, entry in entries.items():
+                raw_value = entry.get().strip()
+                normalized = self._normalize_note_binding_value(raw_value)
+                if raw_value and not normalized:
+                    messagebox.showerror(
+                        "Invalid Shortcut",
+                        "Shortcuts must be a single visible character.",
+                        parent=window,
+                    )
+                    return
+                if normalized:
+                    if normalized in used_keys:
+                        messagebox.showerror(
+                            "Duplicate Shortcut",
+                            "Each shortcut must be unique.",
+                            parent=window,
+                        )
+                        return
+                    used_keys.add(normalized)
+                new_bindings[note_value] = normalized
+            self.note_key_bindings.update(new_bindings)
+            for option in NOTE_OPTIONS:
+                self.note_key_bindings.setdefault(option, "")
+            self.config_data["combined_note_key_bindings"] = {
+                option: self.note_key_bindings.get(option, "") for option in NOTE_OPTIONS
+            }
+            self._write_config()
+            window.grab_release()
+            window.destroy()
+
+        ttk.Button(button_row, text="Cancel", command=_on_cancel).pack(side=tk.RIGHT)
+        ttk.Button(button_row, text="Save", command=_on_save).pack(side=tk.RIGHT, padx=(0, 8))
+
+        window.protocol("WM_DELETE_WINDOW", _on_cancel)
+        try:
+            window.wait_window()
+        except tk.TclError:
+            pass
 
     def _collect_recent_downloads(self) -> List[Path]:
         downloads_dir = self.downloads_dir_var.get().strip()
@@ -1214,6 +1324,10 @@ class ReportApp:
         tree = self.combined_result_tree
         if tree is None or self.combined_note_column_id is None:
             return
+        try:
+            tree.focus_set()
+        except tk.TclError:
+            pass
         region = tree.identify("region", event.x, event.y)
         if region != "cell":
             self._destroy_note_editor()
@@ -1254,6 +1368,79 @@ class ReportApp:
             value = ""
         self._set_note_value(item_id, value)
         self._destroy_note_editor()
+
+    def _normalized_note_binding_map(self) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        for note_value, key_text in self.note_key_bindings.items():
+            if not key_text:
+                continue
+            normalized_key = key_text.lower()
+            mapping[normalized_key] = note_value
+            alias = SPECIAL_KEYSYM_ALIASES.get(key_text)
+            if alias:
+                mapping[alias.lower()] = note_value
+        return mapping
+
+    def _note_value_for_event(self, event: tk.Event) -> Optional[str]:
+        mapping = self._normalized_note_binding_map()
+        char = getattr(event, "char", "")
+        if char:
+            note_value = mapping.get(char.lower())
+            if note_value is not None:
+                return note_value
+        keysym = getattr(event, "keysym", "")
+        if keysym:
+            return mapping.get(keysym.lower())
+        return None
+
+    def _apply_note_binding_to_selection(self, value: str) -> None:
+        tree = self.combined_result_tree
+        if tree is None:
+            return
+        selection = tree.selection()
+        if not selection:
+            focus_item = tree.focus()
+            if focus_item:
+                selection = (focus_item,)
+        if not selection:
+            return
+        self._destroy_note_editor()
+        for item_id in selection:
+            self._set_note_value(item_id, value)
+
+    def _on_combined_tree_key(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
+        if event.keysym == "Tab":
+            return None
+        note_value = self._note_value_for_event(event)
+        if note_value is None:
+            return None
+        self._apply_note_binding_to_selection(note_value)
+        return "break"
+
+    def _on_combined_tree_tab(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
+        tree = self.combined_result_tree
+        if tree is None:
+            return None
+        children = tree.get_children("")
+        if not children:
+            return "break"
+        selection = tree.selection()
+        current_item = selection[0] if selection else tree.focus()
+        children_list = list(children)
+        next_item: Optional[str] = None
+        if current_item and current_item in children_list:
+            index = children_list.index(current_item)
+            if index + 1 < len(children_list):
+                next_item = children_list[index + 1]
+        else:
+            next_item = children_list[0] if children_list else None
+        if next_item is None:
+            return "break"
+        tree.selection_set(next_item)
+        tree.focus(next_item)
+        tree.see(next_item)
+        self._destroy_note_editor()
+        return "break"
 
     def _set_note_value(self, item_id: str, value: str) -> None:
         tree = self.combined_result_tree
@@ -2357,6 +2544,8 @@ class ReportApp:
         tree.bind("<Button-1>", self._on_combined_tree_click)
         tree.bind("<Configure>", lambda _e: self._destroy_note_editor())
         tree.bind("<<TreeviewSelect>>", lambda _e: self._destroy_note_editor())
+        tree.bind("<Tab>", self._on_combined_tree_tab)
+        tree.bind("<Key>", self._on_combined_tree_key)
 
         def _tree_mousewheel(event: tk.Event) -> str:  # type: ignore[override]
             self._destroy_note_editor()
@@ -2971,6 +3160,22 @@ class ReportApp:
         self._apply_last_company_selection()
         self._config_loaded = True
 
+    def _apply_configured_note_key_bindings(self) -> None:
+        raw_bindings = self.config_data.get("combined_note_key_bindings")
+        if isinstance(raw_bindings, dict):
+            for option in NOTE_OPTIONS:
+                stored_value = raw_bindings.get(option, "")
+                normalized = self._normalize_note_binding_value(str(stored_value)) if stored_value else ""
+                self.note_key_bindings[option] = normalized
+        for option in NOTE_OPTIONS:
+            if option not in self.note_key_bindings:
+                self.note_key_bindings[option] = DEFAULT_NOTE_KEY_BINDINGS.get(option, "")
+            elif not self.note_key_bindings[option]:
+                self.note_key_bindings[option] = ""
+        self.config_data["combined_note_key_bindings"] = {
+            option: self.note_key_bindings.get(option, "") for option in NOTE_OPTIONS
+        }
+
     def _apply_whitespace_option(self, pattern: str, enabled: bool) -> str:
         if not enabled:
             return pattern
@@ -3034,6 +3239,9 @@ class ReportApp:
         self._write_config()
 
     def _write_config(self) -> None:
+        self.config_data["combined_note_key_bindings"] = {
+            option: self.note_key_bindings.get(option, "") for option in NOTE_OPTIONS
+        }
         try:
             with self.pattern_config_path.open("w", encoding="utf-8") as fh:
                 json.dump(self.config_data, fh, indent=2)
