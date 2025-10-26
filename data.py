@@ -3018,6 +3018,12 @@ class ReportApp:
         if not company:
             messagebox.showinfo("Select Company", "Please choose a company before committing assignments.")
             return
+        if not messagebox.askyesno(
+            "Confirm Commit",
+            f"Commit the current assignments for {company}?",
+            parent=self,
+        ):
+            return
         if self.assigned_pages_path is None:
             self.assigned_pages_path = self.companies_dir / company / "assigned.json"
 
