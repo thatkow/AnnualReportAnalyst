@@ -473,6 +473,7 @@ class FinancePlotFrame(ttk.Frame):
 
         self.axis.clear()
         hover_helper = BarHoverHelper(self.axis)
+        hover_helper.attach(self.canvas, context_callback=self._show_context_menu)
 
         legend_handles: List[Patch] = []
 
@@ -604,7 +605,6 @@ class FinancePlotFrame(ttk.Frame):
 
         self.figure.tight_layout()
         self.canvas.draw()
-        hover_helper.attach(self.canvas, context_callback=self._show_context_menu)
         self.hover_helper = hover_helper
 
     def _ensure_context_menu(self) -> tk.Menu:
