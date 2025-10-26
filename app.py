@@ -366,12 +366,18 @@ class ReportApp:
         self.combined_column_defaults: Dict[Tuple[Path, int], str] = {}
         self.combined_labels_by_pdf: Dict[Path, List[str]] = {}
         self.combined_column_name_map: Dict[str, Tuple[Path, str]] = {}
+        self.combined_column_ids: Dict[str, str] = {}
+        self.combined_note_cell_tags: Dict[str, str] = {}
+        self.combined_type_cell_tags: Dict[str, str] = {}
+        self.combined_category_cell_tags: Dict[str, str] = {}
         self.combined_base_column_widths: Dict[str, int] = {}
         self.combined_other_column_width: Optional[int] = None
         self.combined_show_blank_notes_var = tk.BooleanVar(master=self.root, value=False)
         self.combined_result_message: Optional[str] = None
-        self.type_category_color_map: Dict[str, str] = {}
-        self.type_category_color_labels: Dict[str, str] = {}
+        self.type_color_map: Dict[str, str] = {}
+        self.type_color_labels: Dict[str, str] = {}
+        self.category_color_map: Dict[str, str] = {}
+        self.category_color_labels: Dict[str, str] = {}
         self.note_assignments: Dict[Tuple[str, str, str], str] = {}
         self.note_assignments_path: Optional[Path] = None
         self.note_options: List[str] = list(DEFAULT_NOTE_OPTIONS)
@@ -781,8 +787,12 @@ class ReportApp:
             command=self._configure_combined_column_widths,
         )
         configuration_menu.add_command(
-            label="Configure Type/Category Colors",
-            command=self._configure_type_category_colors,
+            label="Configure Type Colors",
+            command=lambda: self._configure_value_colors("Type"),
+        )
+        configuration_menu.add_command(
+            label="Configure Category Colors",
+            command=lambda: self._configure_value_colors("Category"),
         )
         menubar.add_cascade(label="Configuration", menu=configuration_menu)
         try:
@@ -1191,9 +1201,12 @@ class ReportApp:
 
         window.protocol("WM_DELETE_WINDOW", _close)
 
-    def _configure_type_category_colors(self) -> None:
+    def _configure_value_colors(self, target: str) -> None:
+        if target not in {"Type", "Category"}:
+            return
+
         window = tk.Toplevel(self.root)
-        window.title("Configure Type/Category Colors")
+        window.title(f"Configure {target} Colors")
         window.transient(self.root)
         window.grab_set()
 
@@ -1205,8 +1218,8 @@ class ReportApp:
         ttk.Label(
             container,
             text=(
-                "Assign background colors to Type or Category values. "
-                "Rows matching these values will use the configured color when no note color overrides it."
+                f"Assign background colors to {target} values. "
+                "Cells matching these values will use the configured color when no note color overrides it."
             ),
             wraplength=460,
             justify=tk.LEFT,
@@ -1228,8 +1241,12 @@ class ReportApp:
         tree.configure(yscrollcommand=y_scroll.set)
         y_scroll.grid(row=1, column=1, sticky="ns", pady=(12, 0))
 
-        working_map = dict(self.type_category_color_map)
-        working_labels = dict(self.type_category_color_labels)
+        if target == "Type":
+            working_map = dict(self.type_color_map)
+            working_labels = dict(self.type_color_labels)
+        else:
+            working_map = dict(self.category_color_map)
+            working_labels = dict(self.category_color_labels)
 
         def _refresh_tree() -> None:
             for child in tree.get_children(""):
@@ -1243,8 +1260,8 @@ class ReportApp:
 
         def _prompt_value(initial: str = "") -> Optional[Tuple[str, str]]:
             value = simpledialog.askstring(
-                "Value",
-                "Enter the Type or Category value to color:",
+                f"{target} Value",
+                f"Enter the {target.lower()} value to color:",
                 parent=window,
                 initialvalue=initial,
             )
@@ -1275,7 +1292,7 @@ class ReportApp:
             if normalized in working_map:
                 messagebox.showerror(
                     "Duplicate Value",
-                    "A color is already configured for that value.",
+                    f"A color is already configured for that {target.lower()} value.",
                     parent=window,
                 )
                 return
@@ -1297,7 +1314,11 @@ class ReportApp:
         def _on_edit() -> None:
             key = _select_key()
             if key is None:
-                messagebox.showinfo("Edit Color", "Select a value to edit first.", parent=window)
+                messagebox.showinfo(
+                    "Edit Color",
+                    f"Select a {target.lower()} value to edit first.",
+                    parent=window,
+                )
                 return
             current_label = working_labels.get(key, key)
             result = _prompt_value(current_label)
@@ -1307,7 +1328,7 @@ class ReportApp:
             if new_key != key and new_key in working_map:
                 messagebox.showerror(
                     "Duplicate Value",
-                    "Another entry already uses that value.",
+                    f"Another entry already uses that {target.lower()} value.",
                     parent=window,
                 )
                 return
@@ -1341,7 +1362,11 @@ class ReportApp:
         def _on_remove() -> None:
             key = _select_key()
             if key is None:
-                messagebox.showinfo("Remove Color", "Select a value to remove first.", parent=window)
+                messagebox.showinfo(
+                    "Remove Color",
+                    f"Select a {target.lower()} value to remove first.",
+                    parent=window,
+                )
                 return
             if not messagebox.askyesno(
                 "Remove Color",
@@ -1367,10 +1392,14 @@ class ReportApp:
             window.destroy()
 
         def _on_save() -> None:
-            self.type_category_color_map = {key: value for key, value in working_map.items() if value}
-            self.type_category_color_labels = {
-                key: working_labels.get(key, key) for key in self.type_category_color_map
-            }
+            filtered_map = {key: value for key, value in working_map.items() if value}
+            filtered_labels = {key: working_labels.get(key, key) for key in filtered_map}
+            if target == "Type":
+                self.type_color_map = filtered_map
+                self.type_color_labels = filtered_labels
+            else:
+                self.category_color_map = filtered_map
+                self.category_color_labels = filtered_labels
             self._persist_type_category_colors()
             self._refresh_type_category_colors()
             _close()
@@ -1857,6 +1886,22 @@ class ReportApp:
             normalized = ""
         return f"note_value_{normalized or 'blank'}"
 
+    def _tree_cell_tag_add(
+        self, tree: ttk.Treeview, tag_name: str, item_id: str, column_id: str
+    ) -> None:
+        try:
+            tree.tk.call(tree, "tag", "add", tag_name, item_id, column_id)
+        except tk.TclError:
+            pass
+
+    def _tree_cell_tag_remove(
+        self, tree: ttk.Treeview, tag_name: str, item_id: str, column_id: str
+    ) -> None:
+        try:
+            tree.tk.call(tree, "tag", "remove", tag_name, item_id, column_id)
+        except tk.TclError:
+            pass
+
     def _foreground_for_color(self, color: str) -> str:
         normalized = self._normalize_hex_color(color)
         if not normalized:
@@ -1881,10 +1926,17 @@ class ReportApp:
         tree = self.combined_result_tree
         if tree is None:
             return
+        column_id = self.combined_column_ids.get("Note")
+        if not column_id:
+            return
+        previous_tag = self.combined_note_cell_tags.pop(item_id, None)
+        if previous_tag:
+            self._tree_cell_tag_remove(tree, previous_tag, item_id, column_id)
         tag_name = self._note_tag_for_value(value)
-        existing_tags = list(tree.item(item_id, "tags") or ())
-        other_tags = [tag for tag in existing_tags if not tag.startswith("note_value_")]
-        tree.item(item_id, tags=tuple(other_tags + [tag_name]))
+        if tag_name == "note_value_blank":
+            return
+        self._tree_cell_tag_add(tree, tag_name, item_id, column_id)
+        self.combined_note_cell_tags[item_id] = tag_name
 
     def _normalize_type_category_value(self, value: Any) -> str:
         if isinstance(value, str):
@@ -1920,31 +1972,53 @@ class ReportApp:
         luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
         return "#000000" if luminance > 0.6 else "#ffffff"
 
-    def _apply_type_category_color_tag(self, item_id: str, type_value: Any, category_value: Any) -> None:
+    def _apply_type_color_tag(self, item_id: str, type_value: Any) -> None:
         tree = self.combined_result_tree
-        if tree is None or not item_id:
+        if tree is None:
             return
-        target_value = ""
+        column_id = self.combined_column_ids.get("Type")
+        if not column_id:
+            return
+        previous_tag = self.combined_type_cell_tags.pop(item_id, None)
+        if previous_tag:
+            self._tree_cell_tag_remove(tree, previous_tag, item_id, column_id)
+        normalized = self._normalize_type_category_value(type_value)
         color_value = ""
-        for candidate in (type_value, category_value):
-            normalized = self._normalize_type_category_value(candidate)
-            if normalized and normalized in self.type_category_color_map:
-                candidate_color = self._normalize_hex_color(self.type_category_color_map[normalized])
-                if candidate_color:
-                    target_value = normalized
-                    color_value = candidate_color
-                    break
-        existing_tags = list(tree.item(item_id, "tags") or ())
-        filtered_tags = [tag for tag in existing_tags if not tag.startswith("type_category_color_")]
-        if not target_value or not color_value:
-            if len(filtered_tags) != len(existing_tags):
-                tree.item(item_id, tags=tuple(filtered_tags))
+        if normalized and normalized in self.type_color_map:
+            candidate = self.type_color_map.get(normalized, "")
+            color_value = self._normalize_hex_color(candidate) or ""
+        if not color_value:
             return
-        tag_key = re.sub(r"[^0-9a-zA-Z]+", "_", target_value) or "value"
-        tag_name = f"type_category_color_{tag_key}"
+        tag_key = re.sub(r"[^0-9a-zA-Z]+", "_", normalized) or "value"
+        tag_name = f"type_color_{tag_key}"
         foreground = self._contrast_foreground_for_color(color_value)
         tree.tag_configure(tag_name, background=color_value, foreground=foreground)
-        tree.item(item_id, tags=tuple(filtered_tags + [tag_name]))
+        self._tree_cell_tag_add(tree, tag_name, item_id, column_id)
+        self.combined_type_cell_tags[item_id] = tag_name
+
+    def _apply_category_color_tag(self, item_id: str, category_value: Any) -> None:
+        tree = self.combined_result_tree
+        if tree is None:
+            return
+        column_id = self.combined_column_ids.get("Category")
+        if not column_id:
+            return
+        previous_tag = self.combined_category_cell_tags.pop(item_id, None)
+        if previous_tag:
+            self._tree_cell_tag_remove(tree, previous_tag, item_id, column_id)
+        normalized = self._normalize_type_category_value(category_value)
+        color_value = ""
+        if normalized and normalized in self.category_color_map:
+            candidate = self.category_color_map.get(normalized, "")
+            color_value = self._normalize_hex_color(candidate) or ""
+        if not color_value:
+            return
+        tag_key = re.sub(r"[^0-9a-zA-Z]+", "_", normalized) or "value"
+        tag_name = f"category_color_{tag_key}"
+        foreground = self._contrast_foreground_for_color(color_value)
+        tree.tag_configure(tag_name, background=color_value, foreground=foreground)
+        self._tree_cell_tag_add(tree, tag_name, item_id, column_id)
+        self.combined_category_cell_tags[item_id] = tag_name
 
     def _refresh_type_category_colors(self) -> None:
         tree = self.combined_result_tree
@@ -1966,7 +2040,8 @@ class ReportApp:
                 if category_index is not None and category_index < len(values)
                 else ""
             )
-            self._apply_type_category_color_tag(item_id, type_value, category_value)
+            self._apply_type_color_tag(item_id, type_value)
+            self._apply_category_color_tag(item_id, category_value)
 
     def _refresh_note_tags(self) -> None:
         tree = self.combined_result_tree
@@ -3296,6 +3371,10 @@ class ReportApp:
         self._destroy_note_editor()
         for child in self.combined_result_frame.winfo_children():
             child.destroy()
+        self.combined_column_ids = {name: f"#{index + 1}" for index, name in enumerate(columns)}
+        self.combined_note_cell_tags.clear()
+        self.combined_type_cell_tags.clear()
+        self.combined_category_cell_tags.clear()
         result_container = ttk.Frame(self.combined_result_frame)
         result_container.pack(fill=tk.BOTH, expand=True)
         result_container.columnconfigure(0, weight=1)
@@ -3324,7 +3403,7 @@ class ReportApp:
         note_index = None
         if "Note" in columns:
             note_index = columns.index("Note")
-            self.combined_note_column_id = f"#{note_index + 1}"
+            self.combined_note_column_id = self.combined_column_ids.get("Note")
         else:
             self.combined_note_column_id = None
         self.combined_note_record_keys.clear()
@@ -3346,11 +3425,8 @@ class ReportApp:
                         str(note_key[1]),
                         str(note_key[2]),
                     )
-            self._apply_type_category_color_tag(
-                item_id,
-                record.get("Type", ""),
-                record.get("Category", ""),
-            )
+            self._apply_type_color_tag(item_id, record.get("Type", ""))
+            self._apply_category_color_tag(item_id, record.get("Category", ""))
             note_value = record.get("Note", "")
             if not isinstance(note_value, str):
                 note_value = str(note_value or "")
@@ -3608,19 +3684,33 @@ class ReportApp:
         self._write_config()
 
     def _persist_type_category_colors(self) -> None:
-        if self.type_category_color_map:
+        def _build_store(
+            color_map: Dict[str, str], labels: Dict[str, str]
+        ) -> Dict[str, str]:
             stored: Dict[str, str] = {}
-            for normalized, color in self.type_category_color_map.items():
-                if not color:
+            for normalized, color in color_map.items():
+                normalized_color = self._normalize_hex_color(color)
+                if not normalized_color:
                     continue
-                label = self.type_category_color_labels.get(normalized, normalized)
-                stored[label] = color
-            if stored:
-                self.config_data["combined_type_category_colors"] = stored
-            else:
-                self.config_data.pop("combined_type_category_colors", None)
+                label = labels.get(normalized, normalized)
+                stored[label] = normalized_color
+            return stored
+
+        type_store = _build_store(self.type_color_map, self.type_color_labels)
+        category_store = _build_store(self.category_color_map, self.category_color_labels)
+
+        if type_store:
+            self.config_data["combined_type_colors"] = type_store
         else:
-            self.config_data.pop("combined_type_category_colors", None)
+            self.config_data.pop("combined_type_colors", None)
+
+        if category_store:
+            self.config_data["combined_category_colors"] = category_store
+        else:
+            self.config_data.pop("combined_category_colors", None)
+
+        # Remove legacy configuration key if present
+        self.config_data.pop("combined_type_category_colors", None)
         self._write_config()
 
     def _store_combined_base_column_widths(self) -> None:
@@ -4207,7 +4297,7 @@ class ReportApp:
                     self.combined_other_column_width = int(other_width_value)
                 else:
                     self.combined_other_column_width = None
-                self._load_type_category_colors_from_config(data.get("combined_type_category_colors"))
+                self._load_type_category_colors_from_config(data)
         except Exception as exc:  # pragma: no cover - guard for IO issues
             messagebox.showwarning("Load Patterns", f"Could not load pattern configuration: {exc}")
             self._config_loaded = True
@@ -4241,27 +4331,52 @@ class ReportApp:
         self._apply_last_company_selection()
         self._config_loaded = True
 
-    def _load_type_category_colors_from_config(self, raw: Any) -> None:
-        self.type_category_color_map = {}
-        self.type_category_color_labels = {}
-        if isinstance(raw, dict):
-            items = raw.items()
-        elif isinstance(raw, list):
-            items = []
-            for entry in raw:
-                if isinstance(entry, dict):
-                    value = entry.get("value")
-                    color = entry.get("color")
-                    items.append((value, color))
+    def _load_type_category_colors_from_config(self, data: Any) -> None:
+        self.type_color_map = {}
+        self.type_color_labels = {}
+        self.category_color_map = {}
+        self.category_color_labels = {}
+
+        if isinstance(data, dict):
+            type_raw = data.get("combined_type_colors")
+            category_raw = data.get("combined_category_colors")
+            legacy_raw = data.get("combined_type_category_colors")
         else:
-            return
-        for key, color in items:  # type: ignore[misc]
-            normalized_key = self._normalize_type_category_value(key)
-            normalized_color = self._normalize_hex_color(str(color)) if color is not None else None
-            if not normalized_key or not normalized_color:
-                continue
-            self.type_category_color_map[normalized_key] = normalized_color
-            self.type_category_color_labels[normalized_key] = str(key).strip()
+            type_raw = None
+            category_raw = None
+            legacy_raw = None
+
+        if legacy_raw and not type_raw and not category_raw:
+            type_raw = legacy_raw
+            category_raw = legacy_raw
+
+        def _iter_entries(raw: Any) -> List[Tuple[Any, Any]]:
+            if isinstance(raw, dict):
+                return list(raw.items())
+            if isinstance(raw, list):
+                entries: List[Tuple[Any, Any]] = []
+                for entry in raw:
+                    if isinstance(entry, dict):
+                        entries.append((entry.get("value"), entry.get("color")))
+                return entries
+            return []
+
+        def _populate(
+            target_map: Dict[str, str], target_labels: Dict[str, str], raw: Any
+        ) -> None:
+            for key, color in _iter_entries(raw):
+                normalized_key = self._normalize_type_category_value(key)
+                normalized_color = (
+                    self._normalize_hex_color(str(color)) if color is not None else None
+                )
+                if not normalized_key or not normalized_color:
+                    continue
+                label_text = str(key).strip() if isinstance(key, str) else str(key)
+                target_map[normalized_key] = normalized_color
+                target_labels[normalized_key] = label_text
+
+        _populate(self.type_color_map, self.type_color_labels, type_raw)
+        _populate(self.category_color_map, self.category_color_labels, category_raw)
 
     def _apply_configured_note_key_bindings(self) -> None:
         note_order: List[str] = []
@@ -4476,19 +4591,32 @@ class ReportApp:
             self.config_data["combined_other_column_width"] = int(self.combined_other_column_width)
         else:
             self.config_data.pop("combined_other_column_width", None)
-        if self.type_category_color_map:
+        def _build_store(
+            color_map: Dict[str, str], labels: Dict[str, str]
+        ) -> Dict[str, str]:
             stored: Dict[str, str] = {}
-            for normalized, color in self.type_category_color_map.items():
-                if not color:
+            for normalized, color in color_map.items():
+                normalized_color = self._normalize_hex_color(color)
+                if not normalized_color:
                     continue
-                label = self.type_category_color_labels.get(normalized, normalized)
-                stored[label] = color
-            if stored:
-                self.config_data["combined_type_category_colors"] = stored
-            else:
-                self.config_data.pop("combined_type_category_colors", None)
+                label = labels.get(normalized, normalized)
+                stored[label] = normalized_color
+            return stored
+
+        type_store = _build_store(self.type_color_map, self.type_color_labels)
+        category_store = _build_store(self.category_color_map, self.category_color_labels)
+
+        if type_store:
+            self.config_data["combined_type_colors"] = type_store
         else:
-            self.config_data.pop("combined_type_category_colors", None)
+            self.config_data.pop("combined_type_colors", None)
+
+        if category_store:
+            self.config_data["combined_category_colors"] = category_store
+        else:
+            self.config_data.pop("combined_category_colors", None)
+
+        self.config_data.pop("combined_type_category_colors", None)
         try:
             with self.pattern_config_path.open("w", encoding="utf-8") as fh:
                 json.dump(self.config_data, fh, indent=2)
