@@ -3130,6 +3130,8 @@ class ReportApp:
                 header_frame.columnconfigure(2, weight=0)
                 header_frame.columnconfigure(3, weight=0)
                 header_frame.columnconfigure(4, weight=0)
+                header_frame.columnconfigure(5, weight=0)
+                header_frame.columnconfigure(6, weight=0)
                 ttk.Label(
                     header_frame,
                     text=f"{entry.path.name} - {category} (Page {int(page_index) + 1})",
@@ -3159,12 +3161,34 @@ class ReportApp:
                     ),
                     width=10,
                 ).grid(row=0, column=3, sticky="e", padx=(0, 4))
+                csv_name = meta.get("csv") if isinstance(meta, dict) else None
+                csv_path: Optional[Path] = None
+                if isinstance(csv_name, str) and csv_name:
+                    candidate_csv = doc_dir / csv_name
+                    if candidate_csv.exists():
+                        csv_path = candidate_csv
+                if csv_path is not None:
+                    ttk.Button(
+                        header_frame,
+                        text="Reload CSV",
+                        command=lambda d=doc_dir, c=category: self._reload_scraped_csv(d, c),
+                        width=12,
+                    ).grid(row=0, column=4, sticky="e", padx=(0, 4))
+                    ttk.Button(
+                        header_frame,
+                        text="Open CSV",
+                        command=lambda path=csv_path: self._open_csv_file(path) if path else None,
+                        width=10,
+                    ).grid(row=0, column=5, sticky="e", padx=(0, 4))
+                    delete_column = 6
+                else:
+                    delete_column = 4
                 ttk.Button(
                     header_frame,
                     text="Delete",
                     command=lambda d=doc_dir, c=category: self._delete_scrape_output(d, c),
                     width=10,
-                ).grid(row=0, column=4, sticky="e")
+                ).grid(row=0, column=delete_column, sticky="e")
                 row_index += 1
 
                 image_frame = ttk.Frame(self.scraped_inner, padding=8)
@@ -5003,6 +5027,46 @@ class ReportApp:
         self._refresh_scraped_tab()
         if errors:
             messagebox.showwarning("Delete Output", "\n".join(errors))
+
+    def _reload_scraped_csv(self, doc_dir: Path, category: str) -> None:
+        metadata = self._load_doc_metadata(doc_dir)
+        if not metadata:
+            messagebox.showinfo("Reload CSV", "No scrape metadata found for this selection.")
+            return
+        meta = metadata.get(category)
+        if not isinstance(meta, dict):
+            messagebox.showinfo("Reload CSV", "No CSV file is associated with this selection.")
+            return
+        csv_name = meta.get("csv")
+        if not isinstance(csv_name, str) or not csv_name:
+            messagebox.showinfo("Reload CSV", "No CSV file is associated with this selection.")
+            return
+        csv_path = doc_dir / csv_name
+        if not csv_path.exists():
+            messagebox.showinfo("Reload CSV", "The recorded CSV file could not be found on disk.")
+            self._refresh_scraped_tab()
+            return
+        rows = self._read_csv_rows(csv_path)
+        if not rows:
+            messagebox.showwarning(
+                "Reload CSV",
+                "The CSV file could not be loaded or did not contain any data.",
+            )
+        self._refresh_scraped_tab()
+
+    def _open_csv_file(self, csv_path: Path) -> None:
+        if not csv_path.exists():
+            messagebox.showinfo("Open CSV", "The selected CSV file could not be found on disk.")
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(csv_path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(csv_path)])
+            else:
+                subprocess.Popen(["xdg-open", str(csv_path)])
+        except Exception as exc:
+            messagebox.showwarning("Open CSV", f"Could not open CSV file: {exc}")
 
     def _delete_all_scraped(self) -> None:
         company = self.company_var.get()
