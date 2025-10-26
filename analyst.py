@@ -500,108 +500,172 @@ class FinancePlotFrame(ttk.Frame):
         legend_handles: List[Patch] = []
 
         for company_index, (company, dataset) in enumerate(self.datasets.items()):
-            finance_color, income_color = self._company_colors.setdefault(company, self._next_color_pair())
+            finance_color, income_color = self._company_colors.setdefault(
+                company, self._next_color_pair()
+            )
             base_offset = start_offset + (2 * company_index) * bar_width
-            finance_positions = [index + base_offset + 0.5 * bar_width for index in period_indices]
-            income_positions = [index + base_offset + 1.5 * bar_width for index in period_indices]
+            finance_positions = [
+                index + base_offset + 0.5 * bar_width for index in period_indices
+            ]
+            income_positions = [
+                index + base_offset + 1.5 * bar_width for index in period_indices
+            ]
 
-            finance_pos_totals = [0.0] * len(periods)
-            finance_neg_totals = [0.0] * len(periods)
-            income_pos_totals = [0.0] * len(periods)
-            income_neg_totals = [0.0] * len(periods)
-
+            finance_segment_values: List[Tuple[RowSegment, List[float]]] = []
+            finance_nonzero = [False] * len(periods)
             for segment in dataset.finance_segments:
-                segment_period_index = {label: idx for idx, label in enumerate(segment.periods)}
+                segment_period_index = {
+                    label: idx for idx, label in enumerate(segment.periods)
+                }
                 segment_values = [
                     segment.values[segment_period_index[label]]
-                    if label in segment_period_index and segment_period_index[label] < len(segment.values)
+                    if label in segment_period_index
+                    and segment_period_index[label] < len(segment.values)
                     else 0.0
                     for label in periods
                 ]
-                bottoms = self._compute_bottoms(
-                    segment_values, finance_pos_totals, finance_neg_totals
-                )
-                rectangles = self.axis.bar(
-                    finance_positions,
-                    segment_values,
-                    width=bar_width,
-                    bottom=bottoms,
-                    color=dataset.color_for_key(segment.key),
-                    edgecolor=finance_color,
-                    linewidth=0.8,
-                )
-                hover_helper.add_segment(
-                    rectangles,
-                    segment,
-                    periods,
-                    company,
-                    values=segment_values,
-                )
+                for idx, value in enumerate(segment_values):
+                    if value != 0:
+                        finance_nonzero[idx] = True
+                finance_segment_values.append((segment, segment_values))
 
+            finance_active_indices = [
+                idx for idx, flag in enumerate(finance_nonzero) if flag
+            ]
+            finance_positions_active = [
+                finance_positions[idx] for idx in finance_active_indices
+            ]
+            finance_periods_active = [
+                periods[idx] for idx in finance_active_indices
+            ]
+            finance_pos_totals = [0.0] * len(finance_active_indices)
+            finance_neg_totals = [0.0] * len(finance_active_indices)
+
+            if finance_active_indices:
+                for segment, segment_values in finance_segment_values:
+                    filtered_values = [
+                        segment_values[idx] for idx in finance_active_indices
+                    ]
+                    if not any(value != 0 for value in filtered_values):
+                        continue
+                    bottoms = self._compute_bottoms(
+                        filtered_values, finance_pos_totals, finance_neg_totals
+                    )
+                    rectangles = self.axis.bar(
+                        finance_positions_active,
+                        filtered_values,
+                        width=bar_width,
+                        bottom=bottoms,
+                        color=dataset.color_for_key(segment.key),
+                        edgecolor=finance_color,
+                        linewidth=0.8,
+                    )
+                    hover_helper.add_segment(
+                        rectangles,
+                        segment,
+                        finance_periods_active,
+                        company,
+                        values=filtered_values,
+                    )
+
+            income_segment_values: List[Tuple[RowSegment, List[float]]] = []
+            income_nonzero = [False] * len(periods)
             for segment in dataset.income_segments:
-                segment_period_index = {label: idx for idx, label in enumerate(segment.periods)}
+                segment_period_index = {
+                    label: idx for idx, label in enumerate(segment.periods)
+                }
                 segment_values = [
                     segment.values[segment_period_index[label]]
-                    if label in segment_period_index and segment_period_index[label] < len(segment.values)
+                    if label in segment_period_index
+                    and segment_period_index[label] < len(segment.values)
                     else 0.0
                     for label in periods
                 ]
-                bottoms = self._compute_bottoms(
-                    segment_values, income_pos_totals, income_neg_totals
-                )
-                rectangles = self.axis.bar(
-                    income_positions,
-                    segment_values,
-                    width=bar_width,
-                    bottom=bottoms,
-                    color=dataset.color_for_key(segment.key),
-                    edgecolor=income_color,
-                    linewidth=0.8,
-                )
-                hover_helper.add_segment(
-                    rectangles,
-                    segment,
-                    periods,
-                    company,
-                    values=segment_values,
-                )
+                for idx, value in enumerate(segment_values):
+                    if value != 0:
+                        income_nonzero[idx] = True
+                income_segment_values.append((segment, segment_values))
 
-            finance_totals = [pos + neg for pos, neg in zip(finance_pos_totals, finance_neg_totals)]
-            income_totals = [pos + neg for pos, neg in zip(income_pos_totals, income_neg_totals)]
+            income_active_indices = [
+                idx for idx, flag in enumerate(income_nonzero) if flag
+            ]
+            income_positions_active = [
+                income_positions[idx] for idx in income_active_indices
+            ]
+            income_periods_active = [
+                periods[idx] for idx in income_active_indices
+            ]
+            income_pos_totals = [0.0] * len(income_active_indices)
+            income_neg_totals = [0.0] * len(income_active_indices)
 
-            self.axis.scatter(
-                finance_positions,
-                finance_totals,
-                color=finance_color,
-                marker="o",
-                s=36,
-                zorder=5,
-            )
-            self.axis.scatter(
-                income_positions,
-                income_totals,
-                color=income_color,
-                marker="o",
-                s=36,
-                zorder=5,
-            )
+            if income_active_indices:
+                for segment, segment_values in income_segment_values:
+                    filtered_values = [
+                        segment_values[idx] for idx in income_active_indices
+                    ]
+                    if not any(value != 0 for value in filtered_values):
+                        continue
+                    bottoms = self._compute_bottoms(
+                        filtered_values, income_pos_totals, income_neg_totals
+                    )
+                    rectangles = self.axis.bar(
+                        income_positions_active,
+                        filtered_values,
+                        width=bar_width,
+                        bottom=bottoms,
+                        color=dataset.color_for_key(segment.key),
+                        edgecolor=income_color,
+                        linewidth=0.8,
+                    )
+                    hover_helper.add_segment(
+                        rectangles,
+                        segment,
+                        income_periods_active,
+                        company,
+                        values=filtered_values,
+                    )
 
-            legend_handles.extend(
-                [
+            if finance_active_indices:
+                finance_totals = [
+                    pos + neg for pos, neg in zip(finance_pos_totals, finance_neg_totals)
+                ]
+                self.axis.scatter(
+                    finance_positions_active,
+                    finance_totals,
+                    color=finance_color,
+                    marker="o",
+                    s=36,
+                    zorder=5,
+                )
+                legend_handles.append(
                     Patch(
                         facecolor="white",
                         edgecolor=finance_color,
                         linewidth=1.0,
                         label=f"{company} {FinanceDataset.FINANCE_LABEL}",
-                    ),
+                    )
+                )
+
+            if income_active_indices:
+                income_totals = [
+                    pos + neg for pos, neg in zip(income_pos_totals, income_neg_totals)
+                ]
+                self.axis.scatter(
+                    income_positions_active,
+                    income_totals,
+                    color=income_color,
+                    marker="o",
+                    s=36,
+                    zorder=5,
+                )
+                legend_handles.append(
                     Patch(
                         facecolor="white",
                         edgecolor=income_color,
                         linewidth=1.0,
                         label=f"{company} {FinanceDataset.INCOME_LABEL}",
-                    ),
-                ]
-            )
+                    )
+                )
 
         if period_indices:
             left_limit = period_indices[0] + start_offset
