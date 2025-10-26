@@ -383,7 +383,7 @@ class ReportApp:
         self.combined_base_column_widths: Dict[str, int] = {}
         self.combined_other_column_width: Optional[int] = None
         self.combined_show_blank_notes_var = tk.BooleanVar(master=self.root, value=False)
-        self.combined_result_message: Optional[str] = None
+        self.combined_save_button: Optional[ttk.Button] = None
         self.combined_preview_frame: Optional[ttk.Frame] = None
         self.combined_preview_canvas: Optional[tk.Canvas] = None
         self.combined_preview_canvas_image: Optional[int] = None
@@ -415,13 +415,9 @@ class ReportApp:
             self._create_menus()
             top_frame = ttk.Frame(self.root, padding=8)
             top_frame.pack(fill=tk.X)
-            company_label = ttk.Label(top_frame, text="Company:")
-            company_label.pack(side=tk.LEFT)
             self.company_combo = ttk.Combobox(top_frame, textvariable=self.company_var, state="readonly", width=30)
-            self.company_combo.pack(side=tk.LEFT, padx=4)
+            self.company_combo.pack(side=tk.LEFT, padx=(0, 4))
             self.company_combo.bind("<<ComboboxSelected>>", self._on_company_selected)
-            folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=60, state="readonly")
-            folder_entry.pack(side=tk.LEFT, padx=4)
             load_button = ttk.Button(top_frame, text="Load PDFs", command=self._open_company_tab)
             load_button.pack(side=tk.LEFT, padx=4)
             self._refresh_company_options()
@@ -429,12 +425,6 @@ class ReportApp:
             self.company_notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
             self.company_notebook.bind("<<NotebookTabChanged>>", self._on_company_tab_changed)
             return
-        top_frame = ttk.Frame(self.root, padding=8)
-        top_frame.pack(fill=tk.X)
-        ttk.Label(top_frame, text=f"Company: {self.company_var.get() or 'Unknown'}", font=("TkDefaultFont", 11, "bold")).pack(side=tk.LEFT)
-        folder_entry = ttk.Entry(top_frame, textvariable=self.folder_path, width=50, state="readonly")
-        folder_entry.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
-        ttk.Button(top_frame, text="Reload PDFs", command=self.load_pdfs).pack(side=tk.LEFT, padx=(8, 0))
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
         self.notebook = notebook
@@ -482,6 +472,7 @@ class ReportApp:
         ).pack(anchor="w")
         size_frame = ttk.Frame(review_container, padding=(8, 0))
         size_frame.pack(fill=tk.X, padx=0, pady=(0, 4))
+        ttk.Label(size_frame, text="Review").pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(size_frame, text="Thumbnail width:").pack(side=tk.LEFT)
         self.thumbnail_scale = ttk.Scale(
             size_frame,
@@ -542,16 +533,9 @@ class ReportApp:
         self.scraped_inner.bind("<Configure>", lambda _e: self.scraped_canvas.configure(scrollregion=self.scraped_canvas.bbox("all")))
         self.scraped_canvas.bind("<Configure>", lambda e: self.scraped_canvas.itemconfigure(self.scraped_window, width=e.width))
 
-        combined_container = ttk.Frame(notebook)
-        self.combined_frame = combined_container
-        notebook.add(combined_container, text="Combined")
-
-        self.combined_notebook = ttk.Notebook(combined_container)
-        self.combined_notebook.pack(fill=tk.BOTH, expand=True)
-
-        labels_tab = ttk.Frame(self.combined_notebook)
+        labels_tab = ttk.Frame(notebook)
         self.combined_labels_tab = labels_tab
-        self.combined_notebook.add(labels_tab, text="Labels")
+        notebook.add(labels_tab, text="Labels")
 
         labels_controls = ttk.Frame(labels_tab, padding=8)
         labels_controls.pack(fill=tk.X)
@@ -594,25 +578,11 @@ class ReportApp:
         self.combined_header_frame.grid(row=0, column=0, sticky="nsew")
         self.combined_labels_inner.columnconfigure(0, weight=1)
 
-        combined_tab = ttk.Frame(self.combined_notebook)
-        self.combined_results_tab = combined_tab
-        self.combined_notebook.add(combined_tab, text="Combined")
+        combined_container = ttk.Frame(notebook)
+        self.combined_frame = combined_container
+        notebook.add(combined_container, text="Combined")
 
-        combined_controls = ttk.Frame(combined_tab, padding=8)
-        combined_controls.pack(fill=tk.X)
-        ttk.Button(
-            combined_controls,
-            text="Load Assignments",
-            command=self._prompt_import_note_assignments,
-        ).pack(side=tk.RIGHT)
-        ttk.Checkbutton(
-            combined_controls,
-            text="Show only blank notes",
-            variable=self.combined_show_blank_notes_var,
-            command=self._on_combined_show_blank_notes_toggle,
-        ).pack(side=tk.RIGHT, padx=(0, 8))
-
-        self.combined_result_frame = ttk.Frame(combined_tab, padding=8)
+        self.combined_result_frame = ttk.Frame(combined_container, padding=8)
         self.combined_result_frame.pack(fill=tk.BOTH, expand=True)
 
     def _on_frame_configure(self, _: tk.Event) -> None:  # type: ignore[override]
@@ -705,6 +675,28 @@ class ReportApp:
                 self.company_var.set(name)
                 self.folder_path.set(str(self.companies_dir / name / "raw"))
                 break
+
+    def _reload_current_company_tab(self) -> None:
+        if self.embedded:
+            self.load_pdfs()
+            return
+        if not hasattr(self, "company_notebook"):
+            return
+        try:
+            tab_id = self.company_notebook.select()
+        except tk.TclError:
+            tab_id = ""
+        if not tab_id:
+            messagebox.showinfo("Reload PDFs", "Open a company tab before reloading PDFs.")
+            return
+        for name, frame in self.company_frames.items():
+            if str(frame) == tab_id:
+                child = self.company_tabs.get(name)
+                if child is None:
+                    break
+                child.load_pdfs()
+                return
+        messagebox.showinfo("Reload PDFs", "Open a company tab before reloading PDFs.")
 
     def _on_company_selected(self, _: tk.Event) -> None:  # type: ignore[override]
         company = self.company_var.get()
@@ -805,6 +797,7 @@ class ReportApp:
         menubar = tk.Menu(self.root)
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(label="New Company", command=self.create_company)
+        file_menu.add_command(label="Reload PDFs", command=self._reload_current_company_tab)
         file_menu.add_command(
             label="Append Type/Item/Category CSV",
             command=self._append_type_item_category_csv,
@@ -3214,13 +3207,13 @@ class ReportApp:
         self.combined_column_defaults.clear()
         self.combined_labels_by_pdf.clear()
         self.combined_column_name_map.clear()
-        self.combined_result_message = None
         self.combined_row_sources.clear()
         self.combined_preview_frame = None
         self.combined_preview_canvas = None
         self.combined_preview_canvas_image = None
         self.combined_preview_image = None
         self.combined_split_pane = None
+        self.combined_save_button = None
         self.combined_preview_detail_var.set("Select a row to view the PDF page.")
 
     def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
@@ -3739,11 +3732,28 @@ class ReportApp:
 
         table_container = ttk.Frame(split_pane)
         table_container.columnconfigure(0, weight=1)
-        table_container.rowconfigure(0, weight=1)
+        table_container.rowconfigure(1, weight=1)
         split_pane.add(table_container, weight=1)
 
+        controls_frame = ttk.Frame(table_container)
+        controls_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        controls_frame.columnconfigure(0, weight=1)
+
+        ttk.Checkbutton(
+            controls_frame,
+            text="Show only blank notes",
+            variable=self.combined_show_blank_notes_var,
+            command=self._on_combined_show_blank_notes_toggle,
+        ).grid(row=0, column=0, sticky="w")
+
+        ttk.Button(
+            controls_frame,
+            text="Load Assignments",
+            command=self._prompt_import_note_assignments,
+        ).grid(row=0, column=1, sticky="e", padx=(8, 0))
+
         tree_container = ttk.Frame(table_container)
-        tree_container.grid(row=0, column=0, sticky="nsew")
+        tree_container.grid(row=1, column=0, sticky="nsew")
         tree_container.columnconfigure(0, weight=1)
         tree_container.rowconfigure(0, weight=1)
 
@@ -3853,6 +3863,17 @@ class ReportApp:
         self._configure_note_tags(tree)
         self.combined_result_tree = tree
 
+        save_frame = ttk.Frame(table_container)
+        save_frame.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        save_frame.columnconfigure(0, weight=1)
+        save_button = ttk.Button(
+            save_frame,
+            text="Save Combined CSV",
+            command=self._save_combined_csv,
+        )
+        save_button.grid(row=0, column=0, sticky="e")
+        self.combined_save_button = save_button
+
         for record in records:
             values = [record.get(column_name, "") for column_name in columns]
             item_id = tree.insert("", tk.END, values=values)
@@ -3910,23 +3931,61 @@ class ReportApp:
             self._update_combined_preview(current_selection[0])
         else:
             self._clear_combined_preview()
-        self._render_combined_result_message()
+        self._update_combined_save_button_state()
 
     def _on_confirm_combined_clicked(self) -> None:
         self._confirm_combined_table()
         if self.combined_result_tree is not None:
             try:
-                self.combined_notebook.select(self.combined_results_tab)
+                self.notebook.select(self.combined_frame)
             except tk.TclError:
                 pass
 
-    def _render_combined_result_message(self) -> None:
-        if not self.combined_result_message:
+    def _update_combined_save_button_state(self) -> None:
+        button = self.combined_save_button
+        if button is None or not button.winfo_exists():
             return
-        ttk.Label(
-            self.combined_result_frame,
-            text=self.combined_result_message,
-        ).pack(anchor="w", padx=8, pady=(4, 0))
+        if self.combined_all_records and self.combined_ordered_columns:
+            button.state(["!disabled"])
+        else:
+            button.state(["disabled"])
+
+    def _save_combined_csv(self) -> None:
+        if not self.combined_all_records or not self.combined_ordered_columns:
+            messagebox.showinfo(
+                "Save Combined CSV",
+                "No combined data is currently available to save.",
+            )
+            return
+        company = self.company_var.get().strip()
+        if not company:
+            messagebox.showinfo(
+                "Save Combined CSV",
+                "Select a company before saving the combined CSV.",
+            )
+            return
+        scrape_root = self.companies_dir / company / "openapiscrape"
+        combined_path = scrape_root / "combined.csv"
+        try:
+            csv_header: List[str] = []
+            for column_name in self.combined_ordered_columns:
+                if column_name in {"Type", "Category", "Item", "Note"}:
+                    csv_header.append(column_name)
+                elif "." in column_name:
+                    csv_header.append(column_name.split(".", 1)[1])
+                else:
+                    csv_header.append(column_name)
+            csv_rows = [csv_header]
+            for record in self.combined_all_records:
+                csv_rows.append(
+                    [record.get(column_name, "") for column_name in self.combined_ordered_columns]
+                )
+            combined_path.parent.mkdir(parents=True, exist_ok=True)
+            self._write_csv_rows(csv_rows, combined_path)
+        except Exception as exc:
+            messagebox.showwarning("Save Combined CSV", f"Could not save the combined CSV: {exc}")
+            return
+        messagebox.showinfo("Save Combined CSV", f"Combined CSV saved to:\n{combined_path}")
 
     def _clear_combined_preview(self, message: Optional[str] = None) -> None:
         canvas = self.combined_preview_canvas
@@ -4146,7 +4205,6 @@ class ReportApp:
                 )
             return
 
-        self.combined_result_message = None
         self.combined_all_records = combined_records
         record_lookup: Dict[Tuple[str, str, str], Dict[str, str]] = {}
         for record in combined_records:
@@ -4161,28 +4219,6 @@ class ReportApp:
 
         display_records = self._filter_combined_records(combined_records)
         self._render_combined_tree(display_records, ordered_columns)
-
-        company = self.company_var.get()
-        if company:
-            scrape_root = self.companies_dir / company / "openapiscrape"
-            combined_path = scrape_root / "combined.csv"
-            try:
-                csv_header: List[str] = []
-                for column_name in ordered_columns:
-                    if column_name in {"Type", "Category", "Item", "Note"}:
-                        csv_header.append(column_name)
-                    elif "." in column_name:
-                        csv_header.append(column_name.split(".", 1)[1])
-                    else:
-                        csv_header.append(column_name)
-                csv_rows = [csv_header]
-                for record in combined_records:
-                    csv_rows.append([record.get(column_name, "") for column_name in ordered_columns])
-                self._write_csv_rows(csv_rows, combined_path)
-                self.combined_result_message = f"Combined CSV saved to: {combined_path}"
-                self._render_combined_result_message()
-            except Exception as exc:
-                messagebox.showwarning("Combine Results", f"Could not save combined CSV: {exc}")
 
     def _get_tree_font(self, tree: ttk.Treeview) -> tkfont.Font:
         try:
