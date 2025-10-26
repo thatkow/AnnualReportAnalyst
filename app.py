@@ -388,6 +388,11 @@ class ReportApp:
         self.combined_preview_canvas: Optional[tk.Canvas] = None
         self.combined_preview_canvas_image: Optional[int] = None
         self.combined_preview_image: Optional[ImageTk.PhotoImage] = None
+        self.combined_preview_zoom_var = tk.DoubleVar(value=1.0)
+        self.combined_preview_zoom_display_var = tk.StringVar(value="100%")
+        self.combined_preview_target: Optional[
+            Tuple[PDFEntry, int, Tuple[str, str, str]]
+        ] = None
         self.combined_split_pane: Optional[ttk.Panedwindow] = None
         self.combined_preview_detail_var = tk.StringVar(
             master=self.root, value="Select a row to view the PDF page."
@@ -3806,6 +3811,9 @@ class ReportApp:
 
         self.root.after_idle(_initial_split_adjustment)
         self.combined_preview_frame = preview_container
+        preview_container.columnconfigure(0, weight=1)
+        preview_container.rowconfigure(3, weight=1)
+
         ttk.Label(preview_container, text="PDF Preview", font=("TkDefaultFont", 10, "bold")).grid(
             row=0, column=0, sticky="w"
         )
@@ -3814,15 +3822,60 @@ class ReportApp:
             textvariable=self.combined_preview_detail_var,
             justify=tk.LEFT,
             wraplength=380,
-        ).grid(row=1, column=0, sticky="w", pady=(4, 8))
+        ).grid(row=1, column=0, sticky="w", pady=(4, 4))
+
+        zoom_controls = ttk.Frame(preview_container)
+        zoom_controls.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        zoom_controls.columnconfigure(1, weight=1)
+
+        ttk.Label(zoom_controls, text="Zoom").grid(row=0, column=0, padx=(0, 8))
+
+        zoom_scale = ttk.Scale(
+            zoom_controls,
+            from_=0.5,
+            to=3.0,
+            orient=tk.HORIZONTAL,
+            variable=self.combined_preview_zoom_var,
+            command=lambda value: self._on_combined_preview_zoom_scale(float(value)),
+        )
+        zoom_scale.grid(row=0, column=1, sticky="ew")
+
+        ttk.Label(
+            zoom_controls,
+            textvariable=self.combined_preview_zoom_display_var,
+            width=6,
+            anchor="e",
+        ).grid(row=0, column=2, padx=8)
+
+        ttk.Button(
+            zoom_controls,
+            text="-",
+            width=3,
+            command=lambda: self._adjust_combined_preview_zoom(-0.1),
+        ).grid(row=0, column=3, padx=(0, 4))
+        ttk.Button(
+            zoom_controls,
+            text="Reset",
+            command=self._reset_combined_preview_zoom,
+        ).grid(row=0, column=4, padx=(0, 4))
+        ttk.Button(
+            zoom_controls,
+            text="+",
+            width=3,
+            command=lambda: self._adjust_combined_preview_zoom(0.1),
+        ).grid(row=0, column=5)
+
         canvas = tk.Canvas(preview_container, highlightthickness=0, borderwidth=0)
-        canvas.grid(row=2, column=0, sticky="nsew")
+        canvas.grid(row=3, column=0, sticky="nsew")
         y_scroll = ttk.Scrollbar(preview_container, orient=tk.VERTICAL, command=canvas.yview)
-        y_scroll.grid(row=2, column=1, sticky="ns")
-        canvas.configure(yscrollcommand=y_scroll.set)
+        y_scroll.grid(row=3, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(preview_container, orient=tk.HORIZONTAL, command=canvas.xview)
+        x_scroll.grid(row=4, column=0, sticky="ew")
+        canvas.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
         self.combined_preview_canvas = canvas
         self.combined_preview_canvas_image = None
         self.combined_preview_image = None
+        self._update_combined_preview_zoom_display()
         self._clear_combined_preview()
 
         other_has_fixed_width = (
@@ -3995,8 +4048,65 @@ class ReportApp:
         canvas.configure(scrollregion=(0, 0, 0, 0))
         self.combined_preview_image = None
         self.combined_preview_canvas_image = None
+        self.combined_preview_target = None
         display_text = message or "Select a row to view the PDF page."
         self.combined_preview_detail_var.set(display_text)
+
+    def _update_combined_preview_zoom_display(self) -> None:
+        zoom = self.combined_preview_zoom_var.get()
+        percent = int(round(zoom * 100))
+        self.combined_preview_zoom_display_var.set(f"{percent}%")
+
+    def _adjust_combined_preview_zoom(self, delta: float) -> None:
+        zoom = self.combined_preview_zoom_var.get() + delta
+        zoom = max(0.5, min(3.0, zoom))
+        self.combined_preview_zoom_var.set(zoom)
+        self._update_combined_preview_zoom_display()
+        self._rerender_combined_preview()
+
+    def _reset_combined_preview_zoom(self) -> None:
+        self.combined_preview_zoom_var.set(1.0)
+        self._update_combined_preview_zoom_display()
+        self._rerender_combined_preview()
+
+    def _on_combined_preview_zoom_scale(self, value: float) -> None:
+        zoom = max(0.5, min(3.0, float(value)))
+        if abs(self.combined_preview_zoom_var.get() - zoom) > 1e-6:
+            self.combined_preview_zoom_var.set(zoom)
+        self._update_combined_preview_zoom_display()
+        self._rerender_combined_preview()
+
+    def _rerender_combined_preview(self) -> None:
+        target = self.combined_preview_target
+        if not target:
+            return
+        entry, page_index, key = target
+        self._display_combined_preview(entry, page_index, key)
+
+    def _display_combined_preview(
+        self, entry: PDFEntry, page_index: int, key: Tuple[str, str, str]
+    ) -> None:
+        canvas = self.combined_preview_canvas
+        if canvas is None or not canvas.winfo_exists():
+            return
+        detail_text = f"{entry.path.name} — {key[0]} (Page {page_index + 1})"
+        zoom = self.combined_preview_zoom_var.get()
+        self._update_combined_preview_zoom_display()
+        target_width = max(120, int(480 * zoom))
+        photo = self._render_page(entry.doc, page_index, target_width)
+        if photo is None:
+            canvas.delete("all")
+            canvas.configure(scrollregion=(0, 0, 0, 0))
+            self.combined_preview_image = None
+            self.combined_preview_canvas_image = None
+            self.combined_preview_detail_var.set(detail_text)
+            return
+        self.combined_preview_image = photo
+        canvas.delete("all")
+        image_id = canvas.create_image(0, 0, anchor="nw", image=photo)
+        canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 0, 0))
+        self.combined_preview_canvas_image = image_id
+        self.combined_preview_detail_var.set(detail_text)
 
     def _resolve_combined_preview_target(
         self, key: Tuple[str, str, str]
@@ -4029,6 +4139,7 @@ class ReportApp:
         if not item_id:
             self._clear_combined_preview()
             return
+        self.combined_preview_target = None
         key = self.combined_note_record_keys.get(item_id)
         if not key:
             if not self.combined_ordered_columns:
@@ -4060,18 +4171,8 @@ class ReportApp:
             self._clear_combined_preview("No PDF page available for this row.")
             return
         entry, page_index = target
-        detail_text = f"{entry.path.name} — {key[0]} (Page {page_index + 1})"
-        photo = self._render_page(entry.doc, page_index, 480)
-        if photo is None:
-            self._clear_combined_preview("Unable to render the PDF page.")
-            self.combined_preview_detail_var.set(detail_text)
-            return
-        self.combined_preview_image = photo
-        canvas.delete("all")
-        image_id = canvas.create_image(0, 0, anchor="nw", image=photo)
-        canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 0, 0))
-        self.combined_preview_canvas_image = image_id
-        self.combined_preview_detail_var.set(detail_text)
+        self.combined_preview_target = (entry, page_index, key)
+        self._display_combined_preview(entry, page_index, key)
 
     def _on_combined_tree_select(self, _: tk.Event) -> None:  # type: ignore[override]
         self._destroy_note_editor()
