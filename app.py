@@ -27,6 +27,7 @@ DEFAULT_PATTERNS = {
     "Shares": ["Movements in issued capital"],
 }
 YEAR_DEFAULT_PATTERNS = [r"(\d{4})\s+Annual\s+Report"]
+NOTE_OPTIONS = ["", "excluded", "negated", "share_count"]
 
 
 @dataclass
@@ -331,6 +332,13 @@ class ReportApp:
         self.combined_pdf_order: List[Path] = []
         self.combined_result_tree: Optional[ttk.Treeview] = None
         self.combined_max_data_columns: int = 0
+        self.combined_note_record_keys: Dict[str, Tuple[str, str, str]] = {}
+        self.combined_note_editor: Optional[ttk.Combobox] = None
+        self.combined_note_column_id: Optional[str] = None
+        self.combined_note_editor_item: Optional[str] = None
+        self.combined_ordered_columns: List[str] = []
+        self.note_assignments: Dict[Tuple[str, str, str], str] = {}
+        self.note_assignments_path: Optional[Path] = None
 
         self._build_ui()
         self._load_pattern_config()
@@ -486,11 +494,25 @@ class ReportApp:
             state="disabled",
         )
         self.combine_confirm_button.pack(side=tk.RIGHT)
+        ttk.Button(
+            combined_controls,
+            text="Load Assignments",
+            command=self._prompt_import_note_assignments,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
         combined_canvas = tk.Canvas(combined_container)
         combined_canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-        combined_vscroll = ttk.Scrollbar(combined_container, orient=tk.VERTICAL, command=combined_canvas.yview)
+
+        def _combined_canvas_yview(*args: Any) -> None:
+            self._destroy_note_editor()
+            combined_canvas.yview(*args)
+
+        def _combined_canvas_xview(*args: Any) -> None:
+            self._destroy_note_editor()
+            combined_canvas.xview(*args)
+
+        combined_vscroll = ttk.Scrollbar(combined_container, orient=tk.VERTICAL, command=_combined_canvas_yview)
         combined_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
-        combined_hscroll = ttk.Scrollbar(combined_container, orient=tk.HORIZONTAL, command=combined_canvas.xview)
+        combined_hscroll = ttk.Scrollbar(combined_container, orient=tk.HORIZONTAL, command=_combined_canvas_xview)
         combined_hscroll.pack(side=tk.BOTTOM, fill=tk.X)
         combined_canvas.configure(yscrollcommand=combined_vscroll.set, xscrollcommand=combined_hscroll.set)
         self.combined_canvas = combined_canvas
@@ -607,6 +629,8 @@ class ReportApp:
             self.folder_path.set("")
             self.assigned_pages = {}
             self.assigned_pages_path = None
+            self.note_assignments = {}
+            self.note_assignments_path = None
             if self.embedded:
                 self._reset_review_scroll()
             return
@@ -614,8 +638,11 @@ class ReportApp:
         self.folder_path.set(str(folder))
         if self.embedded:
             self._load_assigned_pages(company)
+            self._load_note_assignments(company)
             self._refresh_scraped_tab()
             self._reset_review_scroll()
+        else:
+            self._load_note_assignments(company)
         if self._config_loaded:
             self._update_last_company(company)
 
@@ -1025,6 +1052,184 @@ class ReportApp:
                     "year": value.get("year", ""),
                 }
         self.assigned_pages = parsed
+
+    def _read_note_assignments_file(self, path: Path) -> Dict[Tuple[str, str, str], str]:
+        assignments: Dict[Tuple[str, str, str], str] = {}
+        if not path.exists():
+            return assignments
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    if not isinstance(row, dict):
+                        continue
+                    type_value = (row.get("Type") or row.get("type") or "").strip()
+                    category_value = (row.get("Category") or row.get("category") or "").strip()
+                    item_value = (row.get("Item") or row.get("item") or "").strip()
+                    if not (type_value and category_value and item_value):
+                        continue
+                    note_raw = (row.get("Note") or row.get("note") or "").strip()
+                    note_value = note_raw.lower()
+                    if note_value and note_value not in NOTE_OPTIONS[1:]:
+                        continue
+                    if note_value:
+                        assignments[(type_value, category_value, item_value)] = note_value
+        except Exception:
+            return {}
+        return assignments
+
+    def _load_note_assignments(self, company: str) -> None:
+        company_dir = self.companies_dir / company
+        path = company_dir / "type_category_item_assignments.csv"
+        self.note_assignments_path = path
+        self.note_assignments = self._read_note_assignments_file(path)
+        self._update_combined_notes()
+
+    def _ensure_note_assignments_path(self) -> Optional[Path]:
+        if self.note_assignments_path is not None:
+            return self.note_assignments_path
+        company = self.company_var.get().strip()
+        if not company:
+            return None
+        path = self.companies_dir / company / "type_category_item_assignments.csv"
+        self.note_assignments_path = path
+        return path
+
+    def _write_note_assignments(self) -> None:
+        path = self._ensure_note_assignments_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["Type", "Category", "Item", "Note"])
+                for type_value, category_value, item_value in sorted(self.note_assignments.keys()):
+                    note_value = self.note_assignments.get((type_value, category_value, item_value), "")
+                    writer.writerow([type_value, category_value, item_value, note_value])
+        except Exception as exc:
+            messagebox.showwarning("Assignments", f"Could not save note assignments: {exc}")
+
+    def _import_note_assignments_from_path(self, path: Path) -> bool:
+        assignments = self._read_note_assignments_file(path)
+        if not assignments and not path.exists():
+            messagebox.showwarning("Assignments", f"Could not read assignments from {path}")
+            return False
+        self.note_assignments = assignments
+        self._write_note_assignments()
+        self._update_combined_notes()
+        return True
+
+    def _prompt_import_note_assignments(self) -> None:
+        company = self.company_var.get().strip()
+        if not company:
+            messagebox.showinfo("Assignments", "Select a company before loading assignments.")
+            return
+        initial_dir = self.companies_dir / company
+        if not initial_dir.exists():
+            initial_dir = self.companies_dir
+        filename = filedialog.askopenfilename(
+            title="Load type/category/item assignments",
+            initialdir=str(initial_dir),
+            filetypes=(("CSV files", "*.csv"), ("All files", "*.*")),
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        if not path.exists():
+            messagebox.showwarning("Assignments", f"File not found: {path}")
+            return
+        self._import_note_assignments_from_path(path)
+
+    def _destroy_note_editor(self) -> None:
+        if self.combined_note_editor is not None:
+            try:
+                self.combined_note_editor.destroy()
+            except Exception:
+                pass
+            self.combined_note_editor = None
+        self.combined_note_editor_item = None
+
+    def _update_combined_notes(self) -> None:
+        tree = self.combined_result_tree
+        if tree is None:
+            return
+        if not self.combined_ordered_columns or "Note" not in self.combined_ordered_columns:
+            return
+        note_index = self.combined_ordered_columns.index("Note")
+        for item_id, key in self.combined_note_record_keys.items():
+            values = list(tree.item(item_id, "values"))
+            if note_index >= len(values):
+                continue
+            note_value = self.note_assignments.get(key, "")
+            if values[note_index] != note_value:
+                values[note_index] = note_value
+                tree.item(item_id, values=values)
+        self._destroy_note_editor()
+
+    def _on_combined_tree_click(self, event: tk.Event) -> None:  # type: ignore[override]
+        tree = self.combined_result_tree
+        if tree is None or self.combined_note_column_id is None:
+            return
+        region = tree.identify("region", event.x, event.y)
+        if region != "cell":
+            self._destroy_note_editor()
+            return
+        column_id = tree.identify_column(event.x)
+        item_id = tree.identify_row(event.y)
+        if column_id != self.combined_note_column_id or not item_id:
+            self._destroy_note_editor()
+            return
+        self._show_note_editor(item_id)
+
+    def _show_note_editor(self, item_id: str) -> None:
+        tree = self.combined_result_tree
+        if tree is None or self.combined_note_column_id is None:
+            return
+        bbox = tree.bbox(item_id, self.combined_note_column_id)
+        if not bbox:
+            self._destroy_note_editor()
+            return
+        x, y, width, height = bbox
+        current_value = tree.set(item_id, "Note")
+        self._destroy_note_editor()
+        editor = ttk.Combobox(tree, values=NOTE_OPTIONS, state="readonly")
+        editor.place(x=x, y=y, width=width, height=height)
+        editor.set(current_value if current_value in NOTE_OPTIONS else current_value)
+        editor.focus_set()
+        editor.bind("<<ComboboxSelected>>", lambda _e, itm=item_id: self._commit_note_value(itm))
+        editor.bind("<FocusOut>", lambda _e, itm=item_id: self._commit_note_value(itm))
+        editor.bind("<Return>", lambda _e, itm=item_id: self._commit_note_value(itm))
+        self.combined_note_editor = editor
+        self.combined_note_editor_item = item_id
+
+    def _commit_note_value(self, item_id: str) -> None:
+        if self.combined_note_editor is None:
+            return
+        value = self.combined_note_editor.get().strip().lower()
+        if value not in NOTE_OPTIONS[1:]:
+            value = ""
+        self._set_note_value(item_id, value)
+        self._destroy_note_editor()
+
+    def _set_note_value(self, item_id: str, value: str) -> None:
+        tree = self.combined_result_tree
+        if tree is None or not self.combined_ordered_columns or "Note" not in self.combined_ordered_columns:
+            return
+        note_index = self.combined_ordered_columns.index("Note")
+        values = list(tree.item(item_id, "values"))
+        if note_index < len(values):
+            if values[note_index] != value:
+                values[note_index] = value
+                tree.item(item_id, values=values)
+        key = self.combined_note_record_keys.get(item_id)
+        if not key:
+            return
+        if value:
+            self.note_assignments[key] = value
+        else:
+            self.note_assignments.pop(key, None)
+        self._write_note_assignments()
 
     def _apply_saved_selection(self, entry: PDFEntry) -> None:
         key = entry.path.name
@@ -1717,12 +1922,16 @@ class ReportApp:
             child.destroy()
         for child in self.combined_result_frame.winfo_children():
             child.destroy()
+        self._destroy_note_editor()
         self.combined_csv_sources.clear()
         self.combined_pdf_order = []
         self.combined_result_tree = None
         if hasattr(self, "combine_confirm_button"):
             self.combine_confirm_button.state(["disabled"])
         self.combined_max_data_columns = 0
+        self.combined_note_record_keys.clear()
+        self.combined_note_column_id = None
+        self.combined_ordered_columns = []
 
     def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
         if not hasattr(self, "combined_header_frame"):
@@ -1979,7 +2188,7 @@ class ReportApp:
                 label_value = f"Value {idx + 1}"
             base_column_labels.append(label_value)
 
-        ordered_columns = ["Type", "Category", "Item"]
+        ordered_columns = ["Type", "Category", "Item", "Note"]
         for path in self.combined_pdf_order:
             pdf_label = path.stem
             for label_value in base_column_labels:
@@ -2026,6 +2235,7 @@ class ReportApp:
                     "Type": category,
                     "Category": category_value,
                     "Item": item_value,
+                    "Note": self.note_assignments.get((category, category_value, item_value), ""),
                 }
                 for path in self.combined_pdf_order:
                     pdf_label = path.stem
@@ -2051,22 +2261,68 @@ class ReportApp:
 
         tree = ttk.Treeview(result_container, columns=ordered_columns, show="headings")
         tree.grid(row=0, column=0, sticky="nsew")
-        y_scroll = ttk.Scrollbar(result_container, orient=tk.VERTICAL, command=tree.yview)
-        y_scroll.grid(row=0, column=1, sticky="ns")
-        x_scroll = ttk.Scrollbar(result_container, orient=tk.HORIZONTAL, command=tree.xview)
+        tree.configure(height=max(len(combined_records), 1))
+        def _combined_xscroll(*args: Any) -> None:
+            tree.xview(*args)
+            self._destroy_note_editor()
+
+        x_scroll = ttk.Scrollbar(result_container, orient=tk.HORIZONTAL, command=_combined_xscroll)
         x_scroll.grid(row=1, column=0, sticky="ew")
-        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        tree.configure(xscrollcommand=x_scroll.set)
 
         for column_name in ordered_columns:
             tree.heading(column_name, text=column_name)
             if column_name in {"Type", "Category", "Item"}:
                 tree.column(column_name, anchor="w", stretch=True, width=160)
+            elif column_name == "Note":
+                tree.column(column_name, anchor="center", stretch=False, width=140, minwidth=120)
             else:
                 tree.column(column_name, anchor="center", stretch=True, width=140)
 
+        self.combined_ordered_columns = ordered_columns[:]
+        note_index = None
+        if "Note" in ordered_columns:
+            note_index = ordered_columns.index("Note")
+            self.combined_note_column_id = f"#{note_index + 1}"
+        else:
+            self.combined_note_column_id = None
+        self.combined_note_record_keys.clear()
+
         for record in combined_records:
             values = [record.get(column_name, "") for column_name in ordered_columns]
-            tree.insert("", tk.END, values=values)
+            item_id = tree.insert("", tk.END, values=values)
+            if note_index is not None and item_id:
+                note_key = (
+                    record.get("Type", ""),
+                    record.get("Category", ""),
+                    record.get("Item", ""),
+                )
+                if all(note_key):
+                    self.combined_note_record_keys[item_id] = (
+                        str(note_key[0]),
+                        str(note_key[1]),
+                        str(note_key[2]),
+                    )
+
+        tree.bind("<Button-1>", self._on_combined_tree_click)
+        tree.bind("<Configure>", lambda _e: self._destroy_note_editor())
+        tree.bind("<<TreeviewSelect>>", lambda _e: self._destroy_note_editor())
+
+        def _tree_mousewheel(event: tk.Event) -> str:  # type: ignore[override]
+            self._destroy_note_editor()
+            if event.delta:
+                delta = -int(event.delta / 120)
+                if delta:
+                    self.combined_canvas.yview_scroll(delta, "units")
+            elif getattr(event, "num", None) == 4:
+                self.combined_canvas.yview_scroll(-1, "units")
+            elif getattr(event, "num", None) == 5:
+                self.combined_canvas.yview_scroll(1, "units")
+            return "break"
+
+        tree.bind("<MouseWheel>", _tree_mousewheel)
+        tree.bind("<Button-4>", _tree_mousewheel)
+        tree.bind("<Button-5>", _tree_mousewheel)
 
         self.combined_result_tree = tree
 
