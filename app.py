@@ -1851,7 +1851,7 @@ class ReportApp:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("w", encoding="utf-8", newline="") as fh:
-                writer = csv.writer(fh)
+                writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
                 writer.writerow(["Type", "Category", "Item", "Note"])
                 for type_value, category_value, item_value in sorted(self.note_assignments.keys()):
                     note_value = self.note_assignments.get((type_value, category_value, item_value), "")
@@ -3677,7 +3677,7 @@ class ReportApp:
                 write_header = True
             try:
                 with path.open("a", encoding="utf-8", newline="") as fh:
-                    writer = csv.writer(fh)
+                    writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
                     if write_header:
                         writer.writerow(["Type", "Item", "Category"])
                     for type_value, item_value, category_value in new_entries:
@@ -4925,7 +4925,7 @@ class ReportApp:
     def _write_csv_rows(self, rows: List[List[str]], csv_path: Path) -> None:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         with csv_path.open("w", encoding="utf-8", newline="") as fh:
-            writer = csv.writer(fh)
+            writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
             for row in rows:
                 writer.writerow(row)
 
