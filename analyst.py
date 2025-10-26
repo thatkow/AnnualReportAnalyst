@@ -36,7 +36,7 @@ matplotlib.use("TkAgg")
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-from matplotlib import cm, colors
+from matplotlib import colors, colormaps
 from matplotlib.patches import Patch, Rectangle
 
 import tkinter as tk
@@ -443,7 +443,7 @@ class FinanceDataset:
 
     def color_for_key(self, key: str) -> str:
         if key not in self._color_cache:
-            palette = cm.get_cmap("tab20").colors
+            palette = colormaps["tab20"].colors
             index = len(self._color_cache) % len(palette)
             self._color_cache[key] = colors.to_hex(palette[index])
         return self._color_cache[key]
@@ -464,13 +464,13 @@ class FinancePlotFrame(ttk.Frame):
         self.canvas.draw()
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         self.hover_helper = BarHoverHelper(self.axis)
-        self.hover_helper.attach(self.canvas, context_callback=self._show_context_menu)
+        self.hover_helper.attach(self.canvas)
         self.display_mode = self.MODE_STACKED
         self.datasets: "OrderedDict[str, FinanceDataset]" = OrderedDict()
         self.periods: Optional[List[str]] = None
         self._periods_by_key: "OrderedDict[Tuple[str, str, str], List[str]]" = OrderedDict()
         self._company_colors: Dict[str, Tuple[str, str]] = {}
-        self._palette = list(cm.get_cmap("tab10").colors)
+        self._palette = list(colormaps["tab10"].colors)
         self._context_menu: Optional[tk.Menu] = None
         self._context_metadata: Optional[Dict[str, Any]] = None
         self._normalize_with_price = False
@@ -499,9 +499,7 @@ class FinancePlotFrame(ttk.Frame):
         context_callback = (
             self._show_context_menu if self.display_mode == self.MODE_STACKED else None
         )
-        self.hover_helper.attach(self.canvas, context_callback=context_callback)
-        if self.display_mode != self.MODE_STACKED:
-            self.hover_helper.clear()
+        self.hover_helper.begin_update(context_callback)
         self.figure.tight_layout()
         self.canvas.draw()
 
@@ -625,9 +623,7 @@ class FinancePlotFrame(ttk.Frame):
         hover_helper = self.hover_helper
         mode = self.display_mode
         context_callback = self._show_context_menu if mode == self.MODE_STACKED else None
-        hover_helper.attach(self.canvas, context_callback=context_callback)
-        if mode != self.MODE_STACKED:
-            hover_helper.clear()
+        hover_helper.begin_update(context_callback)
 
         legend_handles: List[Any] = []
 
@@ -1009,6 +1005,45 @@ class BarHoverHelper:
         self._active_rectangle: Optional[Rectangle] = None
         self._context_callback: Optional[Callable[[Dict[str, Any], Any], None]] = None
 
+    def attach(self, canvas: FigureCanvasTkAgg) -> None:
+        if self._connection_id is not None and self._canvas is not None:
+            self._canvas.mpl_disconnect(self._connection_id)
+        if self._button_connection_id is not None and self._canvas is not None:
+            self._canvas.mpl_disconnect(self._button_connection_id)
+        self._canvas = canvas
+        self.reset()
+        self._connection_id = canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self._button_connection_id = None
+        self._context_callback = None
+
+    def _set_context_callback(
+        self, callback: Optional[Callable[[Dict[str, Any], Any], None]]
+    ) -> None:
+        if self._canvas is None:
+            self._context_callback = callback
+            return
+        if callback is None:
+            if self._button_connection_id is not None:
+                self._canvas.mpl_disconnect(self._button_connection_id)
+                self._button_connection_id = None
+        else:
+            if self._button_connection_id is None:
+                self._button_connection_id = self._canvas.mpl_connect(
+                    "button_press_event", self._on_button_press
+                )
+        self._context_callback = callback
+
+    def begin_update(
+        self, context_callback: Optional[Callable[[Dict[str, Any], Any], None]]
+    ) -> None:
+        self._set_context_callback(context_callback)
+        self.reset()
+
+    def reset(self) -> None:
+        self._rectangles.clear()
+        self._active_rectangle = None
+        self._annotation.set_visible(False)
+
     def add_segment(
         self,
         bar_container,
@@ -1038,31 +1073,8 @@ class BarHoverHelper:
                     metadata["pdf_page"] = source.page
             self._rectangles.append((rect, metadata))
 
-    def attach(
-        self,
-        canvas: FigureCanvasTkAgg,
-        *,
-        context_callback: Optional[Callable[[Dict[str, Any], Any], None]] = None,
-    ) -> None:
-        if self._connection_id is not None and self._canvas is not None:
-            self._canvas.mpl_disconnect(self._connection_id)
-        if self._button_connection_id is not None and self._canvas is not None:
-            self._canvas.mpl_disconnect(self._button_connection_id)
-        self._canvas = canvas
-        self._rectangles.clear()
-        self._connection_id = canvas.mpl_connect("motion_notify_event", self._on_motion)
-        self._context_callback = context_callback
-        if context_callback is not None:
-            self._button_connection_id = canvas.mpl_connect("button_press_event", self._on_button_press)
-        else:
-            self._button_connection_id = None
-        self._active_rectangle = None
-        self._annotation.set_visible(False)
-
     def clear(self) -> None:
-        self._rectangles.clear()
-        self._active_rectangle = None
-        self._annotation.set_visible(False)
+        self.reset()
         if self._canvas is not None:
             self._canvas.draw_idle()
 
@@ -1286,8 +1298,8 @@ class FinanceAnalystApp:
         if symbol in self._price_cache:
             return self._price_cache[symbol]
 
-        url = "https://query1.finance.yahoo.com/v7/finance/quote"
-        params = {"symbols": symbol}
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        params = {"range": "1d", "interval": "1d"}
         try:
             response = requests.get(url, params=params, timeout=10)
             response.raise_for_status()
@@ -1299,16 +1311,23 @@ class FinanceAnalystApp:
                 f"Received an invalid response while downloading price for {symbol}"
             ) from exc
 
-        quote_response = payload.get("quoteResponse")
-        if not isinstance(quote_response, dict):
+        chart_data = payload.get("chart")
+        if not isinstance(chart_data, dict):
             raise ValueError(f"No quote data returned for {symbol}")
-        results = quote_response.get("result")
+        if chart_data.get("error"):
+            raise ValueError(f"Quote service returned an error for {symbol}")
+        results = chart_data.get("result")
         if not isinstance(results, list) or not results:
             raise ValueError(f"No quote data returned for {symbol}")
         first_entry = results[0]
         if not isinstance(first_entry, dict):
             raise ValueError(f"Quote for {symbol} was malformed")
-        price_value = first_entry.get("regularMarketPrice")
+        meta = first_entry.get("meta")
+        if not isinstance(meta, dict):
+            raise ValueError(f"Quote for {symbol} was missing metadata")
+        price_value = meta.get("regularMarketPrice")
+        if price_value in (None, 0):
+            price_value = meta.get("previousClose")
         try:
             numeric_price = float(price_value)
         except (TypeError, ValueError) as exc:
