@@ -3390,7 +3390,7 @@ class ReportApp:
             child.destroy()
         # Use the column names directly as identifiers so cell-level tagging and
         # geometry queries can reliably reference the correct Treeview column.
-        self.combined_column_ids = {name: name for name in columns}
+        self.combined_column_ids = {name: f"#{index + 1}" for index, name in enumerate(columns)}
         self.combined_note_cell_tags.clear()
         self.combined_type_cell_tags.clear()
         self.combined_category_cell_tags.clear()
