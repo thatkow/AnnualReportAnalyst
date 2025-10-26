@@ -10,6 +10,7 @@ import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import font as tkfont
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1151,6 +1152,47 @@ class ReportApp:
             self.combined_note_editor = None
         self.combined_note_editor_item = None
 
+    @staticmethod
+    def _parse_numeric_value(value: str) -> Optional[float]:
+        text = value.strip()
+        if not text:
+            return None
+        if text in {"-", "--"}:
+            return None
+        lower_text = text.lower()
+        if lower_text in {"na", "n/a", "nil", "none"}:
+            return None
+        negative = False
+        if text.startswith("(") and text.endswith(")"):
+            negative = True
+            text = text[1:-1].strip()
+            if not text:
+                return None
+        cleaned = text.replace(",", "").strip()
+        cleaned = re.sub(r"[^0-9eE\.\+\-]", "", cleaned)
+        if not cleaned:
+            return None
+        try:
+            number = float(cleaned)
+        except ValueError:
+            return None
+        if negative and number > 0:
+            number = -number
+        return number
+
+    def _format_combined_value(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (int, float)):
+            return f"{float(value):.6e}"
+        text = str(value).strip()
+        if not text:
+            return ""
+        numeric = self._parse_numeric_value(text)
+        if numeric is None:
+            return text
+        return f"{numeric:.6e}"
+
     def _update_combined_notes(self) -> None:
         tree = self.combined_result_tree
         if tree is None:
@@ -2186,15 +2228,19 @@ class ReportApp:
             return
 
         ordered_columns = ["Type", "Category", "Item", "Note"]
+        column_labels_by_pdf: Dict[Path, List[str]] = {}
         for path in self.combined_pdf_order:
             pdf_label = path.stem
+            labels: List[str] = []
             for position in range(self.combined_max_data_columns):
                 key = (path, position)
                 var = self.combined_column_label_vars.get(key)
                 label_value = var.get().strip() if var else ""
                 if not label_value:
                     label_value = self.combined_column_defaults.get(key, f"Value {position + 1}")
+                labels.append(label_value)
                 ordered_columns.append(f"{pdf_label}.{label_value}")
+            column_labels_by_pdf[path] = labels
 
         record_map: Dict[Tuple[str, str, str], Dict[Tuple[Path, int], str]] = {}
 
@@ -2241,9 +2287,11 @@ class ReportApp:
                 }
                 for path in self.combined_pdf_order:
                     pdf_label = path.stem
-                    for position, base_label in enumerate(base_column_labels):
+                    labels = column_labels_by_pdf.get(path, [])
+                    for position, base_label in enumerate(labels):
                         column_name = f"{pdf_label}.{base_label}"
-                        record[column_name] = value_map.get((path, position), "")
+                        raw_value = value_map.get((path, position), "")
+                        record[column_name] = self._format_combined_value(raw_value)
                 combined_records.append(record)
 
         if not combined_records:
@@ -2275,11 +2323,11 @@ class ReportApp:
         for column_name in ordered_columns:
             tree.heading(column_name, text=column_name)
             if column_name in {"Type", "Category", "Item"}:
-                tree.column(column_name, anchor="w", stretch=True, width=160)
+                tree.column(column_name, anchor="w", stretch=True)
             elif column_name == "Note":
-                tree.column(column_name, anchor="center", stretch=False, width=140, minwidth=120)
+                tree.column(column_name, anchor="center", stretch=False, minwidth=120)
             else:
-                tree.column(column_name, anchor="center", stretch=True, width=140)
+                tree.column(column_name, anchor="center", stretch=True)
 
         self.combined_ordered_columns = ordered_columns[:]
         note_index = None
@@ -2328,12 +2376,42 @@ class ReportApp:
 
         self.combined_result_tree = tree
 
+        tree.update_idletasks()
+        try:
+            tree_font = tkfont.nametofont(tree.cget("font"))
+        except tk.TclError:
+            tree_font = tkfont.nametofont("TkDefaultFont")
+        for column_name in ordered_columns:
+            max_width = tree_font.measure(column_name)
+            for record in combined_records:
+                value_text = record.get(column_name, "")
+                if value_text is None:
+                    value_text = ""
+                max_width = max(max_width, tree_font.measure(str(value_text)))
+            padding = 32 if column_name == "Note" else 24
+            desired_width = max_width + padding
+            if column_name in {"Type", "Category", "Item"}:
+                desired_width = max(desired_width, 160)
+            elif column_name == "Note":
+                desired_width = max(desired_width, tree_font.measure("share_count") + padding, 120)
+            else:
+                desired_width = max(desired_width, 120)
+            tree.column(column_name, width=desired_width)
+
         company = self.company_var.get()
         if company:
             scrape_root = self.companies_dir / company / "openapiscrape"
             combined_path = scrape_root / "combined.csv"
             try:
-                csv_rows = [ordered_columns]
+                csv_header: List[str] = []
+                for column_name in ordered_columns:
+                    if column_name in {"Type", "Category", "Item", "Note"}:
+                        csv_header.append(column_name)
+                    elif "." in column_name:
+                        csv_header.append(column_name.split(".", 1)[1])
+                    else:
+                        csv_header.append(column_name)
+                csv_rows = [csv_header]
                 for record in combined_records:
                     csv_rows.append([record.get(column_name, "") for column_name in ordered_columns])
                 self._write_csv_rows(csv_rows, combined_path)
