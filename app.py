@@ -2842,7 +2842,7 @@ class ReportApp:
         for column_name in ordered_columns:
             tree.heading(column_name, text=column_name)
             if column_name in {"Type", "Category", "Item"}:
-                tree.column(column_name, anchor="w", stretch=True)
+                tree.column(column_name, anchor="w", stretch=False)
             elif column_name == "Note":
                 tree.column(column_name, anchor="center", stretch=False, minwidth=120)
             else:
@@ -2965,7 +2965,11 @@ class ReportApp:
                 continue
             stored_width = self.combined_base_column_widths.get(column_name)
             if isinstance(stored_width, int) and stored_width > 0:
-                tree.column(column_name, width=stored_width)
+                tree.column(
+                    column_name,
+                    width=stored_width,
+                    minwidth=max(20, stored_width),
+                )
                 continue
             max_width = tree_font.measure(column_name)
             for item_id in tree.get_children(""):
@@ -2976,13 +2980,17 @@ class ReportApp:
                 desired_width = max(max_width + 32, reference_width + 32, 120)
             else:
                 desired_width = max(max_width + 24, 160)
-            tree.column(column_name, width=desired_width)
+            tree.column(column_name, width=desired_width, minwidth=max(20, desired_width))
         other_width = self.combined_other_column_width
         if isinstance(other_width, int) and other_width > 0:
             for column_name in self.combined_ordered_columns:
                 if column_name in {"Type", "Category", "Item", "Note"}:
                     continue
-                tree.column(column_name, width=other_width)
+                tree.column(
+                    column_name,
+                    width=other_width,
+                    minwidth=max(20, other_width),
+                )
 
     def _persist_combined_base_column_widths(self) -> None:
         if not self.combined_base_column_widths:
@@ -3041,7 +3049,11 @@ class ReportApp:
             and self.combined_other_column_width > 0
         ):
             for column_name in date_columns:
-                tree.column(column_name, width=self.combined_other_column_width)
+                tree.column(
+                    column_name,
+                    width=self.combined_other_column_width,
+                    minwidth=max(20, self.combined_other_column_width),
+                )
             if self.auto_size_dates_button is not None:
                 self.auto_size_dates_button.state(["!disabled"])
             return
@@ -3054,7 +3066,7 @@ class ReportApp:
                     value_text = ""
                 max_width = max(max_width, tree_font.measure(str(value_text)))
             desired_width = max(max_width + 24, 120)
-            tree.column(column_name, width=desired_width)
+            tree.column(column_name, width=desired_width, minwidth=max(20, desired_width))
         if self.auto_size_dates_button is not None:
             self.auto_size_dates_button.state(["!disabled"])
 
