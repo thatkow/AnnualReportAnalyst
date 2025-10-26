@@ -3033,7 +3033,7 @@ class ReportApp:
                         selections[category] = int(page_index)
 
         self._write_assigned_pages()
-        self.scrape_selections()
+        self._refresh_scraped_tab()
 
     def _refresh_scraped_tab(self) -> None:
         if not hasattr(self, "scraped_inner"):
