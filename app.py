@@ -332,6 +332,7 @@ class ReportApp:
         self.case_insensitive_vars: Dict[str, tk.BooleanVar] = {}
         self.whitespace_as_space_vars: Dict[str, tk.BooleanVar] = {}
         self.pdf_entries: List[PDFEntry] = []
+        self.pdf_entry_by_path: Dict[Path, PDFEntry] = {}
         self.category_rows: Dict[tuple[Path, str], CategoryRow] = {}
         self.year_vars: Dict[Path, tk.StringVar] = {}
         self.year_pattern_text: Optional[tk.Text] = None
@@ -370,10 +371,18 @@ class ReportApp:
         self.combined_note_cell_tags: Dict[str, str] = {}
         self.combined_type_cell_tags: Dict[str, str] = {}
         self.combined_category_cell_tags: Dict[str, str] = {}
+        self.combined_row_sources: Dict[Tuple[str, str, str], List[Path]] = {}
         self.combined_base_column_widths: Dict[str, int] = {}
         self.combined_other_column_width: Optional[int] = None
         self.combined_show_blank_notes_var = tk.BooleanVar(master=self.root, value=False)
         self.combined_result_message: Optional[str] = None
+        self.combined_preview_frame: Optional[ttk.Frame] = None
+        self.combined_preview_canvas: Optional[tk.Canvas] = None
+        self.combined_preview_canvas_image: Optional[int] = None
+        self.combined_preview_image: Optional[ImageTk.PhotoImage] = None
+        self.combined_preview_detail_var = tk.StringVar(
+            master=self.root, value="Select a row to view the PDF page."
+        )
         self.type_color_map: Dict[str, str] = {}
         self.type_color_labels: Dict[str, str] = {}
         self.category_color_map: Dict[str, str] = {}
@@ -1564,6 +1573,7 @@ class ReportApp:
                 entry.current_index[column] = 0 if entry.matches[column] else None
             self._apply_saved_selection(entry)
             self.pdf_entries.append(entry)
+            self.pdf_entry_by_path[entry.path] = entry
 
         self._rebuild_grid()
         self._refresh_scraped_tab()
@@ -2391,6 +2401,7 @@ class ReportApp:
             except Exception:
                 pass
         self.pdf_entries.clear()
+        self.pdf_entry_by_path.clear()
         self.category_rows.clear()
         self.year_vars.clear()
         for child in self.inner_frame.winfo_children():
@@ -3065,6 +3076,12 @@ class ReportApp:
         self.combined_labels_by_pdf.clear()
         self.combined_column_name_map.clear()
         self.combined_result_message = None
+        self.combined_row_sources.clear()
+        self.combined_preview_frame = None
+        self.combined_preview_canvas = None
+        self.combined_preview_canvas_image = None
+        self.combined_preview_image = None
+        self.combined_preview_detail_var.set("Select a row to view the PDF page.")
 
     def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
         if not hasattr(self, "combined_header_frame"):
@@ -3377,9 +3394,16 @@ class ReportApp:
         self.combined_category_cell_tags.clear()
         result_container = ttk.Frame(self.combined_result_frame)
         result_container.pack(fill=tk.BOTH, expand=True)
-        result_container.columnconfigure(0, weight=1)
+        result_container.columnconfigure(0, weight=3)
+        result_container.columnconfigure(1, weight=2)
         result_container.rowconfigure(0, weight=1)
-        tree = ttk.Treeview(result_container, columns=columns, show="headings")
+
+        tree_container = ttk.Frame(result_container)
+        tree_container.grid(row=0, column=0, sticky="nsew")
+        tree_container.columnconfigure(0, weight=1)
+        tree_container.rowconfigure(0, weight=1)
+
+        tree = ttk.Treeview(tree_container, columns=columns, show="headings")
         tree.grid(row=0, column=0, sticky="nsew")
         tree.configure(height=max(len(records), 1))
 
@@ -3387,9 +3411,33 @@ class ReportApp:
             tree.xview(*args)
             self._destroy_note_editor()
 
-        x_scroll = ttk.Scrollbar(result_container, orient=tk.HORIZONTAL, command=_combined_xscroll)
+        x_scroll = ttk.Scrollbar(tree_container, orient=tk.HORIZONTAL, command=_combined_xscroll)
         x_scroll.grid(row=1, column=0, sticky="ew")
         tree.configure(xscrollcommand=x_scroll.set)
+
+        preview_container = ttk.Frame(result_container, padding=(12, 0))
+        preview_container.grid(row=0, column=1, sticky="nsew")
+        preview_container.columnconfigure(0, weight=1)
+        preview_container.rowconfigure(2, weight=1)
+        self.combined_preview_frame = preview_container
+        ttk.Label(preview_container, text="PDF Preview", font=("TkDefaultFont", 10, "bold")).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            preview_container,
+            textvariable=self.combined_preview_detail_var,
+            justify=tk.LEFT,
+            wraplength=380,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 8))
+        canvas = tk.Canvas(preview_container, highlightthickness=0, borderwidth=0)
+        canvas.grid(row=2, column=0, sticky="nsew")
+        y_scroll = ttk.Scrollbar(preview_container, orient=tk.VERTICAL, command=canvas.yview)
+        y_scroll.grid(row=2, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=y_scroll.set)
+        self.combined_preview_canvas = canvas
+        self.combined_preview_canvas_image = None
+        self.combined_preview_image = None
+        self._clear_combined_preview()
 
         for column_name in columns:
             tree.heading(column_name, text=column_name)
@@ -3435,7 +3483,7 @@ class ReportApp:
         tree.bind("<Button-1>", self._on_combined_tree_click)
         tree.bind("<ButtonRelease-1>", self._on_combined_tree_release, add="+")
         tree.bind("<Configure>", lambda _e: self._destroy_note_editor())
-        tree.bind("<<TreeviewSelect>>", lambda _e: self._destroy_note_editor())
+        tree.bind("<<TreeviewSelect>>", self._on_combined_tree_select)
         tree.bind("<Tab>", self._on_combined_tree_tab)
         tree.bind("<Shift-Tab>", self._on_combined_tree_shift_tab)
         tree.bind("<ISO_Left_Tab>", self._on_combined_tree_shift_tab)
@@ -3462,6 +3510,11 @@ class ReportApp:
 
         self._refresh_combined_column_widths()
         self._refresh_type_category_colors()
+        current_selection = tree.selection()
+        if current_selection:
+            self._update_combined_preview(current_selection[0])
+        else:
+            self._clear_combined_preview()
         self._render_combined_result_message()
 
     def _render_combined_result_message(self) -> None:
@@ -3471,6 +3524,102 @@ class ReportApp:
             self.combined_result_frame,
             text=self.combined_result_message,
         ).pack(anchor="w", padx=8, pady=(4, 0))
+
+    def _clear_combined_preview(self, message: Optional[str] = None) -> None:
+        canvas = self.combined_preview_canvas
+        if canvas is None or not canvas.winfo_exists():
+            return
+        canvas.delete("all")
+        canvas.configure(scrollregion=(0, 0, 0, 0))
+        self.combined_preview_image = None
+        self.combined_preview_canvas_image = None
+        display_text = message or "Select a row to view the PDF page."
+        self.combined_preview_detail_var.set(display_text)
+
+    def _resolve_combined_preview_target(
+        self, key: Tuple[str, str, str]
+    ) -> Optional[Tuple[PDFEntry, int]]:
+        source_paths = self.combined_row_sources.get(key, [])
+        if not source_paths:
+            return None
+        category = key[0]
+        for path in source_paths:
+            entry = self.pdf_entry_by_path.get(path)
+            if entry is None:
+                continue
+            page_index = self._get_selected_page_index(entry, category)
+            if page_index is None:
+                matches = entry.matches.get(category, [])
+                if matches:
+                    page_index = matches[0].page_index
+            if page_index is not None:
+                return entry, page_index
+        return None
+
+    def _update_combined_preview(self, item_id: Optional[str]) -> None:
+        canvas = self.combined_preview_canvas
+        if canvas is None or not canvas.winfo_exists():
+            return
+        tree = self.combined_result_tree
+        if tree is None:
+            self._clear_combined_preview()
+            return
+        if not item_id:
+            self._clear_combined_preview()
+            return
+        key = self.combined_note_record_keys.get(item_id)
+        if not key:
+            if not self.combined_ordered_columns:
+                self._clear_combined_preview()
+                return
+            try:
+                type_index = self.combined_ordered_columns.index("Type")
+                category_index = self.combined_ordered_columns.index("Category")
+                item_index = self.combined_ordered_columns.index("Item")
+            except ValueError:
+                self._clear_combined_preview()
+                return
+            values = list(tree.item(item_id, "values"))
+            if (
+                type_index < len(values)
+                and category_index < len(values)
+                and item_index < len(values)
+            ):
+                key = (
+                    str(values[type_index]),
+                    str(values[category_index]),
+                    str(values[item_index]),
+                )
+        if not key:
+            self._clear_combined_preview("No PDF page available for this row.")
+            return
+        target = self._resolve_combined_preview_target(key)
+        if target is None:
+            self._clear_combined_preview("No PDF page available for this row.")
+            return
+        entry, page_index = target
+        detail_text = f"{entry.path.name} — {key[0]} (Page {page_index + 1})"
+        photo = self._render_page(entry.doc, page_index, 480)
+        if photo is None:
+            self._clear_combined_preview("Unable to render the PDF page.")
+            self.combined_preview_detail_var.set(detail_text)
+            return
+        self.combined_preview_image = photo
+        canvas.delete("all")
+        image_id = canvas.create_image(0, 0, anchor="nw", image=photo)
+        canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 0, 0))
+        self.combined_preview_canvas_image = image_id
+        self.combined_preview_detail_var.set(detail_text)
+
+    def _on_combined_tree_select(self, _: tk.Event) -> None:  # type: ignore[override]
+        self._destroy_note_editor()
+        tree = self.combined_result_tree
+        if tree is None:
+            self._clear_combined_preview()
+            return
+        selection = tree.selection()
+        item_id = selection[0] if selection else None
+        self._update_combined_preview(item_id)
 
     def _update_combined_record_note_value(self, key: Tuple[str, str, str], value: str) -> None:
         record = self.combined_record_lookup.get(key)
@@ -3538,6 +3687,7 @@ class ReportApp:
                         value_map[(path, position)] = value
 
         combined_records: List[Dict[str, str]] = []
+        self.combined_row_sources = {}
         for category in COLUMNS:
             category_keys = [key for key in record_map if key[0] == category]
             category_keys.sort(key=lambda item: (item[1], item[2]))
@@ -3560,6 +3710,12 @@ class ReportApp:
                     "Item": item_value,
                     "Note": note_value,
                 }
+                paths_with_data = {
+                    path_key for path_key, _ in value_map.keys()
+                }
+                ordered_sources: List[Path] = [
+                    path for path in self.combined_pdf_order if path in paths_with_data
+                ]
                 for path in self.combined_pdf_order:
                     pdf_label = path.stem
                     labels = column_labels_by_pdf.get(path, [])
@@ -3567,6 +3723,10 @@ class ReportApp:
                         column_name = f"{pdf_label}.{base_label}"
                         raw_value = value_map.get((path, position), "")
                         record[column_name] = self._format_combined_value(raw_value)
+                if ordered_sources:
+                    self.combined_row_sources[
+                        (str(category), str(category_value), str(item_value))
+                    ] = ordered_sources
                 combined_records.append(record)
 
         logger.info(
