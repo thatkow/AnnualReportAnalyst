@@ -4076,8 +4076,8 @@ class ReportApp:
                 "Select a company before saving the combined CSV.",
             )
             return
-        scrape_root = self.companies_dir / company / "openapiscrape"
-        combined_path = scrape_root / "combined.csv"
+        company_root = self.companies_dir / company
+        combined_path = company_root / "combined.csv"
         try:
             csv_rows = self._build_combined_csv_rows()
             if not csv_rows:
@@ -4088,6 +4088,11 @@ class ReportApp:
                 return
             combined_path.parent.mkdir(parents=True, exist_ok=True)
             self._write_csv_rows(csv_rows, combined_path)
+            metadata = self._build_combined_metadata(company_root)
+            if metadata:
+                metadata_path = combined_path.with_name("combined_metadata.json")
+                with metadata_path.open("w", encoding="utf-8") as fh:
+                    json.dump(metadata, fh, indent=2)
         except Exception as exc:
             messagebox.showwarning("Save Combined CSV", f"Could not save the combined CSV: {exc}")
             return
