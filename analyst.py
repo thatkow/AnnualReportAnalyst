@@ -410,6 +410,28 @@ class FinancePlotFrame(ttk.Frame):
         income_color = colors.to_hex(self._palette[income_index])
         return finance_color, income_color
 
+    @staticmethod
+    def _sort_periods(periods: Sequence[str]) -> List[str]:
+        def sort_key(label: str) -> Tuple[int, Any]:
+            try:
+                parsed = datetime.strptime(label.strip(), "%d.%m.%Y")
+                return (0, parsed)
+            except ValueError:
+                return (1, label)
+
+        return sorted(periods, key=sort_key)
+
+    @staticmethod
+    def _merge_periods(existing: Sequence[str], new_periods: Sequence[str]) -> List[str]:
+        ordered_unique: List[str] = []
+        seen = set()
+        for label in list(existing) + list(new_periods):
+            if label in seen:
+                continue
+            seen.add(label)
+            ordered_unique.append(label)
+        return FinancePlotFrame._sort_periods(ordered_unique)
+
     def clear_companies(self) -> None:
         self.datasets.clear()
         self.periods = None
@@ -417,11 +439,11 @@ class FinancePlotFrame(ttk.Frame):
 
     def add_company(self, company: str, dataset: FinanceDataset) -> bool:
         if self.periods is None:
-            self.periods = list(dataset.periods)
-        elif list(dataset.periods) != self.periods:
-            raise ValueError(
-                "All loaded companies must have matching reporting periods to compare."
-            )
+            self.periods = self._sort_periods(list(dataset.periods))
+        else:
+            merged = self._merge_periods(self.periods, dataset.periods)
+            if merged != self.periods:
+                self.periods = merged
 
         is_new_company = company not in self.datasets
         if is_new_company and company not in self._company_colors:
@@ -465,31 +487,61 @@ class FinancePlotFrame(ttk.Frame):
             income_pos_totals = [0.0] * len(periods)
             income_neg_totals = [0.0] * len(periods)
 
+            dataset_period_index = {label: idx for idx, label in enumerate(dataset.periods)}
+
             for segment in dataset.finance_segments:
-                bottoms = self._compute_bottoms(segment.values, finance_pos_totals, finance_neg_totals)
+                segment_values = [
+                    segment.values[dataset_period_index[label]]
+                    if label in dataset_period_index and dataset_period_index[label] < len(segment.values)
+                    else 0.0
+                    for label in periods
+                ]
+                bottoms = self._compute_bottoms(
+                    segment_values, finance_pos_totals, finance_neg_totals
+                )
                 rectangles = self.axis.bar(
                     finance_positions,
-                    segment.values,
+                    segment_values,
                     width=bar_width,
                     bottom=bottoms,
                     color=dataset.color_for_key(segment.key),
                     edgecolor=finance_color,
                     linewidth=0.8,
                 )
-                hover_helper.add_segment(rectangles, segment, periods, company)
+                hover_helper.add_segment(
+                    rectangles,
+                    segment,
+                    periods,
+                    company,
+                    values=segment_values,
+                )
 
             for segment in dataset.income_segments:
-                bottoms = self._compute_bottoms(segment.values, income_pos_totals, income_neg_totals)
+                segment_values = [
+                    segment.values[dataset_period_index[label]]
+                    if label in dataset_period_index and dataset_period_index[label] < len(segment.values)
+                    else 0.0
+                    for label in periods
+                ]
+                bottoms = self._compute_bottoms(
+                    segment_values, income_pos_totals, income_neg_totals
+                )
                 rectangles = self.axis.bar(
                     income_positions,
-                    segment.values,
+                    segment_values,
                     width=bar_width,
                     bottom=bottoms,
                     color=dataset.color_for_key(segment.key),
                     edgecolor=income_color,
                     linewidth=0.8,
                 )
-                hover_helper.add_segment(rectangles, segment, periods, company)
+                hover_helper.add_segment(
+                    rectangles,
+                    segment,
+                    periods,
+                    company,
+                    values=segment_values,
+                )
 
             finance_totals = [pos + neg for pos, neg in zip(finance_pos_totals, finance_neg_totals)]
             income_totals = [pos + neg for pos, neg in zip(income_pos_totals, income_neg_totals)]
@@ -642,8 +694,11 @@ class BarHoverHelper:
         segment: RowSegment,
         periods: Sequence[str],
         company: str,
+        *,
+        values: Optional[Sequence[float]] = None,
     ) -> None:
         for index, rect in enumerate(bar_container.patches):
+            value_list = values if values is not None else segment.values
             metadata: Dict[str, Any] = {
                 "key": segment.key,
                 "type_label": segment.type_label,
@@ -651,7 +706,7 @@ class BarHoverHelper:
                 "category": segment.category,
                 "item": segment.item,
                 "period": periods[index] if index < len(periods) else str(index),
-                "value": segment.values[index] if index < len(segment.values) else 0.0,
+                "value": value_list[index] if index < len(value_list) else 0.0,
                 "company": company,
             }
             period_label = metadata["period"]
