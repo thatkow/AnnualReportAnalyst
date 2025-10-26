@@ -349,6 +349,7 @@ class ReportApp:
         self.prompts_dir = self.app_root / "prompts"
         self.pattern_config_path = self.app_root / "pattern_config.json"
         self.type_item_category_path = self.app_root / "type_item_category.csv"
+        self.global_note_assignments_path = self.app_root / "type_category_item_assignments.csv"
         self.config_data: Dict[str, Any] = {}
         self.last_company_preference: str = ""
         self._config_loaded = False
@@ -411,6 +412,7 @@ class ReportApp:
         self._build_ui()
         self._load_pattern_config()
         self._apply_configured_note_key_bindings()
+        self._load_note_assignments(self.company_var.get().strip())
         if not self.embedded:
             self._maximize_window()
             self.root.after(0, self._load_pdfs_on_start)
@@ -1829,8 +1831,7 @@ class ReportApp:
         return assignments
 
     def _load_note_assignments(self, company: str) -> None:
-        company_dir = self.companies_dir / company
-        path = company_dir / "type_category_item_assignments.csv"
+        path = self.global_note_assignments_path
         self.note_assignments_path = path
         self.note_assignments = self._read_note_assignments_file(path)
         self._update_combined_notes()
@@ -1838,12 +1839,8 @@ class ReportApp:
     def _ensure_note_assignments_path(self) -> Optional[Path]:
         if self.note_assignments_path is not None:
             return self.note_assignments_path
-        company = self.company_var.get().strip()
-        if not company:
-            return None
-        path = self.companies_dir / company / "type_category_item_assignments.csv"
-        self.note_assignments_path = path
-        return path
+        self.note_assignments_path = self.global_note_assignments_path
+        return self.note_assignments_path
 
     def _write_note_assignments(self) -> None:
         path = self._ensure_note_assignments_path()
@@ -1872,12 +1869,12 @@ class ReportApp:
 
     def _prompt_import_note_assignments(self) -> None:
         company = self.company_var.get().strip()
-        if not company:
-            messagebox.showinfo("Assignments", "Select a company before loading assignments.")
-            return
-        initial_dir = self.companies_dir / company
-        if not initial_dir.exists():
-            initial_dir = self.companies_dir
+        if company:
+            initial_dir = self.companies_dir / company
+            if not initial_dir.exists():
+                initial_dir = self.companies_dir
+        else:
+            initial_dir = self.app_root
         filename = filedialog.askopenfilename(
             title="Load type/category/item assignments",
             initialdir=str(initial_dir),
