@@ -5749,12 +5749,16 @@ class ReportApp:
                 existing = metadata.get(category)
                 file_exists = False
                 if isinstance(existing, dict):
-                    for key in ("csv", "txt"):
-                        name = existing.get(key)
-                        if isinstance(name, str) and name:
-                            if (doc_dir / name).exists():
+                    csv_name = existing.get("csv")
+                    if isinstance(csv_name, str) and csv_name:
+                        csv_path = doc_dir / csv_name
+                        if csv_path.exists():
+                            file_exists = True
+                    else:
+                        txt_name = existing.get("txt")
+                        if isinstance(txt_name, str) and txt_name:
+                            if (doc_dir / txt_name).exists():
                                 file_exists = True
-                                break
                 if file_exists:
                     continue
                 entry_tasks.append((category, page_index))
