@@ -1018,9 +1018,7 @@ class ReportApp:
             }
             self.combined_other_column_width = parsed_other
             self._persist_combined_base_column_widths()
-            self._apply_combined_base_column_widths()
-            if parsed_other is None:
-                self._auto_size_combined_date_columns()
+            self._refresh_combined_column_widths()
             window.grab_release()
             window.destroy()
 
@@ -2909,8 +2907,7 @@ class ReportApp:
         tree.bind("<Button-4>", _tree_mousewheel)
         tree.bind("<Button-5>", _tree_mousewheel)
 
-        self._apply_combined_base_column_widths()
-        self._auto_size_combined_date_columns()
+        self._refresh_combined_column_widths()
 
         has_data_columns = any(
             column_name not in {"Type", "Category", "Item", "Note"}
@@ -2952,18 +2949,22 @@ class ReportApp:
         except tk.TclError:
             return tkfont.nametofont("TkDefaultFont")
 
+    def _refresh_combined_column_widths(self) -> None:
+        self._destroy_note_editor()
+        self._apply_combined_base_column_widths()
+        self._auto_size_combined_date_columns()
+
     def _apply_combined_base_column_widths(self) -> None:
         tree = self.combined_result_tree
         if tree is None or not self.combined_ordered_columns:
             return
         tree.update_idletasks()
         tree_font = self._get_tree_font(tree)
-        updated = False
         for column_name in self.combined_ordered_columns:
             if column_name not in {"Type", "Category", "Item", "Note"}:
                 continue
             stored_width = self.combined_base_column_widths.get(column_name)
-            if stored_width:
+            if isinstance(stored_width, int) and stored_width > 0:
                 tree.column(column_name, width=stored_width)
                 continue
             max_width = tree_font.measure(column_name)
@@ -2976,11 +2977,6 @@ class ReportApp:
             else:
                 desired_width = max(max_width + 24, 160)
             tree.column(column_name, width=desired_width)
-            if desired_width > 0:
-                self.combined_base_column_widths[column_name] = int(desired_width)
-                updated = True
-        if updated:
-            self._persist_combined_base_column_widths()
         other_width = self.combined_other_column_width
         if isinstance(other_width, int) and other_width > 0:
             for column_name in self.combined_ordered_columns:
