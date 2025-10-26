@@ -3476,7 +3476,18 @@ class ReportApp:
             and self.combined_other_column_width > 0
         )
         for column_name in columns:
-            tree.heading(column_name, text=column_name)
+            heading_text = column_name
+            if column_name not in {"Type", "Category", "Item", "Note"}:
+                mapping = self.combined_column_name_map.get(column_name)
+                if mapping:
+                    _, label_text = mapping
+                    if label_text.strip():
+                        heading_text = label_text
+                    elif "." in column_name:
+                        heading_text = column_name.split(".", 1)[1]
+                elif "." in column_name:
+                    heading_text = column_name.split(".", 1)[1]
+            tree.heading(column_name, text=heading_text)
             if column_name in {"Type", "Category", "Item"}:
                 tree.column(column_name, anchor="w", stretch=False)
             elif column_name == "Note":
