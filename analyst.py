@@ -25,6 +25,9 @@ from datetime import datetime
 
 import matplotlib
 
+import fitz  # PyMuPDF
+from PIL import Image, ImageTk
+
 # Ensure TkAgg is used when embedding plots inside Tkinter widgets.
 matplotlib.use("TkAgg")
 
@@ -83,6 +86,56 @@ def open_pdf(pdf_path: Path, page: Optional[int] = None) -> None:
             os.system(f"xdg-open '{pdf_path}' >/dev/null 2>&1 &")
     except Exception as exc:
         messagebox.showwarning("Open PDF", f"Could not open PDF: {exc}")
+
+
+class PdfPageViewer(tk.Toplevel):
+    """Display a single rendered PDF page inside a scrollable window."""
+
+    def __init__(self, master: tk.Widget, pdf_path: Path, page_number: int) -> None:
+        super().__init__(master)
+        self.title(f"{pdf_path.name} — Page {page_number}")
+        self._photo: Optional[ImageTk.PhotoImage] = None
+        self._pdf_path = pdf_path
+        self._page_number = page_number
+        self._build_widgets()
+        self._render_page()
+        self.bind("<Escape>", lambda _event: self.destroy())
+
+    def _build_widgets(self) -> None:
+        self.configure(bg="#2b2b2b")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        self._canvas = tk.Canvas(self, bg="#2b2b2b", highlightthickness=0)
+        self._canvas.grid(row=0, column=0, sticky="nsew")
+
+        self._vbar = tk.Scrollbar(self, orient=tk.VERTICAL, command=self._canvas.yview)
+        self._vbar.grid(row=0, column=1, sticky="ns")
+        self._hbar = tk.Scrollbar(self, orient=tk.HORIZONTAL, command=self._canvas.xview)
+        self._hbar.grid(row=1, column=0, sticky="ew")
+
+        self._canvas.configure(yscrollcommand=self._vbar.set, xscrollcommand=self._hbar.set)
+
+    def _render_page(self) -> None:
+        try:
+            with fitz.open(self._pdf_path) as doc:
+                page = doc.load_page(self._page_number - 1)
+                zoom_matrix = fitz.Matrix(1.5, 1.5)
+                pix = page.get_pixmap(matrix=zoom_matrix)
+        except Exception as exc:
+            messagebox.showwarning(
+                "Open PDF",
+                f"Could not render page {self._page_number} from {self._pdf_path.name}: {exc}",
+            )
+            self.after(0, self.destroy)
+            return
+
+        mode = "RGBA" if pix.alpha else "RGB"
+        image = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+        self._photo = ImageTk.PhotoImage(image)
+        self._canvas.delete("all")
+        self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
+        self._canvas.configure(scrollregion=(0, 0, pix.width, pix.height))
 
 
 class FinanceDataset:
@@ -749,7 +802,19 @@ class FinancePlotFrame(ttk.Frame):
                 "Open PDF",
                 "No page number is available for this entry. The PDF will open to its first page.",
             )
-        open_pdf(pdf_path, page)
+            open_pdf(pdf_path, None)
+            self._context_metadata = None
+            return
+        try:
+            viewer = PdfPageViewer(self, pdf_path, page)
+            viewer.focus_set()
+        except Exception as exc:
+            messagebox.showwarning(
+                "Open PDF",
+                f"Could not display page {page} from {pdf_path.name}: {exc}\n"
+                "The full PDF will be opened instead.",
+            )
+            open_pdf(pdf_path, page)
         self._context_metadata = None
 
 
