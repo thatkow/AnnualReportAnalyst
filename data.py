@@ -4111,6 +4111,95 @@ class ReportApp:
             )
         return csv_rows
 
+    def _build_combined_metadata(self, company_root: Path) -> Optional[Dict[str, Any]]:
+        if not self.combined_all_records or not self.combined_ordered_columns:
+            return None
+        if not getattr(self, "combined_column_name_map", None):
+            return None
+
+        periods: Dict[str, Dict[str, str]] = {}
+
+        def _relative_pdf(path: Path) -> str:
+            try:
+                return str(path.relative_to(company_root))
+            except ValueError:
+                return str(path)
+
+        for column_name in self.combined_ordered_columns:
+            if column_name in {"Type", "Category", "Item", "Note"}:
+                continue
+            mapping = self.combined_column_name_map.get(column_name)
+            if not mapping:
+                continue
+            pdf_path, label_value = mapping
+            periods.setdefault(
+                label_value,
+                {
+                    "label": label_value,
+                    "pdf": _relative_pdf(pdf_path),
+                    "pdf_name": pdf_path.name,
+                },
+            )
+
+        if not periods:
+            return None
+
+        rows: List[Dict[str, Any]] = []
+
+        for record in self.combined_all_records:
+            type_value = str(record.get("Type", ""))
+            category_value = str(record.get("Category", ""))
+            item_value = str(record.get("Item", ""))
+            row_entry: Dict[str, Any] = {
+                "type": type_value,
+                "category": category_value,
+                "item": item_value,
+                "note": str(record.get("Note", "")),
+                "periods": {},
+            }
+
+            for column_name in self.combined_ordered_columns:
+                if column_name in {"Type", "Category", "Item", "Note"}:
+                    continue
+                mapping = self.combined_column_name_map.get(column_name)
+                if not mapping:
+                    continue
+                pdf_path, label_value = mapping
+                assigned_page = self._get_assigned_page_number(pdf_path, type_value)
+                row_entry["periods"][label_value] = {
+                    "pdf": _relative_pdf(pdf_path),
+                    "page": assigned_page,
+                }
+
+            if row_entry["periods"]:
+                rows.append(row_entry)
+
+        if not rows:
+            return None
+
+        return {
+            "periods": periods,
+            "rows": rows,
+        }
+
+    def _get_assigned_page_number(self, pdf_path: Path, type_value: str) -> Optional[int]:
+        if not self.assigned_pages:
+            return None
+        record = self.assigned_pages.get(pdf_path.name)
+        if not isinstance(record, dict):
+            return None
+        selections = record.get("selections")
+        if not isinstance(selections, dict):
+            return None
+        page_value = selections.get(type_value)
+        if page_value is None:
+            return None
+        try:
+            page_index = int(page_value)
+        except (TypeError, ValueError):
+            return None
+        return page_index + 1 if page_index >= 0 else None
+
     def _export_final_combined_csv(self) -> None:
         if not self.combined_all_records or not self.combined_ordered_columns:
             return
@@ -4126,6 +4215,12 @@ class ReportApp:
             final_path.parent.mkdir(parents=True, exist_ok=True)
             self._write_csv_rows(csv_rows, final_path)
             logger.info("Exported final combined CSV to %s", final_path)
+            metadata = self._build_combined_metadata(company_root)
+            if metadata:
+                metadata_path = final_path.with_name("combined_metadata.json")
+                with metadata_path.open("w", encoding="utf-8") as fh:
+                    json.dump(metadata, fh, indent=2)
+                logger.info("Exported combined metadata to %s", metadata_path)
         except Exception:
             logger.exception("Failed to export final combined CSV to company root")
 

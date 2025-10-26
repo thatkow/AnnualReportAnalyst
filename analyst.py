@@ -13,9 +13,14 @@ from __future__ import annotations
 import csv
 import re
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+import json
+import os
+import sys
+import webbrowser
 
 import matplotlib
 
@@ -49,6 +54,33 @@ class RowSegment:
     category: str
     item: str
     values: List[float]
+    sources: Dict[str, "SegmentSource"] = field(default_factory=dict)
+
+
+@dataclass
+class SegmentSource:
+    """Describe the PDF resource tied to a row segment period."""
+
+    pdf_path: Path
+    page: Optional[int]
+
+
+def open_pdf(pdf_path: Path, page: Optional[int] = None) -> None:
+    """Open a PDF, attempting to jump to the requested page when available."""
+
+    try:
+        if page is not None and page >= 1:
+            url = pdf_path.resolve().as_uri() + f"#page={page}"
+            if webbrowser.open(url):
+                return
+        if sys.platform.startswith("win"):
+            os.startfile(pdf_path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            os.system(f"open '{pdf_path}'")
+        else:
+            os.system(f"xdg-open '{pdf_path}' >/dev/null 2>&1 &")
+    except Exception as exc:
+        messagebox.showwarning("Open PDF", f"Could not open PDF: {exc}")
 
 
 class FinanceDataset:
@@ -65,12 +97,14 @@ class FinanceDataset:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        self.company_root = path.parent
         self.headers: List[str] = []
         self.periods: List[str] = []
         self.finance_segments: List[RowSegment] = []
         self.income_segments: List[RowSegment] = []
         self._color_cache: Dict[str, str] = {}
         self._load()
+        self._load_metadata()
 
     @staticmethod
     def _clean_numeric(value: str) -> float:
@@ -228,6 +262,66 @@ class FinanceDataset:
                     for idx, value in enumerate(segment.values)
                 ]
 
+    def _load_metadata(self) -> None:
+        metadata_path = self.path.with_name("combined_metadata.json")
+        if not metadata_path.exists():
+            return
+        try:
+            with metadata_path.open("r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return
+
+        rows = payload.get("rows")
+        if not isinstance(rows, list):
+            return
+
+        metadata_map: Dict[Tuple[str, str, str], Dict[str, SegmentSource]] = {}
+
+        for entry in rows:
+            if not isinstance(entry, dict):
+                continue
+            type_value = str(entry.get("type", ""))
+            category_value = str(entry.get("category", ""))
+            item_value = str(entry.get("item", ""))
+            key = (type_value, category_value, item_value)
+            periods = entry.get("periods", {})
+            if not isinstance(periods, dict):
+                continue
+            period_sources: Dict[str, SegmentSource] = {}
+            for label, info in periods.items():
+                if not isinstance(info, dict):
+                    continue
+                pdf_value = info.get("pdf")
+                if not pdf_value:
+                    continue
+                pdf_path = Path(pdf_value)
+                if not pdf_path.is_absolute():
+                    pdf_path = (metadata_path.parent / pdf_path).resolve()
+                page_value = info.get("page")
+                page: Optional[int]
+                if isinstance(page_value, int):
+                    page = page_value if page_value > 0 else None
+                else:
+                    try:
+                        page = int(str(page_value))
+                        if page <= 0:
+                            page = None
+                    except (TypeError, ValueError):
+                        page = None
+                period_sources[str(label)] = SegmentSource(pdf_path=pdf_path, page=page)
+            if period_sources:
+                metadata_map[key] = period_sources
+
+        if not metadata_map:
+            return
+
+        for segment in self.finance_segments + self.income_segments:
+            key = (segment.type_value, segment.category, segment.item)
+            sources = metadata_map.get(key)
+            if sources:
+                segment.sources = sources
+
     def has_data(self) -> bool:
         return bool(self.finance_segments or self.income_segments)
 
@@ -252,11 +346,13 @@ class FinancePlotFrame(ttk.Frame):
         self.canvas.draw()
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         self.hover_helper = BarHoverHelper(self.axis)
-        self.hover_helper.attach(self.canvas)
+        self.hover_helper.attach(self.canvas, context_callback=self._show_context_menu)
         self.datasets: "OrderedDict[str, FinanceDataset]" = OrderedDict()
         self.periods: Optional[List[str]] = None
         self._company_colors: Dict[str, Tuple[str, str]] = {}
         self._palette = list(cm.get_cmap("tab10").colors)
+        self._context_menu: Optional[tk.Menu] = None
+        self._context_metadata: Optional[Dict[str, Any]] = None
         self._render_empty()
 
     @staticmethod
@@ -280,6 +376,7 @@ class FinancePlotFrame(ttk.Frame):
         self.axis.axhline(0, color="#333333", linewidth=0.8)
         self.figure.tight_layout()
         self.canvas.draw()
+        self.hover_helper.attach(self.canvas, context_callback=self._show_context_menu)
 
     def _next_color_pair(self) -> Tuple[str, str]:
         index = len(self._company_colors)
@@ -433,8 +530,67 @@ class FinancePlotFrame(ttk.Frame):
 
         self.figure.tight_layout()
         self.canvas.draw()
-        hover_helper.attach(self.canvas)
+        hover_helper.attach(self.canvas, context_callback=self._show_context_menu)
         self.hover_helper = hover_helper
+
+    def _ensure_context_menu(self) -> tk.Menu:
+        if self._context_menu is None:
+            self._context_menu = tk.Menu(self, tearoff=False)
+        else:
+            self._context_menu.delete(0, tk.END)
+        return self._context_menu
+
+    def _show_context_menu(self, metadata: Dict[str, Any], gui_event: Any) -> None:
+        menu = self._ensure_context_menu()
+        self._context_metadata = None
+        period = metadata.get("period") or "Period"
+        pdf_path = metadata.get("pdf_path")
+        page = metadata.get("pdf_page")
+        label = f"View PDF for {period}"
+        if pdf_path:
+            if page is None:
+                label += " (page unknown)"
+            self._context_metadata = metadata
+            menu.add_command(label=label, command=self._open_pdf_from_context)
+        else:
+            menu.add_command(label=label, state=tk.DISABLED)
+        try:
+            if gui_event is not None and hasattr(gui_event, "x_root") and hasattr(gui_event, "y_root"):
+                menu.tk_popup(gui_event.x_root, gui_event.y_root)
+            else:
+                menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+        finally:
+            menu.grab_release()
+
+    def _open_pdf_from_context(self) -> None:
+        if not self._context_metadata:
+            return
+        pdf_path_value = self._context_metadata.get("pdf_path")
+        if not pdf_path_value:
+            messagebox.showinfo("Open PDF", "No PDF is associated with this bar segment.")
+            return
+        pdf_path = Path(str(pdf_path_value))
+        page_value = self._context_metadata.get("pdf_page")
+        page: Optional[int]
+        try:
+            page = int(page_value) if page_value is not None else None
+        except (TypeError, ValueError):
+            page = None
+        if page is not None and page <= 0:
+            page = None
+        if not pdf_path.exists():
+            messagebox.showwarning(
+                "Open PDF",
+                f"The PDF for this bar segment could not be found at {pdf_path}.",
+            )
+            return
+        if page is None:
+            messagebox.showinfo(
+                "Open PDF",
+                "No page number is available for this entry. The PDF will open to its first page.",
+            )
+        open_pdf(pdf_path, page)
+        self._context_metadata = None
 
 
 class BarHoverHelper:
@@ -454,7 +610,9 @@ class BarHoverHelper:
         self._annotation.set_visible(False)
         self._canvas: Optional[FigureCanvasTkAgg] = None
         self._connection_id: Optional[int] = None
+        self._button_connection_id: Optional[int] = None
         self._active_rectangle: Optional[Rectangle] = None
+        self._context_callback: Optional[Callable[[Dict[str, Any], Any], None]] = None
 
     def add_segment(
         self,
@@ -474,13 +632,32 @@ class BarHoverHelper:
                 "value": segment.values[index] if index < len(segment.values) else 0.0,
                 "company": company,
             }
+            period_label = metadata["period"]
+            if period_label is not None and segment.sources:
+                source = segment.sources.get(str(period_label))
+                if source:
+                    metadata["pdf_path"] = str(source.pdf_path)
+                    metadata["pdf_page"] = source.page
             self._rectangles.append((rect, metadata))
 
-    def attach(self, canvas: FigureCanvasTkAgg) -> None:
+    def attach(
+        self,
+        canvas: FigureCanvasTkAgg,
+        *,
+        context_callback: Optional[Callable[[Dict[str, Any], Any], None]] = None,
+    ) -> None:
         if self._connection_id is not None and self._canvas is not None:
             self._canvas.mpl_disconnect(self._connection_id)
+        if self._button_connection_id is not None and self._canvas is not None:
+            self._canvas.mpl_disconnect(self._button_connection_id)
         self._canvas = canvas
+        self._rectangles.clear()
         self._connection_id = canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self._context_callback = context_callback
+        if context_callback is not None:
+            self._button_connection_id = canvas.mpl_connect("button_press_event", self._on_button_press)
+        else:
+            self._button_connection_id = None
 
     def _format_text(self, metadata: Dict[str, Any]) -> str:
         value = metadata.get("value", 0.0)
@@ -532,6 +709,25 @@ class BarHoverHelper:
             self._annotation.set_visible(False)
             self._canvas.draw_idle()
         self._active_rectangle = None
+
+    def _metadata_for_event(self, event) -> Optional[Dict[str, Any]]:
+        if event.inaxes != self.axis:
+            return None
+        for rect, metadata in self._rectangles:
+            contains, _ = rect.contains(event)
+            if contains:
+                return metadata
+        return None
+
+    def _on_button_press(self, event) -> None:
+        if event.button != 3:
+            return
+        if self._context_callback is None:
+            return
+        metadata = self._metadata_for_event(event)
+        if metadata is None:
+            return
+        self._context_callback(metadata, getattr(event, "guiEvent", None))
 
 
 class FinanceAnalystApp:
