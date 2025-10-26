@@ -401,6 +401,7 @@ class ReportApp:
             master=self.root, value="Select a row to view the PDF page."
         )
         self._combined_zoom_save_job: Optional[str] = None
+        self._combined_blank_notification_shown = False
         self.type_color_map: Dict[str, str] = {}
         self.type_color_labels: Dict[str, str] = {}
         self.category_color_map: Dict[str, str] = {}
@@ -594,6 +595,8 @@ class ReportApp:
 
         self.combined_result_frame = ttk.Frame(combined_container, padding=8)
         self.combined_result_frame.pack(fill=tk.BOTH, expand=True)
+
+        notebook.bind("<<NotebookTabChanged>>", self._on_primary_tab_changed)
 
     def _on_frame_configure(self, _: tk.Event) -> None:  # type: ignore[override]
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -3737,17 +3740,41 @@ class ReportApp:
             return
         self._destroy_note_editor()
         if not self.combined_show_blank_notes_var.get():
+            self._combined_blank_notification_shown = False
+            return
+        self._focus_first_blank_note(notify_if_missing=True)
+
+    def _focus_first_blank_note(self, *, notify_if_missing: bool = False) -> None:
+        if not self.combined_show_blank_notes_var.get():
+            return
+        tree = self.combined_result_tree
+        if tree is None:
+            return
+        if not self.combined_ordered_columns or "Note" not in self.combined_ordered_columns:
             return
         selection = tree.selection()
         current_item = selection[0] if selection else tree.focus()
         if current_item and self._is_blank_note_tree_item(tree, current_item):
+            self._combined_blank_notification_shown = False
             return
-        for item_id in tree.get_children(""):
+        children = tree.get_children("")
+        first_blank: Optional[str] = None
+        for item_id in children:
             if self._is_blank_note_tree_item(tree, item_id):
-                tree.selection_set(item_id)
-                tree.focus(item_id)
-                tree.see(item_id)
+                first_blank = item_id
                 break
+        if first_blank:
+            tree.selection_set(first_blank)
+            tree.focus(first_blank)
+            tree.see(first_blank)
+            self._combined_blank_notification_shown = False
+            return
+        if notify_if_missing and not self._combined_blank_notification_shown and children:
+            messagebox.showinfo(
+                "Iterate blank notes only",
+                "All notes are currently assigned. Turn off the filter to review every row.",
+            )
+            self._combined_blank_notification_shown = True
 
     def _render_combined_tree(
         self,
@@ -3775,7 +3802,7 @@ class ReportApp:
         table_container = ttk.Frame(split_pane)
         table_container.columnconfigure(0, weight=1)
         table_container.rowconfigure(1, weight=1)
-        split_pane.add(table_container, weight=1)
+        split_pane.add(table_container, weight=3)
 
         controls_frame = ttk.Frame(table_container)
         controls_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
@@ -3817,13 +3844,13 @@ class ReportApp:
         preview_container = ttk.Frame(split_pane, padding=0)
         preview_container.columnconfigure(0, weight=1)
         preview_container.rowconfigure(0, weight=1)
-        split_pane.add(preview_container, weight=1)
+        split_pane.add(preview_container, weight=2)
 
         def _lock_split_position(event: tk.Event) -> None:  # type: ignore[override]
             total_width = event.width
             if total_width <= 2:
                 return
-            target = total_width // 2
+            target = int(total_width * 0.6)
             try:
                 current = split_pane.sashpos(0)
             except tk.TclError:
@@ -3840,7 +3867,7 @@ class ReportApp:
             total_width = split_pane.winfo_width()
             if total_width <= 2:
                 return
-            target = total_width // 2
+            target = int(total_width * 0.6)
             try:
                 split_pane.sashpos(0, target)
             except tk.TclError:
@@ -4012,7 +4039,7 @@ class ReportApp:
             self._clear_combined_preview()
         self._update_combined_save_button_state()
         if self.combined_show_blank_notes_var.get():
-            self._on_combined_show_blank_notes_toggle()
+            self._focus_first_blank_note(notify_if_missing=True)
 
     def _on_confirm_combined_clicked(self) -> None:
         self._confirm_combined_table()
@@ -4247,6 +4274,26 @@ class ReportApp:
         if record is None:
             return
         record["Note"] = value
+        if isinstance(value, str):
+            normalized = value.strip()
+        else:
+            normalized = str(value or "").strip()
+        if not normalized:
+            self._combined_blank_notification_shown = False
+
+    def _on_primary_tab_changed(self, event: tk.Event) -> None:  # type: ignore[override]
+        widget = event.widget
+        if not isinstance(widget, ttk.Notebook):
+            return
+        try:
+            selected = widget.select()
+        except tk.TclError:
+            return
+        if not selected:
+            return
+        if self.combined_frame is not None and str(self.combined_frame) == selected:
+            if self.combined_show_blank_notes_var.get():
+                self._focus_first_blank_note(notify_if_missing=True)
 
     def _confirm_combined_table(self, auto: bool = False) -> None:
         if not self.combined_pdf_order or not self.combined_csv_sources:
