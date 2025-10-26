@@ -383,7 +383,9 @@ class ReportApp:
         self.combined_row_sources: Dict[Tuple[str, str, str], List[Path]] = {}
         self.combined_base_column_widths: Dict[str, int] = {}
         self.combined_other_column_width: Optional[int] = None
-        self.combined_show_blank_notes_var = tk.BooleanVar(master=self.root, value=False)
+        # Default to iterating blank notes so reviewers immediately focus on
+        # records that still need attention when the combined table loads.
+        self.combined_show_blank_notes_var = tk.BooleanVar(master=self.root, value=True)
         self.combined_save_button: Optional[ttk.Button] = None
         self.combined_preview_frame: Optional[ttk.Frame] = None
         self.combined_preview_canvas: Optional[tk.Canvas] = None
@@ -4009,6 +4011,8 @@ class ReportApp:
         else:
             self._clear_combined_preview()
         self._update_combined_save_button_state()
+        if self.combined_show_blank_notes_var.get():
+            self._on_combined_show_blank_notes_toggle()
 
     def _on_confirm_combined_clicked(self) -> None:
         self._confirm_combined_table()
