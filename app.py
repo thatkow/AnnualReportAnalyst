@@ -364,6 +364,7 @@ class ReportApp:
         self.combined_labels_by_pdf: Dict[Path, List[str]] = {}
         self.combined_column_name_map: Dict[str, Tuple[Path, str]] = {}
         self.combined_base_column_widths: Dict[str, int] = {}
+        self.combined_other_column_width: Optional[int] = None
         self.auto_size_dates_button: Optional[ttk.Button] = None
         self.note_assignments: Dict[Tuple[str, str, str], str] = {}
         self.note_assignments_path: Optional[Path] = None
@@ -527,7 +528,7 @@ class ReportApp:
         self.auto_size_dates_button = ttk.Button(
             combined_controls,
             text="Auto Size Dates",
-            command=self._auto_size_combined_date_columns,
+            command=lambda: self._auto_size_combined_date_columns(ignore_config=True),
         )
         self.auto_size_dates_button.pack(side=tk.RIGHT, padx=(0, 8))
         self.auto_size_dates_button.state(["disabled"])
@@ -768,6 +769,10 @@ class ReportApp:
             label="Configure Combined Note Keys",
             command=self._configure_note_key_bindings,
         )
+        configuration_menu.add_command(
+            label="Configure Combined Column Widths",
+            command=self._configure_combined_column_widths,
+        )
         menubar.add_cascade(label="Configuration", menu=configuration_menu)
         try:
             self.root.configure(menu=menubar)
@@ -893,11 +898,139 @@ class ReportApp:
         ttk.Button(button_row, text="Cancel", command=_on_cancel).pack(side=tk.RIGHT)
         ttk.Button(button_row, text="Save", command=_on_save).pack(side=tk.RIGHT, padx=(0, 8))
 
-        window.protocol("WM_DELETE_WINDOW", _on_cancel)
-        try:
-            window.wait_window()
-        except tk.TclError:
-            pass
+    def _configure_combined_column_widths(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Configure Combined Column Widths")
+        window.transient(self.root)
+        window.grab_set()
+
+        container = ttk.Frame(window, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            container,
+            text=(
+                "Set default widths for the Combined tab columns. "
+                "Leave a value blank to allow the application to size it automatically."
+            ),
+            wraplength=420,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        entries: Dict[str, ttk.Entry] = {}
+        base_columns = ["Type", "Category", "Item", "Note"]
+        tree = self.combined_result_tree
+
+        def _current_width(column_name: str) -> Optional[int]:
+            stored_width = self.combined_base_column_widths.get(column_name)
+            if isinstance(stored_width, int) and stored_width > 0:
+                return stored_width
+            if tree is not None and column_name in self.combined_ordered_columns:
+                try:
+                    column_info = tree.column(column_name)
+                except tk.TclError:
+                    return None
+                if isinstance(column_info, dict):
+                    width_value = int(column_info.get("width", 0))
+                    return width_value if width_value > 0 else None
+            return None
+
+        for index, column_name in enumerate(base_columns, start=1):
+            ttk.Label(container, text=column_name).grid(row=index, column=0, sticky="w", pady=4)
+            entry = ttk.Entry(container, width=10)
+            entry.grid(row=index, column=1, sticky="ew", pady=4, padx=(8, 0))
+            current_width = _current_width(column_name)
+            if current_width is not None:
+                entry.insert(0, str(current_width))
+            entries[column_name] = entry
+
+        other_label = "<Others>"
+        other_row = len(base_columns) + 1
+        ttk.Label(container, text=other_label).grid(row=other_row, column=0, sticky="w", pady=4)
+        other_entry = ttk.Entry(container, width=10)
+        other_entry.grid(row=other_row, column=1, sticky="ew", pady=4, padx=(8, 0))
+        entries[other_label] = other_entry
+
+        other_width = self.combined_other_column_width
+        if not isinstance(other_width, int) or other_width <= 0:
+            if tree is not None:
+                for column_name in self.combined_ordered_columns:
+                    if column_name in base_columns:
+                        continue
+                    try:
+                        column_info = tree.column(column_name)
+                    except tk.TclError:
+                        continue
+                    if isinstance(column_info, dict):
+                        width_value = int(column_info.get("width", 0))
+                        if width_value > 0:
+                            other_width = width_value
+                            break
+        if isinstance(other_width, int) and other_width > 0:
+            other_entry.insert(0, str(other_width))
+
+        button_row = ttk.Frame(container)
+        button_row.grid(row=other_row + 1, column=0, columnspan=2, pady=(12, 0), sticky="e")
+
+        def _close() -> None:
+            window.grab_release()
+            window.destroy()
+
+        def _parse_width(value: str, label: str) -> Optional[int]:
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                parsed = int(text)
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid Width",
+                    f"{label} width must be a positive integer.",
+                    parent=window,
+                )
+                return None
+            if parsed <= 0:
+                messagebox.showerror(
+                    "Invalid Width",
+                    f"{label} width must be greater than zero.",
+                    parent=window,
+                )
+                return None
+            return parsed
+
+        def _on_save() -> None:
+            new_widths: Dict[str, int] = {}
+            for column_name in base_columns:
+                value = entries[column_name].get()
+                parsed = _parse_width(value, column_name)
+                if parsed is None:
+                    if value.strip():
+                        return
+                else:
+                    new_widths[column_name] = parsed
+            other_value = entries[other_label].get()
+            parsed_other = _parse_width(other_value, "Other")
+            if parsed_other is None and other_value.strip():
+                return
+            self.combined_base_column_widths = {
+                column: width for column, width in new_widths.items()
+            }
+            self.combined_other_column_width = parsed_other
+            self._persist_combined_base_column_widths()
+            self._apply_combined_base_column_widths()
+            if parsed_other is None:
+                self._auto_size_combined_date_columns()
+            window.grab_release()
+            window.destroy()
+
+        ttk.Button(button_row, text="Cancel", command=_close).pack(side=tk.RIGHT)
+        ttk.Button(button_row, text="Save", command=_on_save).pack(side=tk.RIGHT, padx=(0, 8))
+
+        window.bind("<Escape>", lambda _e: _close())
+        window.bind("<Return>", lambda _e: _on_save())
+
+        window.protocol("WM_DELETE_WINDOW", _close)
 
     def _collect_recent_downloads(self) -> List[Path]:
         downloads_dir = self.downloads_dir_var.get().strip()
@@ -2848,6 +2981,12 @@ class ReportApp:
                 updated = True
         if updated:
             self._persist_combined_base_column_widths()
+        other_width = self.combined_other_column_width
+        if isinstance(other_width, int) and other_width > 0:
+            for column_name in self.combined_ordered_columns:
+                if column_name in {"Type", "Category", "Item", "Note"}:
+                    continue
+                tree.column(column_name, width=other_width)
 
     def _persist_combined_base_column_widths(self) -> None:
         if not self.combined_base_column_widths:
@@ -2858,6 +2997,10 @@ class ReportApp:
                 for column, width in self.combined_base_column_widths.items()
                 if column in {"Type", "Category", "Item", "Note"} and width > 0
             }
+        if isinstance(self.combined_other_column_width, int) and self.combined_other_column_width > 0:
+            self.config_data["combined_other_column_width"] = int(self.combined_other_column_width)
+        else:
+            self.config_data.pop("combined_other_column_width", None)
         self._write_config()
 
     def _store_combined_base_column_widths(self) -> None:
@@ -2881,7 +3024,7 @@ class ReportApp:
         if changed:
             self._persist_combined_base_column_widths()
 
-    def _auto_size_combined_date_columns(self) -> None:
+    def _auto_size_combined_date_columns(self, ignore_config: bool = False) -> None:
         tree = self.combined_result_tree
         if tree is None or not self.combined_ordered_columns:
             return
@@ -2896,6 +3039,16 @@ class ReportApp:
             return
         self._destroy_note_editor()
         tree.update_idletasks()
+        if (
+            not ignore_config
+            and isinstance(self.combined_other_column_width, int)
+            and self.combined_other_column_width > 0
+        ):
+            for column_name in date_columns:
+                tree.column(column_name, width=self.combined_other_column_width)
+            if self.auto_size_dates_button is not None:
+                self.auto_size_dates_button.state(["!disabled"])
+            return
         tree_font = self._get_tree_font(tree)
         for column_name in date_columns:
             max_width = tree_font.measure(column_name)
@@ -3435,6 +3588,11 @@ class ReportApp:
                     self.combined_base_column_widths = valid_widths
                 else:
                     self.combined_base_column_widths = {}
+                other_width_value = data.get("combined_other_column_width")
+                if isinstance(other_width_value, (int, float)) and other_width_value > 0:
+                    self.combined_other_column_width = int(other_width_value)
+                else:
+                    self.combined_other_column_width = None
         except Exception as exc:  # pragma: no cover - guard for IO issues
             messagebox.showwarning("Load Patterns", f"Could not load pattern configuration: {exc}")
             self._config_loaded = True
@@ -3555,6 +3713,10 @@ class ReportApp:
             for column, width in self.combined_base_column_widths.items()
             if column in {"Type", "Category", "Item", "Note"} and width > 0
         }
+        if isinstance(self.combined_other_column_width, int) and self.combined_other_column_width > 0:
+            self.config_data["combined_other_column_width"] = int(self.combined_other_column_width)
+        else:
+            self.config_data.pop("combined_other_column_width", None)
         try:
             with self.pattern_config_path.open("w", encoding="utf-8") as fh:
                 json.dump(self.config_data, fh, indent=2)
