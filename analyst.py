@@ -640,6 +640,7 @@ class FinancePlotFrame(ttk.Frame):
                 finance_color, income_color = self._company_colors.setdefault(
                     company, self._next_color_pair()
                 )
+                company_color = finance_color
                 normalization_factor = self._price_factor(company)
                 base_offset = start_offset + (2 * company_index) * bar_width
                 finance_positions = [
@@ -771,10 +772,11 @@ class FinancePlotFrame(ttk.Frame):
                     finance_totals = [
                         pos + neg for pos, neg in zip(finance_pos_totals, finance_neg_totals)
                     ]
+                    dot_color = finance_color
                     self.axis.scatter(
                         finance_positions_active,
                         finance_totals,
-                        color=finance_color,
+                        color=dot_color,
                         marker="o",
                         s=36,
                         zorder=5,
@@ -792,10 +794,11 @@ class FinancePlotFrame(ttk.Frame):
                     income_totals = [
                         pos + neg for pos, neg in zip(income_pos_totals, income_neg_totals)
                     ]
+                    dot_color = finance_color
                     self.axis.scatter(
                         income_positions_active,
                         income_totals,
-                        color=income_color,
+                        color=dot_color,
                         marker="o",
                         s=36,
                         zorder=5,
@@ -830,6 +833,7 @@ class FinancePlotFrame(ttk.Frame):
                 finance_color, income_color = self._company_colors.setdefault(
                     company, self._next_color_pair()
                 )
+                company_color = finance_color
 
                 finance_totals, finance_presence = dataset.aggregate_totals(
                     periods, series=FinanceDataset.FINANCE_LABEL
@@ -845,9 +849,11 @@ class FinancePlotFrame(ttk.Frame):
                     line = self.axis.plot(
                         x_positions,
                         finance_points,
-                        linestyle=":",
+                        linestyle="-",
                         marker="o",
-                        color=finance_color,
+                        color=company_color,
+                        markerfacecolor=company_color,
+                        markeredgecolor=company_color,
                         label=f"{company} {FinanceDataset.FINANCE_LABEL}",
                     )
                     legend_handles.append(line[0])
@@ -865,9 +871,11 @@ class FinancePlotFrame(ttk.Frame):
                     line = self.axis.plot(
                         x_positions,
                         income_points,
-                        linestyle=":",
+                        linestyle="--",
                         marker="o",
-                        color=income_color,
+                        color=company_color,
+                        markerfacecolor=company_color,
+                        markeredgecolor=company_color,
                         label=f"{company} {FinanceDataset.INCOME_LABEL}",
                     )
                     legend_handles.append(line[0])
