@@ -33,9 +33,9 @@ DEFAULT_PATTERNS = {
     "Shares": ["Movements in issued capital"],
 }
 YEAR_DEFAULT_PATTERNS = [r"(\d{4})\s+Annual\s+Report"]
-NOTE_OPTIONS = ["", "excluded", "negated", "share_count"]
+DEFAULT_NOTE_OPTIONS = ["", "excluded", "negated", "share_count"]
 MAX_COMBINED_DATE_COLUMNS = 2
-NOTE_BACKGROUND_COLORS = {
+DEFAULT_NOTE_BACKGROUND_COLORS = {
     "": "",
     "excluded": "#ff4d4f",
     "negated": "#4da6ff",
@@ -370,6 +370,8 @@ class ReportApp:
         self.type_category_color_labels: Dict[str, str] = {}
         self.note_assignments: Dict[Tuple[str, str, str], str] = {}
         self.note_assignments_path: Optional[Path] = None
+        self.note_options: List[str] = list(DEFAULT_NOTE_OPTIONS)
+        self.note_background_colors: Dict[str, str] = DEFAULT_NOTE_BACKGROUND_COLORS.copy()
         self.note_key_bindings: Dict[str, str] = DEFAULT_NOTE_KEY_BINDINGS.copy()
 
         self._build_ui()
@@ -827,75 +829,225 @@ class ReportApp:
         window.grab_set()
         container = ttk.Frame(window, padding=12)
         container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
 
         ttk.Label(
             container,
             text=(
-                "Assign single-key shortcuts for editing Combined tab notes."
-                " Leave a field blank to disable its shortcut."
+                "Manage the Combined tab note shortcuts and colors."
+                " Shortcuts must be a single visible key; leave blank to disable."
             ),
-            wraplength=360,
+            wraplength=460,
             justify=tk.LEFT,
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ).grid(row=0, column=0, sticky="w")
 
-        labels = {
+        rows_container = ttk.Frame(container)
+        rows_container.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        rows_container.columnconfigure(0, weight=1)
+
+        header = ttk.Frame(rows_container)
+        header.grid(row=0, column=0, sticky="ew")
+        ttk.Label(header, text="Note value", width=24).grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="Shortcut", width=10).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(header, text="Color", width=12).grid(row=0, column=2, sticky="w", padx=(12, 0))
+
+        label_map = {
             "": "Clear note",
             "excluded": "Set note to 'excluded'",
             "negated": "Set note to 'negated'",
             "share_count": "Set note to 'share_count'",
         }
-        entries: Dict[str, tk.Entry] = {}
-        for index, note_value in enumerate(NOTE_OPTIONS, start=1):
-            ttk.Label(container, text=labels[note_value]).grid(row=index, column=0, sticky="w", pady=4)
-            entry = ttk.Entry(container, width=6)
-            entry.grid(row=index, column=1, sticky="w", pady=4, padx=(8, 0))
-            current = self.note_key_bindings.get(note_value, "")
-            if current:
-                entry.insert(0, current)
-            entries[note_value] = entry
 
-        button_row = ttk.Frame(container)
-        button_row.grid(row=len(NOTE_OPTIONS) + 1, column=0, columnspan=2, pady=(12, 0), sticky="e")
+        rows: List[Dict[str, Any]] = []
+
+        def _update_color_preview(row: Dict[str, Any]) -> None:
+            color_value = row["color_var"].get().strip()
+            normalized = self._normalize_hex_color(color_value) if color_value else None
+            if normalized:
+                row["color_var"].set(normalized)
+                row["color_text_var"].set(normalized)
+                row["color_label"].configure(
+                    background=normalized, foreground=self._foreground_for_color(normalized)
+                )
+            else:
+                row["color_var"].set("")
+                row["color_text_var"].set("None")
+                row["color_label"].configure(background=row["default_bg"], foreground="#000000")
+
+        def _regrid_rows() -> None:
+            for index, row in enumerate(rows, start=1):
+                row["frame"].grid_configure(row=index, column=0)
+
+        def _choose_color(row: Dict[str, Any]) -> None:
+            initial = row["color_var"].get() or "#ffffff"
+            try:
+                result = colorchooser.askcolor(initialcolor=initial, parent=window)
+            except tk.TclError:
+                return
+            if not result or not result[1]:
+                return
+            row["color_var"].set(result[1])
+            _update_color_preview(row)
+
+        def _clear_color(row: Dict[str, Any]) -> None:
+            row["color_var"].set("")
+            _update_color_preview(row)
+
+        def _remove_row(row: Dict[str, Any]) -> None:
+            if not row["value"]:
+                return
+            rows.remove(row)
+            row["frame"].destroy()
+            _regrid_rows()
+
+        def _create_row(note_value: str, *, display_name: Optional[str] = None, allow_remove: bool = True) -> None:
+            normalized = note_value.strip().lower() if note_value else ""
+            display = display_name or label_map.get(normalized, normalized or "Clear note")
+            frame = ttk.Frame(rows_container)
+            frame.grid(row=len(rows) + 1, column=0, sticky="ew", pady=4)
+            frame.columnconfigure(2, weight=1)
+            ttk.Label(frame, text=display, width=24).grid(row=0, column=0, sticky="w")
+            entry = ttk.Entry(frame, width=6)
+            entry.grid(row=0, column=1, sticky="w", padx=(8, 0))
+            current_shortcut = self.note_key_bindings.get(normalized, "")
+            if current_shortcut:
+                entry.insert(0, current_shortcut)
+            color_value = self.note_background_colors.get(normalized, "")
+            color_var = tk.StringVar(value=color_value)
+            color_text_var = tk.StringVar(value=color_value or "None")
+            color_label = tk.Label(frame, textvariable=color_text_var, width=12, relief=tk.SOLID, bd=1)
+            color_label.grid(row=0, column=2, sticky="w", padx=(12, 0))
+            default_bg = color_label.cget("background")
+            row_data: Dict[str, Any] = {
+                "value": normalized,
+                "display": display,
+                "frame": frame,
+                "entry": entry,
+                "color_var": color_var,
+                "color_text_var": color_text_var,
+                "color_label": color_label,
+                "default_bg": default_bg,
+            }
+            rows.append(row_data)
+            _update_color_preview(row_data)
+            ttk.Button(frame, text="Color…", command=lambda r=row_data: _choose_color(r)).grid(
+                row=0, column=3, sticky="w", padx=(8, 0)
+            )
+            ttk.Button(frame, text="Clear", command=lambda r=row_data: _clear_color(r)).grid(
+                row=0, column=4, sticky="w", padx=(4, 0)
+            )
+            if allow_remove:
+                ttk.Button(frame, text="Remove", command=lambda r=row_data: _remove_row(r)).grid(
+                    row=0, column=5, sticky="w", padx=(8, 0)
+                )
+
+        _create_row("", allow_remove=False)
+        for note_value in self.note_options:
+            if not note_value:
+                continue
+            _create_row(note_value)
+
+        controls = ttk.Frame(container)
+        controls.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        controls.columnconfigure(0, weight=1)
+
+        def _on_add_entry() -> None:
+            try:
+                raw_value = simpledialog.askstring(
+                    "Add Note Entry",
+                    "Enter a new note value:",
+                    parent=window,
+                )
+            except tk.TclError:
+                return
+            if raw_value is None:
+                return
+            candidate = raw_value.strip()
+            if not candidate:
+                messagebox.showerror("Add Note", "Note value cannot be blank.", parent=window)
+                return
+            normalized = candidate.lower()
+            existing = {row["value"] for row in rows}
+            if normalized in existing:
+                messagebox.showerror("Add Note", "That note value already exists.", parent=window)
+                return
+            _create_row(normalized, display_name=candidate, allow_remove=True)
+            _regrid_rows()
+
+        ttk.Button(controls, text="Add Entry", command=_on_add_entry).grid(row=0, column=0, sticky="w")
+
+        button_row = ttk.Frame(controls)
+        button_row.grid(row=0, column=1, sticky="e")
 
         def _on_cancel() -> None:
             window.grab_release()
             window.destroy()
 
         def _on_save() -> None:
+            new_order: List[str] = []
             new_bindings: Dict[str, str] = {}
-            used_keys: Set[str] = set()
-            for note_value, entry in entries.items():
-                raw_value = entry.get().strip()
-                normalized = self._normalize_note_binding_value(raw_value)
-                if raw_value and not normalized:
+            new_colors: Dict[str, str] = {}
+            used_shortcuts: Set[str] = set()
+            for row in rows:
+                value = row["value"]
+                entry_widget: tk.Entry = row["entry"]
+                raw_shortcut = entry_widget.get().strip()
+                normalized_shortcut = self._normalize_note_binding_value(raw_shortcut)
+                if raw_shortcut and not normalized_shortcut:
                     messagebox.showerror(
                         "Invalid Shortcut",
-                        "Shortcuts must be a single visible character.",
+                        f"Shortcut for '{row['display']}' must be a single visible character.",
                         parent=window,
                     )
+                    entry_widget.focus_set()
                     return
-                if normalized:
-                    if normalized in used_keys:
+                if normalized_shortcut:
+                    if normalized_shortcut in used_shortcuts:
                         messagebox.showerror(
                             "Duplicate Shortcut",
                             "Each shortcut must be unique.",
                             parent=window,
                         )
+                        entry_widget.focus_set()
                         return
-                    used_keys.add(normalized)
-                new_bindings[note_value] = normalized
-            self.note_key_bindings.update(new_bindings)
-            for option in NOTE_OPTIONS:
-                self.note_key_bindings.setdefault(option, "")
-            self.config_data["combined_note_key_bindings"] = {
-                option: self.note_key_bindings.get(option, "") for option in NOTE_OPTIONS
-            }
+                    used_shortcuts.add(normalized_shortcut)
+                color_value = row["color_var"].get().strip()
+                normalized_color = self._normalize_hex_color(color_value) if color_value else ""
+                new_order.append(value)
+                new_bindings[value] = normalized_shortcut or ""
+                new_colors[value] = normalized_color or ""
+            if "" not in new_order:
+                new_order.insert(0, "")
+                new_bindings.setdefault("", "")
+                new_colors.setdefault("", "")
+            else:
+                new_order = [""] + [value for value in new_order if value]
+            sanitized_bindings = {value: new_bindings.get(value, "") for value in new_order}
+            sanitized_colors = {value: new_colors.get(value, "") for value in new_order}
+            self.note_options = new_order
+            self.note_key_bindings = sanitized_bindings
+            self.note_background_colors = sanitized_colors
+            valid_values = set(new_order)
+            removed_assignment = False
+            for key, note_value in list(self.note_assignments.items()):
+                if note_value and note_value not in valid_values:
+                    self.note_assignments.pop(key, None)
+                    removed_assignment = True
+            if removed_assignment:
+                self._write_note_assignments()
             self._write_config()
+            self._refresh_note_tags()
+            self._update_combined_notes()
             window.grab_release()
             window.destroy()
 
         ttk.Button(button_row, text="Cancel", command=_on_cancel).pack(side=tk.RIGHT)
         ttk.Button(button_row, text="Save", command=_on_save).pack(side=tk.RIGHT, padx=(0, 8))
+
+        window.bind("<Escape>", lambda _e: _on_cancel())
+        window.bind("<Return>", lambda _e: _on_save())
+        window.protocol("WM_DELETE_WINDOW", _on_cancel)
 
     def _configure_combined_column_widths(self) -> None:
         window = tk.Toplevel(self.root)
@@ -1509,6 +1661,34 @@ class ReportApp:
                 }
         self.assigned_pages = parsed
 
+    def _register_note_option(
+        self,
+        value: str,
+        *,
+        color: Optional[str] = None,
+        shortcut: Optional[str] = None,
+    ) -> None:
+        if not isinstance(value, str):
+            return
+        normalized = value.strip().lower()
+        if not normalized:
+            return
+        if normalized not in self.note_options:
+            self.note_options.append(normalized)
+        if normalized not in self.note_background_colors:
+            if color:
+                normalized_color = self._normalize_hex_color(color)
+            else:
+                normalized_color = DEFAULT_NOTE_BACKGROUND_COLORS.get(normalized, "")
+            self.note_background_colors[normalized] = normalized_color or ""
+        if normalized not in self.note_key_bindings:
+            normalized_shortcut = self._normalize_note_binding_value(shortcut) if shortcut else ""
+            if not normalized_shortcut:
+                normalized_shortcut = DEFAULT_NOTE_KEY_BINDINGS.get(normalized, "")
+            self.note_key_bindings[normalized] = normalized_shortcut or ""
+        self._update_note_settings_config_entries()
+        self._refresh_note_tags()
+
     def _read_note_assignments_file(self, path: Path) -> Dict[Tuple[str, str, str], str]:
         assignments: Dict[Tuple[str, str, str], str] = {}
         if not path.exists():
@@ -1526,9 +1706,8 @@ class ReportApp:
                         continue
                     note_raw = (row.get("Note") or row.get("note") or "").strip()
                     note_value = note_raw.lower()
-                    if note_value and note_value not in NOTE_OPTIONS[1:]:
-                        continue
                     if note_value:
+                        self._register_note_option(note_value)
                         assignments[(type_value, category_value, item_value)] = note_value
         except Exception:
             return {}
@@ -1664,19 +1843,28 @@ class ReportApp:
 
     def _note_tag_for_value(self, value: str) -> str:
         normalized = value.strip().lower() if isinstance(value, str) else ""
-        if normalized not in NOTE_BACKGROUND_COLORS:
+        if normalized not in self.note_background_colors:
             normalized = ""
         return f"note_value_{normalized or 'blank'}"
 
+    def _foreground_for_color(self, color: str) -> str:
+        normalized = self._normalize_hex_color(color)
+        if not normalized:
+            return "#000000"
+        red = int(normalized[1:3], 16)
+        green = int(normalized[3:5], 16)
+        blue = int(normalized[5:7], 16)
+        brightness = (0.299 * red) + (0.587 * green) + (0.114 * blue)
+        return "#000000" if brightness >= 160 else "#ffffff"
+
     def _configure_note_tags(self, tree: ttk.Treeview) -> None:
-        for note_value, color in NOTE_BACKGROUND_COLORS.items():
+        for note_value, color in self.note_background_colors.items():
             tag_name = self._note_tag_for_value(note_value)
             kwargs: Dict[str, Any] = {"background": color or ""}
             if color:
-                if note_value == "share_count":
-                    kwargs["foreground"] = "#000000"
-                else:
-                    kwargs["foreground"] = "#ffffff"
+                kwargs["foreground"] = self._foreground_for_color(color)
+            else:
+                kwargs["foreground"] = ""
             tree.tag_configure(tag_name, **kwargs)
 
     def _apply_note_value_tag(self, item_id: str, value: str) -> None:
@@ -1770,6 +1958,20 @@ class ReportApp:
             )
             self._apply_type_category_color_tag(item_id, type_value, category_value)
 
+    def _refresh_note_tags(self) -> None:
+        tree = self.combined_result_tree
+        if tree is None:
+            return
+        self._configure_note_tags(tree)
+        if not self.combined_ordered_columns or "Note" not in self.combined_ordered_columns:
+            return
+        note_index = self.combined_ordered_columns.index("Note")
+        for item_id in tree.get_children(""):
+            values = list(tree.item(item_id, "values") or [])
+            note_value = values[note_index] if note_index < len(values) else ""
+            self._apply_note_value_tag(item_id, note_value)
+        self._destroy_note_editor()
+
     def _update_combined_notes(self) -> None:
         tree = self.combined_result_tree
         if tree is None:
@@ -1781,7 +1983,15 @@ class ReportApp:
             values = list(tree.item(item_id, "values"))
             if note_index >= len(values):
                 continue
-            note_value = self.note_assignments.get(key, "")
+            raw_note = self.note_assignments.get(key, "")
+            if isinstance(raw_note, str):
+                note_value = raw_note.strip().lower()
+            else:
+                note_value = str(raw_note or "").strip().lower()
+            if note_value and note_value not in self.note_options:
+                self._register_note_option(note_value)
+            if note_value and note_value not in self.note_options:
+                note_value = ""
             if values[note_index] != note_value:
                 values[note_index] = note_value
                 tree.item(item_id, values=values)
@@ -1818,9 +2028,15 @@ class ReportApp:
         x, y, width, height = bbox
         current_value = tree.set(item_id, "Note")
         self._destroy_note_editor()
-        editor = ttk.Combobox(tree, values=NOTE_OPTIONS, state="readonly")
+        editor = ttk.Combobox(tree, values=self.note_options, state="readonly")
         editor.place(x=x, y=y, width=width, height=height)
-        editor.set(current_value if current_value in NOTE_OPTIONS else current_value)
+        normalized_current = current_value.strip().lower() if isinstance(current_value, str) else ""
+        if normalized_current and normalized_current not in self.note_options:
+            self._register_note_option(normalized_current)
+        if normalized_current in self.note_options:
+            editor.set(normalized_current)
+        else:
+            editor.set("")
         editor.focus_set()
         editor.bind("<<ComboboxSelected>>", lambda _e, itm=item_id: self._commit_note_value(itm))
         editor.bind("<FocusOut>", lambda _e, itm=item_id: self._commit_note_value(itm))
@@ -1831,9 +2047,10 @@ class ReportApp:
     def _commit_note_value(self, item_id: str) -> None:
         if self.combined_note_editor is None:
             return
-        value = self.combined_note_editor.get().strip().lower()
-        if value not in NOTE_OPTIONS[1:]:
-            value = ""
+        raw_value = self.combined_note_editor.get().strip().lower()
+        if raw_value and raw_value not in self.note_options:
+            self._register_note_option(raw_value)
+        value = raw_value if raw_value in self.note_options else ""
         self._set_note_value(item_id, value)
         self._destroy_note_editor()
 
@@ -2010,18 +2227,26 @@ class ReportApp:
         tree = self.combined_result_tree
         if tree is None or not self.combined_ordered_columns or "Note" not in self.combined_ordered_columns:
             return
+        if isinstance(value, str):
+            normalized_value = value.strip().lower()
+        else:
+            normalized_value = str(value or "").strip().lower()
+        if normalized_value and normalized_value not in self.note_options:
+            self._register_note_option(normalized_value)
+        if normalized_value and normalized_value not in self.note_options:
+            normalized_value = ""
         note_index = self.combined_ordered_columns.index("Note")
         values = list(tree.item(item_id, "values"))
         if note_index < len(values):
-            if values[note_index] != value:
-                values[note_index] = value
+            if values[note_index] != normalized_value:
+                values[note_index] = normalized_value
                 tree.item(item_id, values=values)
-        self._apply_note_value_tag(item_id, value)
+        self._apply_note_value_tag(item_id, normalized_value)
         key = self.combined_note_record_keys.get(item_id)
         if not key:
             return
-        if value:
-            self.note_assignments[key] = value
+        if normalized_value:
+            self.note_assignments[key] = normalized_value
         else:
             self.note_assignments.pop(key, None)
         self._write_note_assignments()
@@ -3063,11 +3288,20 @@ class ReportApp:
             for key in category_keys:
                 _type, category_value, item_value = key
                 value_map = record_map.get(key, {})
+                raw_note = self.note_assignments.get((category, category_value, item_value), "")
+                if isinstance(raw_note, str):
+                    note_value = raw_note.strip().lower()
+                else:
+                    note_value = str(raw_note or "").strip().lower()
+                if note_value and note_value not in self.note_options:
+                    self._register_note_option(note_value)
+                if note_value and note_value not in self.note_options:
+                    note_value = ""
                 record: Dict[str, str] = {
                     "Type": category,
                     "Category": category_value,
                     "Item": item_value,
-                    "Note": self.note_assignments.get((category, category_value, item_value), ""),
+                    "Note": note_value,
                 }
                 for path in self.combined_pdf_order:
                     pdf_label = path.stem
@@ -3930,20 +4164,89 @@ class ReportApp:
             self.type_category_color_labels[normalized_key] = str(key).strip()
 
     def _apply_configured_note_key_bindings(self) -> None:
+        note_order: List[str] = []
+        seen: Set[str] = set()
+
+        def _add_option(value: Any) -> None:
+            if isinstance(value, str):
+                normalized_value = value.strip().lower()
+            else:
+                normalized_value = str(value).strip().lower()
+            if not normalized_value:
+                normalized_value = ""
+            if normalized_value in seen:
+                return
+            if normalized_value:
+                note_order.append(normalized_value)
+            else:
+                note_order.insert(0, "")
+            seen.add(normalized_value)
+
+        configured_colors: Dict[str, str] = {}
+        configured_bindings: Dict[str, str] = {}
+
+        _add_option("")
+
+        raw_settings = self.config_data.get("combined_note_settings")
+        if isinstance(raw_settings, list):
+            for entry in raw_settings:
+                if not isinstance(entry, dict):
+                    continue
+                value = entry.get("value", "")
+                _add_option(value)
+                normalized_value = value.strip().lower() if isinstance(value, str) else str(value).strip().lower()
+                if not normalized_value:
+                    normalized_value = ""
+                color = entry.get("color")
+                normalized_color = self._normalize_hex_color(str(color)) if color else None
+                if normalized_color:
+                    configured_colors[normalized_value] = normalized_color
+                shortcut_value = entry.get("shortcut") or entry.get("key") or entry.get("binding")
+                normalized_shortcut = (
+                    self._normalize_note_binding_value(str(shortcut_value)) if shortcut_value else ""
+                )
+                if normalized_value not in configured_bindings or normalized_shortcut:
+                    configured_bindings[normalized_value] = normalized_shortcut
+
         raw_bindings = self.config_data.get("combined_note_key_bindings")
         if isinstance(raw_bindings, dict):
-            for option in NOTE_OPTIONS:
-                stored_value = raw_bindings.get(option, "")
-                normalized = self._normalize_note_binding_value(str(stored_value)) if stored_value else ""
-                self.note_key_bindings[option] = normalized
-        for option in NOTE_OPTIONS:
-            if option not in self.note_key_bindings:
-                self.note_key_bindings[option] = DEFAULT_NOTE_KEY_BINDINGS.get(option, "")
-            elif not self.note_key_bindings[option]:
-                self.note_key_bindings[option] = ""
-        self.config_data["combined_note_key_bindings"] = {
-            option: self.note_key_bindings.get(option, "") for option in NOTE_OPTIONS
-        }
+            for value, shortcut in raw_bindings.items():
+                _add_option(value)
+                normalized_value = value.strip().lower() if isinstance(value, str) else str(value).strip().lower()
+                if not normalized_value:
+                    normalized_value = ""
+                normalized_shortcut = (
+                    self._normalize_note_binding_value(str(shortcut)) if shortcut else ""
+                )
+                if normalized_value not in configured_bindings or normalized_shortcut:
+                    configured_bindings[normalized_value] = normalized_shortcut
+
+        for default_value in DEFAULT_NOTE_OPTIONS:
+            _add_option(default_value)
+
+        self.note_options = note_order
+        defaults_colors = DEFAULT_NOTE_BACKGROUND_COLORS.copy()
+        self.note_background_colors = {}
+        for value in note_order:
+            color = configured_colors.get(value, defaults_colors.get(value, "")) or ""
+            self.note_background_colors[value] = color
+        for value, color in configured_colors.items():
+            if value not in self.note_background_colors:
+                self.note_background_colors[value] = color
+
+        defaults_keys = DEFAULT_NOTE_KEY_BINDINGS.copy()
+        self.note_key_bindings = {}
+        for value in note_order:
+            if value in configured_bindings:
+                self.note_key_bindings[value] = configured_bindings[value] or ""
+            else:
+                self.note_key_bindings[value] = defaults_keys.get(value, "") or ""
+        for value, shortcut in configured_bindings.items():
+            if value not in self.note_key_bindings:
+                self.note_key_bindings[value] = shortcut or ""
+
+        self._update_note_settings_config_entries()
+        self._refresh_note_tags()
 
     def _apply_whitespace_option(self, pattern: str, enabled: bool) -> str:
         if not enabled:
@@ -4007,10 +4310,63 @@ class ReportApp:
         self.last_company_preference = company
         self._write_config()
 
-    def _write_config(self) -> None:
+    def _update_note_settings_config_entries(self) -> None:
+        sanitized_order: List[str] = []
+        seen: Set[str] = set()
+        for value in self.note_options:
+            if isinstance(value, str):
+                normalized_value = value.strip().lower()
+            else:
+                normalized_value = str(value).strip().lower()
+            if not normalized_value:
+                normalized_value = ""
+            if normalized_value in seen:
+                continue
+            if normalized_value:
+                sanitized_order.append(normalized_value)
+            else:
+                sanitized_order.insert(0, "")
+            seen.add(normalized_value)
+        if "" not in seen:
+            sanitized_order.insert(0, "")
+            seen.add("")
+
+        sanitized_colors: Dict[str, str] = {}
+        sanitized_bindings: Dict[str, str] = {}
+        for value in sanitized_order:
+            raw_color = self.note_background_colors.get(value, DEFAULT_NOTE_BACKGROUND_COLORS.get(value, ""))
+            normalized_color = self._normalize_hex_color(raw_color) if raw_color else None
+            sanitized_colors[value] = normalized_color or ""
+            stored_shortcut = self.note_key_bindings.get(value)
+            if stored_shortcut is None:
+                stored_shortcut = DEFAULT_NOTE_KEY_BINDINGS.get(value, "")
+            normalized_shortcut = (
+                self._normalize_note_binding_value(str(stored_shortcut)) if stored_shortcut else ""
+            )
+            sanitized_bindings[value] = normalized_shortcut or ""
+
+        self.note_options = sanitized_order
+        self.note_background_colors = sanitized_colors
+        self.note_key_bindings = sanitized_bindings
+
+        settings_payload: List[Dict[str, str]] = []
+        for value in sanitized_order:
+            entry: Dict[str, str] = {"value": value}
+            shortcut = sanitized_bindings.get(value, "")
+            if shortcut:
+                entry["shortcut"] = shortcut
+            color = sanitized_colors.get(value, "")
+            if color:
+                entry["color"] = color
+            settings_payload.append(entry)
+
+        self.config_data["combined_note_settings"] = settings_payload
         self.config_data["combined_note_key_bindings"] = {
-            option: self.note_key_bindings.get(option, "") for option in NOTE_OPTIONS
+            value: sanitized_bindings.get(value, "") for value in sanitized_order
         }
+
+    def _write_config(self) -> None:
+        self._update_note_settings_config_entries()
         self.config_data["combined_base_column_widths"] = {
             column: int(width)
             for column, width in self.combined_base_column_widths.items()
