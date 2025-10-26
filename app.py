@@ -386,6 +386,7 @@ class ReportApp:
         self.combined_preview_canvas: Optional[tk.Canvas] = None
         self.combined_preview_canvas_image: Optional[int] = None
         self.combined_preview_image: Optional[ImageTk.PhotoImage] = None
+        self.combined_split_pane: Optional[ttk.Panedwindow] = None
         self.combined_preview_detail_var = tk.StringVar(
             master=self.root, value="Select a row to view the PDF page."
         )
@@ -3197,6 +3198,7 @@ class ReportApp:
         self.combined_preview_canvas = None
         self.combined_preview_canvas_image = None
         self.combined_preview_image = None
+        self.combined_split_pane = None
         self.combined_preview_detail_var.set("Select a row to view the PDF page.")
 
     def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
@@ -3510,13 +3512,16 @@ class ReportApp:
         self.combined_note_cell_tags.clear()
         self.combined_type_cell_tags.clear()
         self.combined_category_cell_tags.clear()
-        result_container = ttk.Frame(self.combined_result_frame)
-        result_container.pack(fill=tk.BOTH, expand=True)
-        result_container.columnconfigure(0, weight=3)
-        result_container.columnconfigure(1, weight=2)
-        result_container.rowconfigure(0, weight=1)
+        split_pane = ttk.Panedwindow(self.combined_result_frame, orient=tk.HORIZONTAL)
+        split_pane.pack(fill=tk.BOTH, expand=True)
+        self.combined_split_pane = split_pane
 
-        tree_container = ttk.Frame(result_container)
+        table_container = ttk.Frame(split_pane)
+        table_container.columnconfigure(0, weight=1)
+        table_container.rowconfigure(0, weight=1)
+        split_pane.add(table_container, weight=1)
+
+        tree_container = ttk.Frame(table_container)
         tree_container.grid(row=0, column=0, sticky="nsew")
         tree_container.columnconfigure(0, weight=1)
         tree_container.rowconfigure(0, weight=1)
@@ -3533,10 +3538,39 @@ class ReportApp:
         x_scroll.grid(row=1, column=0, sticky="ew")
         tree.configure(xscrollcommand=x_scroll.set)
 
-        preview_container = ttk.Frame(result_container, padding=(12, 0))
-        preview_container.grid(row=0, column=1, sticky="nsew")
+        preview_container = ttk.Frame(split_pane, padding=(12, 0))
         preview_container.columnconfigure(0, weight=1)
         preview_container.rowconfigure(2, weight=1)
+        split_pane.add(preview_container, weight=1)
+
+        def _lock_split_position(event: tk.Event) -> None:  # type: ignore[override]
+            total_width = event.width
+            if total_width <= 2:
+                return
+            target = total_width // 2
+            try:
+                current = split_pane.sashpos(0)
+            except tk.TclError:
+                current = None
+            if current is None or abs(current - target) > 2:
+                try:
+                    split_pane.sashpos(0, target)
+                except tk.TclError:
+                    pass
+
+        split_pane.bind("<Configure>", _lock_split_position)
+
+        def _initial_split_adjustment() -> None:
+            total_width = split_pane.winfo_width()
+            if total_width <= 2:
+                return
+            target = total_width // 2
+            try:
+                split_pane.sashpos(0, target)
+            except tk.TclError:
+                pass
+
+        self.root.after_idle(_initial_split_adjustment)
         self.combined_preview_frame = preview_container
         ttk.Label(preview_container, text="PDF Preview", font=("TkDefaultFont", 10, "bold")).grid(
             row=0, column=0, sticky="w"
