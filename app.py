@@ -4797,7 +4797,10 @@ class ReportApp:
         delimiter = "\t" if "\t" in text else ","
         try:
             reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-            return [list(row) for row in reader]
+            return [
+                [self._normalize_scraped_cell(cell) for cell in row]
+                for row in reader
+            ]
         except Exception:
             return []
 
@@ -4852,7 +4855,7 @@ class ReportApp:
         cleaned = self._strip_code_fence(response)
         lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
         if not lines:
-            return [["response"], [""]]
+            return self._normalize_scraped_rows([["response"], [""]])
 
         if any("\t" in line for line in lines):
             rows: List[List[str]] = []
@@ -4867,7 +4870,7 @@ class ReportApp:
                     if len(row) < max_columns:
                         row.extend([""] * (max_columns - len(row)))
             if rows:
-                return rows
+                return self._normalize_scraped_rows(rows)
 
         if all(
             line.startswith("|") and line.endswith("|") and "|" in line.strip("|") for line in lines
@@ -4879,15 +4882,16 @@ class ReportApp:
                     continue
                 rows.append(segments)
             if rows:
-                return rows
+                return self._normalize_scraped_rows(rows)
 
         if any(
             "," in line and not line.startswith("#") for line in lines
         ):
             rows = [[segment.strip() for segment in line.split(",")] for line in lines]
-            return rows
+            return self._normalize_scraped_rows(rows)
 
-        return [["response"], *[[line] for line in lines]]
+        fallback = [["response"], *[[line] for line in lines]]
+        return self._normalize_scraped_rows(fallback)
 
     def _write_csv_rows(self, rows: List[List[str]], csv_path: Path) -> None:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4895,6 +4899,43 @@ class ReportApp:
             writer = csv.writer(fh)
             for row in rows:
                 writer.writerow(row)
+
+    def _normalize_scraped_rows(self, rows: List[List[Any]]) -> List[List[str]]:
+        normalized: List[List[str]] = []
+        for row in rows:
+            normalized.append([self._normalize_scraped_cell(cell) for cell in row])
+        return normalized
+
+    def _normalize_scraped_cell(self, value: Any) -> str:
+        if value is None:
+            return ""
+        original_text = str(value)
+        if not original_text:
+            return ""
+        trimmed = original_text.strip()
+        if not trimmed:
+            return ""
+
+        unwrapped = trimmed
+        changed = False
+        # remove balanced quoting repeatedly
+        while len(unwrapped) >= 2 and unwrapped[0] == unwrapped[-1] == '"':
+            inner = unwrapped[1:-1]
+            if inner == unwrapped:
+                break
+            unwrapped = inner
+            changed = True
+
+        collapsed = unwrapped.replace('""', '"')
+        if collapsed != unwrapped:
+            changed = True
+        collapsed_escaped = collapsed.replace('\\"', '"')
+        if collapsed_escaped != collapsed:
+            changed = True
+
+        if changed:
+            return collapsed_escaped
+        return trimmed
 
     def _ensure_unique_path(self, path: Path) -> Path:
         if not path.exists():
@@ -5494,7 +5535,7 @@ class ReportApp:
             if not rows:
                 rows = [["response"], [response_text]]
             sanitized_rows = [
-                ["" if cell is None else str(cell) for cell in row]
+                [self._normalize_scraped_cell(cell) for cell in row]
                 for row in rows
             ]
 
