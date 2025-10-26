@@ -767,6 +767,13 @@ class BarHoverHelper:
             bbox={"boxstyle": "round", "fc": "#f9f9f9", "ec": "#555555", "alpha": 0.95},
             arrowprops={"arrowstyle": "->", "color": "#555555"},
         )
+        # Ensure the tooltip annotation renders above all bar segments so it is always visible.
+        self._annotation.set_zorder(1000)
+        bbox_patch = self._annotation.get_bbox_patch()
+        if bbox_patch is not None:
+            bbox_patch.set_zorder(1000)
+        if hasattr(self._annotation, "arrow_patch") and self._annotation.arrow_patch is not None:
+            self._annotation.arrow_patch.set_zorder(1000)
         self._annotation.set_visible(False)
         self._canvas: Optional[FigureCanvasTkAgg] = None
         self._connection_id: Optional[int] = None
