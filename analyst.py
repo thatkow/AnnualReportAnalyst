@@ -24,6 +24,8 @@ import sys
 import webbrowser
 from datetime import datetime
 
+import requests
+
 import matplotlib
 
 import fitz  # PyMuPDF
@@ -471,6 +473,8 @@ class FinancePlotFrame(ttk.Frame):
         self._palette = list(cm.get_cmap("tab10").colors)
         self._context_menu: Optional[tk.Menu] = None
         self._context_metadata: Optional[Dict[str, Any]] = None
+        self._normalize_with_price = False
+        self._price_map: Dict[str, float] = {}
         self._render_empty()
 
     @staticmethod
@@ -511,6 +515,26 @@ class FinancePlotFrame(ttk.Frame):
             self._render()
         else:
             self._render_empty()
+
+    def set_price_normalization(
+        self, enabled: bool, price_map: Optional[Dict[str, float]] = None
+    ) -> None:
+        self._normalize_with_price = enabled
+        self._price_map = dict(price_map or {})
+        if self.datasets:
+            self._render()
+        else:
+            self._render_empty()
+
+    def _price_factor(self, company: str) -> float:
+        if not self._normalize_with_price:
+            return 1.0
+        price = self._price_map.get(company)
+        if price is None:
+            return 1.0
+        if price == 0:
+            return 1.0
+        return 1.0 / price
 
     def _next_color_pair(self) -> Tuple[str, str]:
         index = len(self._company_colors)
@@ -568,6 +592,7 @@ class FinancePlotFrame(ttk.Frame):
         self.datasets.clear()
         self.periods = None
         self._periods_by_key.clear()
+        self._price_map = {}
         self._render_empty()
 
     def add_company(self, company: str, dataset: FinanceDataset) -> bool:
@@ -615,6 +640,7 @@ class FinancePlotFrame(ttk.Frame):
                 finance_color, income_color = self._company_colors.setdefault(
                     company, self._next_color_pair()
                 )
+                normalization_factor = self._price_factor(company)
                 base_offset = start_offset + (2 * company_index) * bar_width
                 finance_positions = [
                     index + base_offset + 0.5 * bar_width for index in period_indices
@@ -636,6 +662,8 @@ class FinancePlotFrame(ttk.Frame):
                         else 0.0
                         for label in periods
                     ]
+                    if normalization_factor != 1.0:
+                        segment_values = [value * normalization_factor for value in segment_values]
                     for idx, value in enumerate(segment_values):
                         if value != 0:
                             finance_nonzero[idx] = True
@@ -693,6 +721,8 @@ class FinancePlotFrame(ttk.Frame):
                         else 0.0
                         for label in periods
                     ]
+                    if normalization_factor != 1.0:
+                        segment_values = [value * normalization_factor for value in segment_values]
                     for idx, value in enumerate(segment_values):
                         if value != 0:
                             income_nonzero[idx] = True
@@ -804,6 +834,9 @@ class FinancePlotFrame(ttk.Frame):
                 finance_totals, finance_presence = dataset.aggregate_totals(
                     periods, series=FinanceDataset.FINANCE_LABEL
                 )
+                normalization_factor = self._price_factor(company)
+                if normalization_factor != 1.0:
+                    finance_totals = [value * normalization_factor for value in finance_totals]
                 finance_points = [
                     value if finance_presence[idx] else math.nan
                     for idx, value in enumerate(finance_totals)
@@ -822,6 +855,8 @@ class FinancePlotFrame(ttk.Frame):
                 income_totals, income_presence = dataset.aggregate_totals(
                     periods, series=FinanceDataset.INCOME_LABEL
                 )
+                if normalization_factor != 1.0:
+                    income_totals = [value * normalization_factor for value in income_totals]
                 income_points = [
                     value if income_presence[idx] else math.nan
                     for idx, value in enumerate(income_totals)
@@ -847,7 +882,10 @@ class FinancePlotFrame(ttk.Frame):
                 self.axis.set_xticks([])
 
         self.axis.axhline(0, color="#333333", linewidth=0.8)
-        self.axis.set_ylabel("Value per Share")
+        if self._normalize_with_price:
+            self.axis.set_ylabel("Value per Share (Price-Normalized)")
+        else:
+            self.axis.set_ylabel("Value per Share")
         if self.datasets:
             companies_list = ", ".join(self.datasets.keys())
             self.axis.set_title(f"Finance vs Income Statement — {companies_list}")
@@ -1140,6 +1178,9 @@ class FinanceAnalystApp:
 
         self.company_var = tk.StringVar()
         self.mode_var = tk.StringVar(value=FinancePlotFrame.MODE_STACKED)
+        self.normalize_var = tk.BooleanVar(value=False)
+        self._price_cache: Dict[str, float] = {}
+        self._active_prices: Dict[str, float] = {}
 
         self._build_ui()
         self._refresh_company_list()
@@ -1181,13 +1222,129 @@ class FinanceAnalystApp:
             value=FinancePlotFrame.MODE_LINE,
             command=self._on_mode_change,
         ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Checkbutton(
+            mode_frame,
+            text="Normalize against stock price",
+            variable=self.normalize_var,
+            command=self._on_normalize_toggle,
+        ).pack(side=tk.LEFT, padx=(18, 0))
 
         self.plot_frame = FinancePlotFrame(outer)
         self.plot_frame.pack(fill=tk.BOTH, expand=True)
 
+        self.price_frame = ttk.Frame(outer)
+        self.price_label = ttk.Label(self.price_frame, text="", anchor="w")
+        self.price_label.pack(fill=tk.X)
+
     def _on_mode_change(self) -> None:
         mode = self.mode_var.get()
         self.plot_frame.set_display_mode(mode)
+        if self.normalize_var.get():
+            # Changing modes may redraw the plot; ensure price state is applied.
+            self._update_prices()
+
+    def _on_normalize_toggle(self) -> None:
+        if self.normalize_var.get():
+            self._update_prices()
+        else:
+            self._active_prices = {}
+            self.plot_frame.set_price_normalization(False, {})
+            self._update_price_display()
+
+    def _ensure_price_frame_visible(self) -> None:
+        if not self.price_frame.winfo_ismapped():
+            self.price_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(8, 0))
+
+    def _hide_price_frame(self) -> None:
+        if self.price_frame.winfo_ismapped():
+            self.price_frame.pack_forget()
+
+    def _update_price_display(self) -> None:
+        if self.normalize_var.get() and self._active_prices:
+            self._ensure_price_frame_visible()
+            parts = [
+                f"{company}: ${price:,.2f}" for company, price in self._active_prices.items()
+            ]
+            display_text = "Stock prices: " + " | ".join(parts)
+            self.price_label.configure(text=display_text)
+        elif self.normalize_var.get():
+            self._ensure_price_frame_visible()
+            self.price_label.configure(text="Stock prices: awaiting data...")
+        else:
+            self.price_label.configure(text="")
+            self._hide_price_frame()
+
+    def _fetch_stock_price(self, symbol: str) -> float:
+        if symbol in self._price_cache:
+            return self._price_cache[symbol]
+
+        url = "https://query1.finance.yahoo.com/v7/finance/quote"
+        params = {"symbols": symbol}
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise ValueError(f"Could not download price for {symbol}: {exc}") from exc
+        except ValueError as exc:
+            raise ValueError(
+                f"Received an invalid response while downloading price for {symbol}"
+            ) from exc
+
+        quote_response = payload.get("quoteResponse")
+        if not isinstance(quote_response, dict):
+            raise ValueError(f"No quote data returned for {symbol}")
+        results = quote_response.get("result")
+        if not isinstance(results, list) or not results:
+            raise ValueError(f"No quote data returned for {symbol}")
+        first_entry = results[0]
+        if not isinstance(first_entry, dict):
+            raise ValueError(f"Quote for {symbol} was malformed")
+        price_value = first_entry.get("regularMarketPrice")
+        try:
+            numeric_price = float(price_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Quote for {symbol} returned an invalid price value") from exc
+        if numeric_price <= 0:
+            raise ValueError(f"Quote for {symbol} returned a non-positive price")
+
+        self._price_cache[symbol] = numeric_price
+        return numeric_price
+
+    def _update_prices(self) -> bool:
+        if not self.normalize_var.get():
+            self._active_prices = {}
+            self.plot_frame.set_price_normalization(False, {})
+            self._update_price_display()
+            return True
+
+        companies = list(self.plot_frame.datasets.keys())
+        if not companies:
+            self._active_prices = {}
+            self.plot_frame.set_price_normalization(False, {})
+            self._update_price_display()
+            return True
+
+        price_map: Dict[str, float] = {}
+        for company in companies:
+            try:
+                price = self._price_cache[company]
+            except KeyError:
+                try:
+                    price = self._fetch_stock_price(company)
+                except ValueError as exc:
+                    messagebox.showerror("Stock Price", str(exc))
+                    self.normalize_var.set(False)
+                    self._active_prices = {}
+                    self.plot_frame.set_price_normalization(False, {})
+                    self._update_price_display()
+                    return False
+            price_map[company] = price
+
+        self._active_prices = price_map
+        self.plot_frame.set_price_normalization(True, price_map)
+        self._update_price_display()
+        return True
 
     def _maximize_window(self) -> None:
         try:
@@ -1245,6 +1402,8 @@ class FinanceAnalystApp:
             return
         if not added:
             messagebox.showinfo("Load Company", f"{company} data refreshed on the chart.")
+        if self.normalize_var.get():
+            self._update_prices()
 
 
 def main() -> None:
