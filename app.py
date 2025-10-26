@@ -323,7 +323,7 @@ class ReportApp:
         self.embedded = embedded
         if hasattr(self.root, "title") and not embedded:
             try:
-                self.root.title("thatkowfinance_accounter")
+                self.root.title("thatkowfinance_data")
             except tk.TclError:
                 pass
         self.folder_path = tk.StringVar(master=self.root)

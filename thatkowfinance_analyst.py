@@ -1,4 +1,4 @@
-"""Standalone finance analyst application for combined CSV summaries.
+"""Standalone thatkowfinance_analyst application for combined CSV summaries.
 
 This lightweight Tkinter application lets reviewers choose a company that has a
 ``combined.csv`` file in ``companies/<company>/``. When a company is opened, the
@@ -369,11 +369,11 @@ class BarHoverHelper:
 
 
 class FinanceAnalystApp:
-    """Main window controller for the thatkowfinance_data application."""
+    """Main window controller for the thatkowfinance_analyst application."""
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("thatkowfinance_data")
+        self.root.title("thatkowfinance_analyst")
         self._maximize_window()
         self.base_dir = Path(__file__).resolve().parent
         self.companies_dir = self.base_dir / "companies"
