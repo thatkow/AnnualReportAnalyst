@@ -1,4 +1,4 @@
-"""Standalone thatkowfinance_analyst application for combined CSV summaries.
+"""Standalone analyst application for combined CSV summaries.
 
 This lightweight Tkinter application lets reviewers choose a company that has a
 ``combined.csv`` file in ``companies/<company>/``. When a company is opened, the
@@ -305,6 +305,26 @@ class FinanceNotebook(ttk.Notebook):
             )
             hover_helper.add_segment(rectangles, segment, periods)
 
+        finance_totals = [pos + neg for pos, neg in zip(finance_pos_totals, finance_neg_totals)]
+        income_totals = [pos + neg for pos, neg in zip(income_pos_totals, income_neg_totals)]
+
+        axis.scatter(
+            finance_positions,
+            finance_totals,
+            color="#1f77b4",
+            marker="o",
+            s=36,
+            zorder=5,
+        )
+        axis.scatter(
+            income_positions,
+            income_totals,
+            color="#ff7f0e",
+            marker="o",
+            s=36,
+            zorder=5,
+        )
+
         axis.axhline(0, color="#333333", linewidth=0.8)
         axis.set_ylabel("Value")
         axis.set_title(f"{company} Finance vs Income Statement")
@@ -421,11 +441,11 @@ class BarHoverHelper:
 
 
 class FinanceAnalystApp:
-    """Main window controller for the thatkowfinance_analyst application."""
+    """Main window controller for the analyst application."""
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("thatkowfinance_analyst")
+        self.root.title("analyst")
         self._maximize_window()
         self.base_dir = Path(__file__).resolve().parent
         self.companies_dir = self.base_dir / "companies"
