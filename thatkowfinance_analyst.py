@@ -31,6 +31,11 @@ from tkinter import messagebox, ttk
 
 
 BASE_FIELDS = {"Type", "Category", "Item", "Note"}
+NOTE_ASIS = "asis"
+NOTE_NEGATED = "negated"
+NOTE_EXCLUDED = "excluded"
+NOTE_SHARE_COUNT = "share_count"
+VALID_NOTES = {NOTE_ASIS, NOTE_NEGATED, NOTE_EXCLUDED, NOTE_SHARE_COUNT}
 
 
 @dataclass
@@ -105,6 +110,9 @@ class FinanceDataset:
 
             category_index = header.index("Category") if "Category" in header else None
             item_index = header.index("Item") if "Item" in header else None
+            note_index = header.index("Note") if "Note" in header else None
+            if note_index is None:
+                raise ValueError("Combined CSV missing 'Note' column")
 
             data_indices: List[int] = []
             self.periods = []
@@ -118,10 +126,43 @@ class FinanceDataset:
                 raise ValueError("Combined CSV does not contain numeric data columns")
             self.finance_segments = []
             self.income_segments = []
+            share_counts: Optional[List[float]] = None
 
             for row_number, row in enumerate(reader, start=1):
-                if type_index >= len(row):
+                if note_index >= len(row):
+                    raise ValueError(f"Row {row_number} missing Note value")
+                note_value = row[note_index].strip()
+                if not note_value:
+                    raise ValueError(f"Row {row_number} missing Note value")
+                note_key = note_value.lower()
+                if note_key not in VALID_NOTES:
+                    raise ValueError(
+                        f"Row {row_number} has unsupported Note value '{note_value}'"
+                    )
+
+                values: List[float] = []
+                for column_index in data_indices:
+                    if column_index >= len(row):
+                        raise ValueError(
+                            f"Row {row_number} is missing data for period column index {column_index}"
+                        )
+                    values.append(self._clean_numeric(row[column_index]))
+
+                if note_key == NOTE_SHARE_COUNT:
+                    if share_counts is not None:
+                        raise ValueError("Multiple share_count rows found in combined.csv")
+                    share_counts = values
                     continue
+
+                if not any(value != 0 for value in values):
+                    continue
+
+                if note_key == NOTE_EXCLUDED:
+                    continue
+
+                if type_index >= len(row):
+                    raise ValueError(f"Row {row_number} missing Type value")
+
                 raw_type = row[type_index].strip()
                 type_value = raw_type.lower()
                 series_label = self._TYPE_TO_LABEL.get(type_value)
@@ -129,15 +170,8 @@ class FinanceDataset:
                     # Skip other sections such as Shares.
                     continue
 
-                values: List[float] = []
-                for column_index in data_indices:
-                    if column_index >= len(row):
-                        values.append(0.0)
-                        continue
-                    values.append(self._clean_numeric(row[column_index]))
-
-                if not any(value != 0 for value in values):
-                    continue
+                if note_key == NOTE_NEGATED:
+                    values = [-value for value in values]
 
                 category = (
                     row[category_index].strip()
@@ -174,6 +208,24 @@ class FinanceDataset:
                     else self.income_segments
                 )
                 target.append(segment)
+
+            if share_counts is None:
+                raise ValueError("combined.csv is missing a share_count row")
+
+            if len(share_counts) != len(self.periods):
+                raise ValueError("share_count row does not match the number of periods")
+
+            for index, count in enumerate(share_counts):
+                if count == 0:
+                    raise ValueError(
+                        f"share_count value for period '{self.periods[index]}' is zero"
+                    )
+
+            for segment in self.finance_segments + self.income_segments:
+                segment.values = [
+                    value / share_counts[idx]
+                    for idx, value in enumerate(segment.values)
+                ]
 
     def has_data(self) -> bool:
         return bool(self.finance_segments or self.income_segments)
