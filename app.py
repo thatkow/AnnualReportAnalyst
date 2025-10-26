@@ -323,7 +323,7 @@ class ReportApp:
         self.embedded = embedded
         if hasattr(self.root, "title") and not embedded:
             try:
-                self.root.title("Annual Report Analyst")
+                self.root.title("thatkowfinance_accounter")
             except tk.TclError:
                 pass
         self.folder_path = tk.StringVar(master=self.root)
@@ -3770,6 +3770,7 @@ class ReportApp:
             self._combined_blank_notification_shown = False
             return
         if notify_if_missing and not self._combined_blank_notification_shown and children:
+            self._export_final_combined_csv()
             messagebox.showinfo(
                 "Iterate blank notes only",
                 "All notes are currently assigned. Turn off the filter to review every row.",
@@ -4075,25 +4076,55 @@ class ReportApp:
         scrape_root = self.companies_dir / company / "openapiscrape"
         combined_path = scrape_root / "combined.csv"
         try:
-            csv_header: List[str] = []
-            for column_name in self.combined_ordered_columns:
-                if column_name in {"Type", "Category", "Item", "Note"}:
-                    csv_header.append(column_name)
-                elif "." in column_name:
-                    csv_header.append(column_name.split(".", 1)[1])
-                else:
-                    csv_header.append(column_name)
-            csv_rows = [csv_header]
-            for record in self.combined_all_records:
-                csv_rows.append(
-                    [record.get(column_name, "") for column_name in self.combined_ordered_columns]
+            csv_rows = self._build_combined_csv_rows()
+            if not csv_rows:
+                messagebox.showinfo(
+                    "Save Combined CSV",
+                    "No combined data is currently available to save.",
                 )
+                return
             combined_path.parent.mkdir(parents=True, exist_ok=True)
             self._write_csv_rows(csv_rows, combined_path)
         except Exception as exc:
             messagebox.showwarning("Save Combined CSV", f"Could not save the combined CSV: {exc}")
             return
         messagebox.showinfo("Save Combined CSV", f"Combined CSV saved to:\n{combined_path}")
+
+    def _build_combined_csv_rows(self) -> Optional[List[List[str]]]:
+        if not self.combined_all_records or not self.combined_ordered_columns:
+            return None
+        csv_header: List[str] = []
+        for column_name in self.combined_ordered_columns:
+            if column_name in {"Type", "Category", "Item", "Note"}:
+                csv_header.append(column_name)
+            elif "." in column_name:
+                csv_header.append(column_name.split(".", 1)[1])
+            else:
+                csv_header.append(column_name)
+        csv_rows: List[List[str]] = [csv_header]
+        for record in self.combined_all_records:
+            csv_rows.append(
+                [record.get(column_name, "") for column_name in self.combined_ordered_columns]
+            )
+        return csv_rows
+
+    def _export_final_combined_csv(self) -> None:
+        if not self.combined_all_records or not self.combined_ordered_columns:
+            return
+        company = self.company_var.get().strip()
+        if not company:
+            return
+        csv_rows = self._build_combined_csv_rows()
+        if not csv_rows:
+            return
+        company_root = self.companies_dir / company
+        final_path = company_root / "combined.csv"
+        try:
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            self._write_csv_rows(csv_rows, final_path)
+            logger.info("Exported final combined CSV to %s", final_path)
+        except Exception:
+            logger.exception("Failed to export final combined CSV to company root")
 
     def _clear_combined_preview(self, message: Optional[str] = None) -> None:
         canvas = self.combined_preview_canvas
