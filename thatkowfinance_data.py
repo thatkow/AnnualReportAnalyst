@@ -165,11 +165,11 @@ class FinanceNotebook(ttk.Notebook):
 
 
 class FinanceAnalystApp:
-    """Main window controller for the thatkowfinanace_analyst application."""
+    """Main window controller for the thatkowfinance_data application."""
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("thatkowfinanace_analyst")
+        self.root.title("thatkowfinance_data")
         self.base_dir = Path(__file__).resolve().parent
         self.companies_dir = self.base_dir / "companies"
 
