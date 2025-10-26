@@ -2154,11 +2154,6 @@ class ReportApp:
                 tree.item(item_id, values=values)
             self._apply_note_value_tag(item_id, note_value)
         self._destroy_note_editor()
-        if self.combined_show_blank_notes_var.get():
-            try:
-                self.root.after_idle(self._update_combined_tree_display)
-            except tk.TclError:
-                pass
 
     def _on_combined_tree_click(self, event: tk.Event) -> None:  # type: ignore[override]
         tree = self.combined_result_tree
@@ -2270,6 +2265,16 @@ class ReportApp:
     def _on_combined_tree_tab(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
         return self._move_combined_selection(1)
 
+    def _is_blank_note_tree_item(self, tree: ttk.Treeview, item_id: str) -> bool:
+        if not self.combined_ordered_columns or "Note" not in self.combined_ordered_columns:
+            return False
+        value = tree.set(item_id, "Note")
+        if isinstance(value, str):
+            normalized = value.strip()
+        else:
+            normalized = str(value or "").strip()
+        return normalized == ""
+
     def _move_combined_selection(self, offset: int) -> Optional[str]:
         tree = self.combined_result_tree
         if tree is None:
@@ -2282,16 +2287,37 @@ class ReportApp:
         children_list = list(children)
         if not children_list:
             return "break"
-        try:
-            index = children_list.index(current_item)
-        except ValueError:
-            index = 0 if offset >= 0 else len(children_list) - 1
-        new_index = index + offset
-        if new_index < 0:
-            new_index = 0
-        elif new_index >= len(children_list):
-            new_index = len(children_list) - 1
-        new_item = children_list[new_index]
+        if offset == 0:
+            return "break"
+        iterate_blank_only = bool(self.combined_show_blank_notes_var.get())
+        if iterate_blank_only and self.combined_ordered_columns and "Note" in self.combined_ordered_columns:
+            direction = 1 if offset >= 0 else -1
+            if current_item in children_list:
+                start_index = children_list.index(current_item)
+            else:
+                start_index = -1 if direction > 0 else len(children_list)
+            target_item: Optional[str] = None
+            index = start_index + direction
+            while 0 <= index < len(children_list):
+                candidate = children_list[index]
+                if self._is_blank_note_tree_item(tree, candidate):
+                    target_item = candidate
+                    break
+                index += direction
+            if target_item is None:
+                return "break"
+            new_item = target_item
+        else:
+            try:
+                index = children_list.index(current_item)
+            except ValueError:
+                index = 0 if offset >= 0 else len(children_list) - 1
+            new_index = index + offset
+            if new_index < 0:
+                new_index = 0
+            elif new_index >= len(children_list):
+                new_index = len(children_list) - 1
+            new_item = children_list[new_index]
         tree.selection_set(new_item)
         tree.focus(new_item)
         tree.see(new_item)
@@ -2499,11 +2525,6 @@ class ReportApp:
             self.note_assignments.pop(key, None)
         self._update_combined_record_note_value(key, normalized_value)
         self._write_note_assignments()
-        if self.combined_show_blank_notes_var.get():
-            try:
-                self.root.after_idle(self._update_combined_tree_display)
-            except tk.TclError:
-                pass
 
     def _apply_saved_selection(self, entry: PDFEntry) -> None:
         key = entry.path.name
@@ -3508,18 +3529,10 @@ class ReportApp:
     def _filter_combined_records(self, records: List[Dict[str, str]]) -> List[Dict[str, str]]:
         if not records:
             return []
-        if not self.combined_show_blank_notes_var.get():
-            return records
-        filtered: List[Dict[str, str]] = []
-        for record in records:
-            note_value = record.get("Note", "")
-            if isinstance(note_value, str):
-                normalized = note_value.strip()
-            else:
-                normalized = str(note_value or "").strip()
-            if not normalized:
-                filtered.append(record)
-        return filtered
+        # The combined table currently displays all rows regardless of the
+        # blank-note iteration toggle; navigation handles the blank-only
+        # workflow.
+        return records
 
     def _normalize_type_item_category_key(
         self, type_value: str, item_value: str, category_value: str
@@ -3717,7 +3730,22 @@ class ReportApp:
     def _on_combined_show_blank_notes_toggle(self) -> None:
         if not self.combined_ordered_columns:
             return
-        self._update_combined_tree_display()
+        tree = self.combined_result_tree
+        if tree is None:
+            return
+        self._destroy_note_editor()
+        if not self.combined_show_blank_notes_var.get():
+            return
+        selection = tree.selection()
+        current_item = selection[0] if selection else tree.focus()
+        if current_item and self._is_blank_note_tree_item(tree, current_item):
+            return
+        for item_id in tree.get_children(""):
+            if self._is_blank_note_tree_item(tree, item_id):
+                tree.selection_set(item_id)
+                tree.focus(item_id)
+                tree.see(item_id)
+                break
 
     def _render_combined_tree(
         self,
@@ -3753,7 +3781,7 @@ class ReportApp:
 
         ttk.Checkbutton(
             controls_frame,
-            text="Show only blank notes",
+            text="Iterate blank notes only",
             variable=self.combined_show_blank_notes_var,
             command=self._on_combined_show_blank_notes_toggle,
         ).grid(row=0, column=0, sticky="w")
