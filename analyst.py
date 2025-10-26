@@ -838,7 +838,7 @@ class FinancePlotFrame(ttk.Frame):
                 if normalization_factor != 1.0:
                     finance_totals = [value * normalization_factor for value in finance_totals]
                 finance_points = [
-                    value if finance_presence[idx] else math.nan
+                    value if finance_presence[idx] else 0.0
                     for idx, value in enumerate(finance_totals)
                 ]
                 if any(finance_presence):
@@ -860,7 +860,7 @@ class FinancePlotFrame(ttk.Frame):
                 if normalization_factor != 1.0:
                     income_totals = [value * normalization_factor for value in income_totals]
                 income_points = [
-                    value if income_presence[idx] else math.nan
+                    value if income_presence[idx] else 0.0
                     for idx, value in enumerate(income_totals)
                 ]
                 if any(income_presence):
