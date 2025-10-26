@@ -54,6 +54,7 @@ class RowSegment:
     type_value: str
     category: str
     item: str
+    periods: List[str]
     values: List[float]
     sources: Dict[str, "SegmentSource"] = field(default_factory=dict)
 
@@ -236,6 +237,7 @@ class FinanceDataset:
                     type_value=raw_type,
                     category=category,
                     item=item,
+                    periods=list(self.periods),
                     values=values,
                 )
                 target = (
@@ -275,14 +277,16 @@ class FinanceDataset:
                 ]
                 self.periods = [self.periods[idx] for idx in sort_indices]
                 share_counts = [share_counts[idx] for idx in sort_indices]
-                for segment in self.finance_segments + self.income_segments:
-                    segment.values = [segment.values[idx] for idx in sort_indices]
+            for segment in self.finance_segments + self.income_segments:
+                segment.values = [segment.values[idx] for idx in sort_indices]
+                segment.periods = [self.periods[idx] for idx in sort_indices]
 
             for segment in self.finance_segments + self.income_segments:
                 segment.values = [
                     value / share_counts[idx]
                     for idx, value in enumerate(segment.values)
                 ]
+                segment.periods = list(self.periods)
 
     def _load_metadata(self) -> None:
         metadata_path = self.path.with_name("combined_metadata.json")
@@ -371,6 +375,7 @@ class FinancePlotFrame(ttk.Frame):
         self.hover_helper.attach(self.canvas, context_callback=self._show_context_menu)
         self.datasets: "OrderedDict[str, FinanceDataset]" = OrderedDict()
         self.periods: Optional[List[str]] = None
+        self._periods_by_key: "OrderedDict[Tuple[str, str, str], List[str]]" = OrderedDict()
         self._company_colors: Dict[str, Tuple[str, str]] = {}
         self._palette = list(cm.get_cmap("tab10").colors)
         self._context_menu: Optional[tk.Menu] = None
@@ -432,18 +437,35 @@ class FinancePlotFrame(ttk.Frame):
             ordered_unique.append(label)
         return FinancePlotFrame._sort_periods(ordered_unique)
 
+    def _register_periods(self, dataset: FinanceDataset) -> None:
+        for segment in dataset.finance_segments + dataset.income_segments:
+            key_tuple = (segment.type_value, segment.category, segment.item)
+            existing = self._periods_by_key.get(key_tuple, [])
+            merged = self._merge_periods(existing, segment.periods)
+            self._periods_by_key[key_tuple] = merged
+
+    def _rebuild_period_sequence(self) -> List[str]:
+        if not self._periods_by_key:
+            return []
+        ordered: List[str] = []
+        seen = set()
+        for period_list in self._periods_by_key.values():
+            for label in period_list:
+                if label in seen:
+                    continue
+                seen.add(label)
+                ordered.append(label)
+        return self._sort_periods(ordered)
+
     def clear_companies(self) -> None:
         self.datasets.clear()
         self.periods = None
+        self._periods_by_key.clear()
         self._render_empty()
 
     def add_company(self, company: str, dataset: FinanceDataset) -> bool:
-        if self.periods is None:
-            self.periods = self._sort_periods(list(dataset.periods))
-        else:
-            merged = self._merge_periods(self.periods, dataset.periods)
-            if merged != self.periods:
-                self.periods = merged
+        self._register_periods(dataset)
+        self.periods = self._rebuild_period_sequence()
 
         is_new_company = company not in self.datasets
         if is_new_company and company not in self._company_colors:
@@ -488,12 +510,11 @@ class FinancePlotFrame(ttk.Frame):
             income_pos_totals = [0.0] * len(periods)
             income_neg_totals = [0.0] * len(periods)
 
-            dataset_period_index = {label: idx for idx, label in enumerate(dataset.periods)}
-
             for segment in dataset.finance_segments:
+                segment_period_index = {label: idx for idx, label in enumerate(segment.periods)}
                 segment_values = [
-                    segment.values[dataset_period_index[label]]
-                    if label in dataset_period_index and dataset_period_index[label] < len(segment.values)
+                    segment.values[segment_period_index[label]]
+                    if label in segment_period_index and segment_period_index[label] < len(segment.values)
                     else 0.0
                     for label in periods
                 ]
@@ -518,9 +539,10 @@ class FinancePlotFrame(ttk.Frame):
                 )
 
             for segment in dataset.income_segments:
+                segment_period_index = {label: idx for idx, label in enumerate(segment.periods)}
                 segment_values = [
-                    segment.values[dataset_period_index[label]]
-                    if label in dataset_period_index and dataset_period_index[label] < len(segment.values)
+                    segment.values[segment_period_index[label]]
+                    if label in segment_period_index and segment_period_index[label] < len(segment.values)
                     else 0.0
                     for label in periods
                 ]
