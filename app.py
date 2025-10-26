@@ -344,9 +344,11 @@ class ReportApp:
         self.year_pattern_text: Optional[tk.Text] = None
         self.year_case_insensitive_var = tk.BooleanVar(master=self.root, value=True)
         self.year_whitespace_as_space_var = tk.BooleanVar(master=self.root, value=True)
-        self.companies_dir = Path(__file__).resolve().parent / "companies"
-        self.prompts_dir = Path(__file__).resolve().parent / "prompts"
-        self.pattern_config_path = Path(__file__).resolve().parent / "pattern_config.json"
+        self.app_root = Path(__file__).resolve().parent
+        self.companies_dir = self.app_root / "companies"
+        self.prompts_dir = self.app_root / "prompts"
+        self.pattern_config_path = self.app_root / "pattern_config.json"
+        self.type_item_category_path = self.app_root / "type_item_category.csv"
         self.config_data: Dict[str, Any] = {}
         self.last_company_preference: str = ""
         self._config_loaded = False
@@ -787,6 +789,10 @@ class ReportApp:
         menubar = tk.Menu(self.root)
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(label="New Company", command=self.create_company)
+        file_menu.add_command(
+            label="Append Type/Item/Category CSV",
+            command=self._append_type_item_category_csv,
+        )
         menubar.add_cascade(label="File", menu=file_menu)
 
         configuration_menu = tk.Menu(menubar, tearoff=False)
@@ -3482,6 +3488,186 @@ class ReportApp:
                 filtered.append(record)
         return filtered
 
+    def _normalize_type_item_category_key(
+        self, type_value: str, item_value: str, category_value: str
+    ) -> Tuple[str, str, str]:
+        return (
+            str(type_value or "").strip().casefold(),
+            str(item_value or "").strip().casefold(),
+            str(category_value or "").strip().casefold(),
+        )
+
+    def _load_type_item_category_entries(self) -> List[Tuple[str, str, str]]:
+        path = getattr(self, "type_item_category_path", None)
+        if path is None:
+            return []
+        entries: List[Tuple[str, str, str]] = []
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as fh:
+                reader = csv.reader(fh)
+                header_parsed = False
+                type_idx: Optional[int] = None
+                item_idx: Optional[int] = None
+                category_idx: Optional[int] = None
+                for row in reader:
+                    if not row:
+                        continue
+                    trimmed = [cell.strip() for cell in row]
+                    if not any(trimmed):
+                        continue
+                    if not header_parsed:
+                        lowered = [cell.lower() for cell in trimmed]
+                        try:
+                            type_idx = lowered.index("type")
+                            item_idx = lowered.index("item")
+                            category_idx = lowered.index("category")
+                        except ValueError:
+                            type_idx = 0 if len(trimmed) > 0 else None
+                            item_idx = 1 if len(trimmed) > 1 else None
+                            category_idx = 2 if len(trimmed) > 2 else None
+                            header_parsed = True
+                        else:
+                            header_parsed = True
+                            continue
+                    if type_idx is None or item_idx is None or category_idx is None:
+                        continue
+                    if (
+                        type_idx >= len(trimmed)
+                        or item_idx >= len(trimmed)
+                        or category_idx >= len(trimmed)
+                    ):
+                        continue
+                    type_value = trimmed[type_idx]
+                    item_value = trimmed[item_idx]
+                    category_value = trimmed[category_idx]
+                    if not (type_value or item_value or category_value):
+                        continue
+                    entries.append((type_value, item_value, category_value))
+        except FileNotFoundError:
+            return []
+        except Exception as exc:
+            logger.warning("Could not read %s: %s", path, exc)
+        return entries
+
+    def _load_type_item_category_order_map(self) -> Dict[Tuple[str, str, str], int]:
+        entries = self._load_type_item_category_entries()
+        order: Dict[Tuple[str, str, str], int] = {}
+        for index, (type_value, item_value, category_value) in enumerate(entries):
+            key = self._normalize_type_item_category_key(type_value, item_value, category_value)
+            if key not in order:
+                order[key] = index
+        return order
+
+    def _sort_combined_records(self, records: List[Dict[str, str]]) -> None:
+        if not records:
+            return
+        order_map = self._load_type_item_category_order_map()
+        type_priority = {name: index for index, name in enumerate(COLUMNS)}
+        max_type_priority = len(type_priority)
+
+        def _sort_key(record: Dict[str, str]) -> Tuple[Any, ...]:
+            type_value = str(record.get("Type", "") or "").strip()
+            category_value = str(record.get("Category", "") or "").strip()
+            item_value = str(record.get("Item", "") or "").strip()
+            normalized = self._normalize_type_item_category_key(
+                type_value, item_value, category_value
+            )
+            order_index = order_map.get(normalized)
+            if order_index is not None:
+                return (0, order_index)
+            return (
+                1,
+                type_priority.get(type_value, max_type_priority),
+                category_value.casefold(),
+                item_value.casefold(),
+                type_value.casefold(),
+            )
+
+        records.sort(key=_sort_key)
+
+    def _append_type_item_category_csv(self) -> None:
+        if not self.combined_all_records:
+            messagebox.showinfo(
+                "Type/Item/Category CSV",
+                "Build the combined table before appending Type/Item/Category entries.",
+            )
+            return
+
+        current_records = self._filter_combined_records(self.combined_all_records)
+        unique_records: List[Tuple[str, str, str]] = []
+        seen_keys: Set[Tuple[str, str, str]] = set()
+        for record in current_records:
+            type_value = str(record.get("Type", "") or "").strip()
+            category_value = str(record.get("Category", "") or "").strip()
+            item_value = str(record.get("Item", "") or "").strip()
+            if not (type_value and category_value and item_value):
+                continue
+            normalized = self._normalize_type_item_category_key(
+                type_value, item_value, category_value
+            )
+            if normalized in seen_keys:
+                continue
+            seen_keys.add(normalized)
+            unique_records.append((type_value, item_value, category_value))
+
+        if not unique_records:
+            messagebox.showinfo(
+                "Type/Item/Category CSV",
+                "No complete Type/Item/Category values were found in the current combined table.",
+            )
+            return
+
+        existing_entries = self._load_type_item_category_entries()
+        existing_keys = {
+            self._normalize_type_item_category_key(type_value, item_value, category_value)
+            for type_value, item_value, category_value in existing_entries
+        }
+        new_entries = [
+            entry
+            for entry in unique_records
+            if self._normalize_type_item_category_key(*entry) not in existing_keys
+        ]
+
+        path = self.type_item_category_path
+        appended = 0
+        if new_entries:
+            try:
+                write_header = not path.exists() or path.stat().st_size == 0
+            except OSError:
+                write_header = True
+            try:
+                with path.open("a", encoding="utf-8", newline="") as fh:
+                    writer = csv.writer(fh)
+                    if write_header:
+                        writer.writerow(["Type", "Item", "Category"])
+                    for type_value, item_value, category_value in new_entries:
+                        writer.writerow([type_value, item_value, category_value])
+                        appended += 1
+            except Exception as exc:
+                messagebox.showerror(
+                    "Type/Item/Category CSV",
+                    f"Could not append new entries: {exc}",
+                )
+                return
+            logger.info(
+                "Appended %d Type/Item/Category combination(s) to %s",
+                appended,
+                path,
+            )
+        else:
+            logger.info("No new Type/Item/Category combinations to append.")
+
+        if appended:
+            self._sort_combined_records(self.combined_all_records)
+            if self.combined_ordered_columns:
+                self._update_combined_tree_display()
+            message = f"Appended {appended} new combination(s) to {path.name}."
+        else:
+            message = "No new Type/Item/Category combinations were found."
+
+        messagebox.showinfo("Type/Item/Category CSV", message + " Opening the file for review.")
+        self._open_in_file_manager(path)
+
     def _update_combined_tree_display(self) -> None:
         if not self.combined_ordered_columns:
             return
@@ -3899,6 +4085,8 @@ class ReportApp:
                         (str(category), str(category_value), str(item_value))
                     ] = ordered_sources
                 combined_records.append(record)
+
+        self._sort_combined_records(combined_records)
 
         logger.info(
             "Combined result set -> %d records with %d columns",
