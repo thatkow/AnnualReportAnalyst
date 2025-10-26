@@ -349,6 +349,8 @@ class ReportApp:
         self.combined_note_editor_item: Optional[str] = None
         self.combined_ordered_columns: List[str] = []
         self.combined_column_defaults: Dict[Tuple[Path, int], str] = {}
+        self.combined_labels_by_pdf: Dict[Path, List[str]] = {}
+        self.combined_column_name_map: Dict[str, Tuple[Path, str]] = {}
         self.auto_size_dates_button: Optional[ttk.Button] = None
         self.note_assignments: Dict[Tuple[str, str, str], str] = {}
         self.note_assignments_path: Optional[Path] = None
@@ -1441,6 +1443,9 @@ class ReportApp:
         return "break"
 
     def _on_combined_tree_tab(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
+        return self._move_combined_selection(1)
+
+    def _move_combined_selection(self, offset: int) -> Optional[str]:
         tree = self.combined_result_tree
         if tree is None:
             return None
@@ -1450,19 +1455,109 @@ class ReportApp:
         selection = tree.selection()
         current_item = selection[0] if selection else tree.focus()
         children_list = list(children)
-        next_item: Optional[str] = None
-        if current_item and current_item in children_list:
-            index = children_list.index(current_item)
-            if index + 1 < len(children_list):
-                next_item = children_list[index + 1]
-        else:
-            next_item = children_list[0] if children_list else None
-        if next_item is None:
+        if not children_list:
             return "break"
-        tree.selection_set(next_item)
-        tree.focus(next_item)
-        tree.see(next_item)
+        try:
+            index = children_list.index(current_item)
+        except ValueError:
+            index = 0 if offset >= 0 else len(children_list) - 1
+        new_index = index + offset
+        if new_index < 0:
+            new_index = 0
+        elif new_index >= len(children_list):
+            new_index = len(children_list) - 1
+        new_item = children_list[new_index]
+        tree.selection_set(new_item)
+        tree.focus(new_item)
+        tree.see(new_item)
         self._destroy_note_editor()
+        return "break"
+
+    def _on_combined_tree_shift_tab(self, _: tk.Event) -> Optional[str]:  # type: ignore[override]
+        return self._move_combined_selection(-1)
+
+    def _on_combined_tree_page(self, offset: int) -> Optional[str]:
+        step = offset if offset != 0 else 0
+        if step == 0:
+            return "break"
+        return self._move_combined_selection(step)
+
+    def _on_combined_tree_return(self, _: tk.Event) -> Optional[str]:  # type: ignore[override]
+        tree = self.combined_result_tree
+        if tree is None or not self.combined_ordered_columns:
+            return "break"
+        self._destroy_note_editor()
+        selection = tree.selection()
+        item_id = selection[0] if selection else tree.focus()
+        if not item_id:
+            return "break"
+        pdf_entries: List[Tuple[str, str, str]] = []
+        row_type = tree.set(item_id, "Type")
+        row_category = tree.set(item_id, "Category")
+        row_item = tree.set(item_id, "Item")
+        for column_name in self.combined_ordered_columns:
+            if column_name in {"Type", "Category", "Item", "Note"}:
+                continue
+            value_text = tree.set(item_id, column_name) or ""
+            if not str(value_text).strip():
+                continue
+            mapping = self.combined_column_name_map.get(column_name)
+            if not mapping:
+                continue
+            pdf_path, label_value = mapping
+            pdf_entries.append((pdf_path.stem, label_value, str(value_text)))
+
+        if not pdf_entries:
+            messagebox.showinfo(
+                "Row Values",
+                "No PDF columns contain a value for the selected row.",
+            )
+            return "break"
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Row PDF Values")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.focus_set()
+
+        def _close() -> None:
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", _close)
+        dialog.bind("<Escape>", lambda _e: (_close(), "break"))
+
+        header_frame = ttk.Frame(dialog, padding=(12, 12, 12, 4))
+        header_frame.pack(fill=tk.X)
+        ttk.Label(
+            header_frame,
+            text=f"Type: {row_type or ''} | Category: {row_category or ''} | Item: {row_item or ''}",
+            font=("TkDefaultFont", 10, "bold"),
+        ).pack(anchor="w")
+
+        tree_frame = ttk.Frame(dialog, padding=(12, 0, 12, 0))
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+        value_tree = ttk.Treeview(tree_frame, columns=("PDF", "Column", "Value"), show="headings", height=len(pdf_entries))
+        value_tree.pack(fill=tk.BOTH, expand=True)
+        for col_name, heading_text, anchor in (
+            ("PDF", "PDF", "w"),
+            ("Column", "Column", "w"),
+            ("Value", "Value", "e"),
+        ):
+            value_tree.heading(col_name, text=heading_text)
+            value_tree.column(col_name, anchor=anchor, stretch=True)
+        for pdf_label, column_label, value_text in pdf_entries:
+            value_tree.insert("", tk.END, values=(pdf_label, column_label, value_text))
+
+        button_frame = ttk.Frame(dialog, padding=(12, 8, 12, 12))
+        button_frame.pack(fill=tk.X)
+        ttk.Button(button_frame, text="Close", command=_close).pack(side=tk.RIGHT)
+
+        dialog.wait_visibility()
+        dialog.focus_set()
         return "break"
 
     def _set_note_value(self, item_id: str, value: str) -> None:
@@ -2186,6 +2281,8 @@ class ReportApp:
         self.combined_note_column_id = None
         self.combined_ordered_columns = []
         self.combined_column_defaults.clear()
+        self.combined_labels_by_pdf.clear()
+        self.combined_column_name_map.clear()
         if self.auto_size_dates_button is not None:
             self.auto_size_dates_button.state(["disabled"])
 
@@ -2441,6 +2538,7 @@ class ReportApp:
 
         ordered_columns = ["Type", "Category", "Item", "Note"]
         column_labels_by_pdf: Dict[Path, List[str]] = {}
+        column_name_map: Dict[str, Tuple[Path, str]] = {}
         for path in self.combined_pdf_order:
             pdf_label = path.stem
             labels: List[str] = []
@@ -2451,8 +2549,13 @@ class ReportApp:
                 if not label_value:
                     label_value = self.combined_column_defaults.get(key, f"Value {position + 1}")
                 labels.append(label_value)
-                ordered_columns.append(f"{pdf_label}.{label_value}")
+                column_name = f"{pdf_label}.{label_value}"
+                ordered_columns.append(column_name)
+                column_name_map[column_name] = (path, label_value)
             column_labels_by_pdf[path] = labels
+
+        self.combined_labels_by_pdf = {path: labels[:] for path, labels in column_labels_by_pdf.items()}
+        self.combined_column_name_map = column_name_map
 
         record_map: Dict[Tuple[str, str, str], Dict[Tuple[Path, int], str]] = {}
 
@@ -2570,6 +2673,11 @@ class ReportApp:
         tree.bind("<Configure>", lambda _e: self._destroy_note_editor())
         tree.bind("<<TreeviewSelect>>", lambda _e: self._destroy_note_editor())
         tree.bind("<Tab>", self._on_combined_tree_tab)
+        tree.bind("<Shift-Tab>", self._on_combined_tree_shift_tab)
+        tree.bind("<ISO_Left_Tab>", self._on_combined_tree_shift_tab)
+        tree.bind("<Prior>", lambda _e: self._on_combined_tree_page(-10))
+        tree.bind("<Next>", lambda _e: self._on_combined_tree_page(10))
+        tree.bind("<Return>", self._on_combined_tree_return)
         tree.bind("<Key>", self._on_combined_tree_key)
 
         def _tree_mousewheel(event: tk.Event) -> str:  # type: ignore[override]
