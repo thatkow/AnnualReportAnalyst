@@ -327,7 +327,7 @@ class ReportApp:
         self.company_frames: Dict[str, ttk.Frame] = {}
         self.downloads_dir_var = tk.StringVar(master=self.root)
         self.recent_download_minutes_var = tk.IntVar(master=self.root, value=5)
-        self.combined_column_label_vars: Dict[int, tk.StringVar] = {}
+        self.combined_column_label_vars: Dict[Tuple[Path, int], tk.StringVar] = {}
         self.combined_csv_sources: Dict[Tuple[Path, str], Dict[str, Any]] = {}
         self.combined_pdf_order: List[Path] = []
         self.combined_result_tree: Optional[ttk.Treeview] = None
@@ -337,6 +337,7 @@ class ReportApp:
         self.combined_note_column_id: Optional[str] = None
         self.combined_note_editor_item: Optional[str] = None
         self.combined_ordered_columns: List[str] = []
+        self.combined_column_defaults: Dict[Tuple[Path, int], str] = {}
         self.note_assignments: Dict[Tuple[str, str, str], str] = {}
         self.note_assignments_path: Optional[Path] = None
 
@@ -1932,6 +1933,7 @@ class ReportApp:
         self.combined_note_record_keys.clear()
         self.combined_note_column_id = None
         self.combined_ordered_columns = []
+        self.combined_column_defaults.clear()
 
     def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
         if not hasattr(self, "combined_header_frame"):
@@ -1961,7 +1963,6 @@ class ReportApp:
         type_header_map: Dict[str, Dict[Path, Dict[str, Any]]] = {}
         type_heading_labels: Dict[str, Tuple[str, str]] = {}
         pdf_entries_with_data: List[PDFEntry] = []
-        default_headers: Optional[List[str]] = None
         max_data_columns = 0
 
         for entry in self.pdf_entries:
@@ -2036,8 +2037,10 @@ class ReportApp:
                 )
                 if category not in type_heading_labels:
                     type_heading_labels[category] = (category_heading_text, item_heading_text)
-                if default_headers is None and display_headers:
-                    default_headers = display_headers[:]
+                for idx, header_text in enumerate(display_headers):
+                    key = (entry.path, idx)
+                    if header_text.strip():
+                        self.combined_column_defaults.setdefault(key, header_text)
                 max_data_columns = max(max_data_columns, len(display_headers))
                 entry_has_data = True
             if entry_has_data:
@@ -2053,21 +2056,22 @@ class ReportApp:
         self.combined_pdf_order = [entry.path for entry in pdf_entries_with_data]
         self.combined_max_data_columns = max_data_columns
 
-        existing_indices = set(self.combined_column_label_vars.keys())
-        for idx in range(max_data_columns):
-            default_text = ""
-            if default_headers and idx < len(default_headers):
-                default_text = default_headers[idx]
-            if not default_text:
-                default_text = f"Value {idx + 1}"
-            var = self.combined_column_label_vars.get(idx)
-            if var is None:
-                self.combined_column_label_vars[idx] = tk.StringVar(master=self.root, value=default_text)
-            elif not var.get().strip():
-                var.set(default_text)
-        for stale_idx in list(existing_indices):
-            if stale_idx >= max_data_columns:
-                self.combined_column_label_vars.pop(stale_idx, None)
+        desired_keys = set()
+        for path in self.combined_pdf_order:
+            for idx in range(max_data_columns):
+                key = (path, idx)
+                desired_keys.add(key)
+                default_text = self.combined_column_defaults.get(key, "")
+                if not default_text:
+                    default_text = f"Value {idx + 1}"
+                var = self.combined_column_label_vars.get(key)
+                if var is None:
+                    self.combined_column_label_vars[key] = tk.StringVar(master=self.root, value=default_text)
+                elif not var.get().strip():
+                    var.set(default_text)
+        for stale_key in list(self.combined_column_label_vars.keys()):
+            if stale_key not in desired_keys:
+                self.combined_column_label_vars.pop(stale_key, None)
 
         base_columns = ["Type", "Category", "Item"]
         pdf_count = len(self.combined_pdf_order)
@@ -2101,7 +2105,8 @@ class ReportApp:
             for pdf_path in self.combined_pdf_order:
                 pdf_label = pdf_path.stem
                 for idx in range(max_data_columns):
-                    var = self.combined_column_label_vars.get(idx)
+                    key = (pdf_path, idx)
+                    var = self.combined_column_label_vars.get(key)
                     if var is None:
                         continue
                     cell = ttk.Frame(self.combined_header_frame)
@@ -2180,18 +2185,15 @@ class ReportApp:
                 messagebox.showinfo("Combine Results", "No scraped data is available to combine.")
             return
 
-        base_column_labels: List[str] = []
-        for idx in range(self.combined_max_data_columns):
-            var = self.combined_column_label_vars.get(idx)
-            label_value = var.get().strip() if var else ""
-            if not label_value:
-                label_value = f"Value {idx + 1}"
-            base_column_labels.append(label_value)
-
         ordered_columns = ["Type", "Category", "Item", "Note"]
         for path in self.combined_pdf_order:
             pdf_label = path.stem
-            for label_value in base_column_labels:
+            for position in range(self.combined_max_data_columns):
+                key = (path, position)
+                var = self.combined_column_label_vars.get(key)
+                label_value = var.get().strip() if var else ""
+                if not label_value:
+                    label_value = self.combined_column_defaults.get(key, f"Value {position + 1}")
                 ordered_columns.append(f"{pdf_label}.{label_value}")
 
         record_map: Dict[Tuple[str, str, str], Dict[Tuple[Path, int], str]] = {}
