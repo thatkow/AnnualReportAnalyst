@@ -37,7 +37,6 @@ from PIL import Image, ImageTk
 matplotlib.use("TkAgg")
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.backend_bases import MouseEvent
 from matplotlib.figure import Figure
 from matplotlib import colors, colormaps
 from matplotlib.patches import Patch, Rectangle
@@ -1103,32 +1102,24 @@ class BarHoverHelper:
     def _on_tk_motion(self, tk_event: tk.Event) -> None:  # type: ignore[name-defined]
         if self._canvas is None:
             return
-        height = tk_event.widget.winfo_height() if hasattr(tk_event, "widget") else 0
-        width = tk_event.widget.winfo_width() if hasattr(tk_event, "widget") else 0
+        widget = self._tk_widget if self._tk_widget is not None else getattr(tk_event, "widget", None)
+        if widget is None:
+            return
+        width = widget.winfo_width()
+        height = widget.winfo_height()
         if height <= 0 or width <= 0:
             return
-        figure_bbox = self._canvas.figure.bbox
-        scale_x = figure_bbox.width / width
-        scale_y = figure_bbox.height / height
+        canvas_backend = getattr(self._canvas.figure, "canvas", None)
+        if canvas_backend is None or not hasattr(canvas_backend, "motion_notify_event"):
+            return
+        backend_width, backend_height = canvas_backend.get_width_height()
+        if backend_width <= 0 or backend_height <= 0:
+            backend_width, backend_height = width, height
+        scale_x = backend_width / width if width else 1.0
+        scale_y = backend_height / height if height else 1.0
         display_x = tk_event.x * scale_x
         display_y = (height - tk_event.y) * scale_y
-        mouse_event = MouseEvent(
-            "motion_notify_event",
-            self._canvas.figure.canvas,
-            display_x,
-            display_y,
-            guiEvent=tk_event,
-        )
-        if self.axis.bbox.contains(mouse_event.x, mouse_event.y):
-            mouse_event.inaxes = self.axis
-            mouse_event.xdata, mouse_event.ydata = self.axis.transData.inverted().transform(
-                (mouse_event.x, mouse_event.y)
-            )
-        else:
-            mouse_event.inaxes = None
-            mouse_event.xdata = None
-            mouse_event.ydata = None
-        self._on_motion(mouse_event)
+        canvas_backend.motion_notify_event(display_x, display_y, guiEvent=tk_event)
 
     def _on_tk_leave(self, _event: tk.Event) -> None:  # type: ignore[name-defined]
         if not self._annotation.get_visible():
