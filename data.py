@@ -406,6 +406,17 @@ class ReportApp:
         self.combined_row_sources: Dict[Tuple[str, str, str], List[Path]] = {}
         self.combined_base_column_widths: Dict[str, int] = {}
         self.combined_other_column_width: Optional[int] = None
+        self.combined_header_label_widgets: Dict[
+            Tuple[Path, int], List[Tuple[tk.Widget, str]]
+        ] = {}
+        self.combined_column_label_traces: Dict[Tuple[Path, int], str] = {}
+        try:
+            default_label_font = tkfont.nametofont("TkDefaultFont")
+        except tk.TclError:
+            default_label_font = tkfont.Font(root=self.root)
+        self.combined_header_label_font = default_label_font
+        self.combined_header_label_bold_font = default_label_font.copy()
+        self.combined_header_label_bold_font.configure(weight="bold")
         # Default to iterating blank notes so reviewers immediately focus on
         # records that still need attention when the combined table loads.
         self.combined_show_blank_notes_var = tk.BooleanVar(master=self.root, value=True)
@@ -3489,6 +3500,7 @@ class ReportApp:
         self.combined_split_pane = None
         self.combined_save_button = None
         self.combined_preview_detail_var.set("Select a row to view the PDF page.")
+        self.combined_header_label_widgets.clear()
 
     def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
         if not hasattr(self, "combined_header_frame"):
@@ -3636,12 +3648,17 @@ class ReportApp:
                     default_text = f"Value {idx + 1}"
                 var = self.combined_column_label_vars.get(key)
                 if var is None:
-                    self.combined_column_label_vars[key] = tk.StringVar(master=self.root, value=default_text)
+                    var = tk.StringVar(master=self.root, value=default_text)
+                    self.combined_column_label_vars[key] = var
                 elif not var.get().strip():
                     var.set(default_text)
+                if var is not None and key not in self.combined_column_label_traces:
+                    self._register_combined_label_trace(key, var)
         for stale_key in list(self.combined_column_label_vars.keys()):
             if stale_key not in desired_keys:
+                self._remove_combined_label_trace(stale_key)
                 self.combined_column_label_vars.pop(stale_key, None)
+                self.combined_header_label_widgets.pop(stale_key, None)
 
         displayed_categories: List[str] = []
         for category in COLUMNS:
@@ -3748,6 +3765,7 @@ class ReportApp:
                     current_row += 1
                     key = (pdf_path, idx)
                     var = self.combined_column_label_vars.get(key)
+                    self.combined_header_label_widgets[key] = []
                     row_container = ttk.Frame(self.combined_header_frame)
                     row_container.grid(row=current_row, column=0, padx=4, pady=4, sticky="nsew")
                     ttk.Label(
@@ -3763,16 +3781,67 @@ class ReportApp:
                     for column_index, category in enumerate(displayed_categories, start=1):
                         headers = type_header_map.get(category, {}).get(pdf_path, {}).get("headers", [])
                         header_text = headers[idx] if idx < len(headers) else ""
-                        ttk.Label(
+                        label_widget = ttk.Label(
                             self.combined_header_frame,
                             text=header_text,
-                        ).grid(row=current_row, column=column_index, padx=4, pady=4, sticky="w")
+                        )
+                        label_widget.grid(
+                            row=current_row, column=column_index, padx=4, pady=4, sticky="w"
+                        )
+                        self.combined_header_label_widgets[key].append(
+                            (label_widget, header_text.strip())
+                        )
+                    self._update_combined_header_label_styles(key)
 
         if hasattr(self, "combine_confirm_button"):
             self.combine_confirm_button.state(["!disabled"])
 
         if auto_update and self.combined_pdf_order and self.combined_csv_sources and self.combined_result_tree is None:
             self._confirm_combined_table(auto=True)
+
+    def _register_combined_label_trace(
+        self, key: Tuple[Path, int], var: tk.StringVar
+    ) -> None:
+        self._remove_combined_label_trace(key)
+
+        def _on_change(*_args: Any, target_key: Tuple[Path, int] = key) -> None:
+            self._update_combined_header_label_styles(target_key)
+
+        trace_id = var.trace_add("write", _on_change)
+        self.combined_column_label_traces[key] = trace_id
+
+    def _remove_combined_label_trace(self, key: Tuple[Path, int]) -> None:
+        trace_id = self.combined_column_label_traces.pop(key, None)
+        if not trace_id:
+            return
+        var = self.combined_column_label_vars.get(key)
+        if var is None:
+            return
+        try:
+            var.trace_remove("write", trace_id)
+        except tk.TclError:
+            pass
+
+    def _update_combined_header_label_styles(self, key: Tuple[Path, int]) -> None:
+        label_entries = self.combined_header_label_widgets.get(key)
+        if not label_entries:
+            return
+        var = self.combined_column_label_vars.get(key)
+        assigned_value = ""
+        if var is not None:
+            assigned_value = str(var.get() or "").strip()
+        for widget, source_value in label_entries:
+            normalized_source = source_value.strip()
+            if assigned_value != normalized_source:
+                try:
+                    widget.configure(font=self.combined_header_label_bold_font)
+                except tk.TclError:
+                    continue
+            else:
+                try:
+                    widget.configure(font=self.combined_header_label_font)
+                except tk.TclError:
+                    continue
 
     def _filter_combined_records(self, records: List[Dict[str, str]]) -> List[Dict[str, str]]:
         if not records:
