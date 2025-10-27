@@ -525,6 +525,7 @@ class FinancePlotFrame(ttk.Frame):
         self.datasets: "OrderedDict[str, FinanceDataset]" = OrderedDict()
         self.periods: Optional[List[str]] = None
         self._periods_by_key: "OrderedDict[Tuple[str, str, str], List[str]]" = OrderedDict()
+        self._visible_periods: Optional[List[str]] = None
         self._company_colors: Dict[str, Tuple[str, str]] = {}
         self._palette = list(colormaps["tab10"].colors)
         self._context_menu: Optional[tk.Menu] = None
@@ -536,7 +537,8 @@ class FinancePlotFrame(ttk.Frame):
         self._reported_formatter.set_scientific(True)
         self._reported_formatter.set_powerlimits((0, 0))
         self._share_count_formatter = ScalarFormatter(useOffset=False)
-        self._share_count_formatter.set_scientific(False)
+        self._share_count_formatter.set_scientific(True)
+        self._share_count_formatter.set_powerlimits((0, 0))
         self._render_empty()
 
     @staticmethod
@@ -665,11 +667,26 @@ class FinancePlotFrame(ttk.Frame):
         self.datasets.clear()
         self.periods = None
         self._periods_by_key.clear()
+        self._visible_periods = None
         self._render_empty()
 
     def add_company(self, company: str, dataset: FinanceDataset) -> bool:
+        previous_periods = set(self.periods or [])
         self._register_periods(dataset)
+        previous_visible = (
+            list(self._visible_periods) if self._visible_periods is not None else None
+        )
         self.periods = self._rebuild_period_sequence()
+        new_periods = [label for label in self.periods if label not in previous_periods]
+        if previous_visible is None:
+            self._visible_periods = list(self.periods)
+        else:
+            visible_set = set(previous_visible)
+            updated_visible = [label for label in self.periods if label in visible_set]
+            updated_visible.extend(
+                [label for label in new_periods if label not in visible_set]
+            )
+            self._visible_periods = updated_visible
 
         is_new_company = company not in self.datasets
         if is_new_company and company not in self._company_colors:
@@ -682,12 +699,43 @@ class FinancePlotFrame(ttk.Frame):
         self._render()
         return is_new_company
 
+    def all_periods(self) -> List[str]:
+        return list(self.periods or [])
+
+    def visible_periods(self) -> List[str]:
+        if self._visible_periods is not None:
+            return list(self._visible_periods)
+        return list(self.periods or [])
+
+    def set_visible_periods(self, periods: Sequence[str]) -> None:
+        if not self.periods:
+            self._visible_periods = []
+            self._render_empty()
+            return
+
+        allowed = {label for label in periods}
+        new_visible = [label for label in self.periods if label in allowed]
+        if not allowed:
+            new_visible = []
+
+        if self._visible_periods == new_visible:
+            return
+
+        self._visible_periods = new_visible
+        if self.datasets:
+            self._render()
+        else:
+            self._render_empty()
+
     def _render(self) -> None:
         if not self.datasets:
             self._render_empty()
             return
 
-        periods = self.periods or []
+        if self._visible_periods is not None:
+            periods = list(self._visible_periods)
+        else:
+            periods = self.periods or []
         period_indices = list(range(len(periods)))
         num_companies = len(self.datasets)
         if num_companies == 0:
@@ -1395,6 +1443,7 @@ class FinanceAnalystApp:
         self.normalization_var = tk.StringVar(
             value=FinanceDataset.NORMALIZATION_SHARES
         )
+        self.period_vars: Dict[str, tk.BooleanVar] = {}
 
         self._build_ui()
         self._refresh_company_list()
@@ -1462,6 +1511,12 @@ class FinanceAnalystApp:
             command=self._on_normalization_change,
         ).pack(side=tk.LEFT, padx=(6, 0))
 
+        self.periods_frame = ttk.Frame(outer)
+        self.periods_frame.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(self.periods_frame, text="Dates:").pack(side=tk.LEFT)
+        self.period_checks_frame = ttk.Frame(self.periods_frame)
+        self.period_checks_frame.pack(side=tk.LEFT, padx=(6, 0))
+
         self.plot_frame = FinancePlotFrame(outer)
         self.plot_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -1473,6 +1528,39 @@ class FinanceAnalystApp:
     def _on_normalization_change(self) -> None:
         mode = self.normalization_var.get()
         self.plot_frame.set_normalization_mode(mode)
+
+    def _on_period_toggle(self) -> None:
+        self._apply_period_filters()
+
+    def _apply_period_filters(self) -> None:
+        active_periods = [
+            label for label, var in self.period_vars.items() if var.get()
+        ]
+        if not active_periods and self.plot_frame.all_periods():
+            self.plot_frame.set_visible_periods([])
+            return
+        self.plot_frame.set_visible_periods(active_periods)
+
+    def _refresh_period_controls(self) -> None:
+        periods = self.plot_frame.all_periods()
+        existing_state = {label: var.get() for label, var in self.period_vars.items()}
+
+        for child in self.period_checks_frame.winfo_children():
+            child.destroy()
+        self.period_vars.clear()
+
+        for label in periods:
+            var = tk.BooleanVar(value=existing_state.get(label, True))
+            check = ttk.Checkbutton(
+                self.period_checks_frame,
+                text=label,
+                variable=var,
+                command=self._on_period_toggle,
+            )
+            check.pack(side=tk.LEFT, padx=(0, 6))
+            self.period_vars[label] = var
+
+        self._apply_period_filters()
 
 
     def _maximize_window(self) -> None:
@@ -1532,6 +1620,7 @@ class FinanceAnalystApp:
         if not added:
             messagebox.showinfo("Load Company", f"{company} data refreshed on the chart.")
         self.plot_frame.set_normalization_mode(self.normalization_var.get())
+        self._refresh_period_controls()
 
 
 def main() -> None:
