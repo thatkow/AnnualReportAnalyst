@@ -41,7 +41,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib import colors, colormaps
 from matplotlib.patches import Patch, Rectangle
-from matplotlib.ticker import ScalarFormatter
+from matplotlib.ticker import PercentFormatter, ScalarFormatter
 
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -1293,7 +1293,13 @@ class FinancePlotFrame(ttk.Frame):
         self._share_price_formatter = ScalarFormatter(useOffset=False)
         self._share_price_formatter.set_scientific(True)
         self._share_price_formatter.set_powerlimits((0, 0))
+        self._percentage_formatter = PercentFormatter(xmax=1.0, decimals=2)
         self._render_empty()
+
+    def _apply_layout_margins(self) -> None:
+        """Reserve extra breathing room around the plotted graph."""
+
+        self.figure.subplots_adjust(left=0.12, right=0.98, top=0.9, bottom=0.24)
 
     @staticmethod
     def _compute_bottoms(values: Sequence[float], pos_totals: List[float], neg_totals: List[float]) -> List[float]:
@@ -1318,7 +1324,7 @@ class FinancePlotFrame(ttk.Frame):
             self._show_context_menu if self.display_mode == self.MODE_STACKED else None
         )
         self.hover_helper.begin_update(context_callback)
-        self.figure.tight_layout()
+        self._apply_layout_margins()
         self.canvas.draw()
 
     def _compute_period_metrics(
@@ -2103,8 +2109,8 @@ class FinancePlotFrame(ttk.Frame):
             self.axis.yaxis.set_major_formatter(self._share_price_formatter)
             self.axis.set_ylabel("Share Price Multiple")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD:
-            self.axis.yaxis.set_major_formatter(self._share_price_formatter)
-            self.axis.set_ylabel("Value/(Share*Price)")
+            self.axis.yaxis.set_major_formatter(self._percentage_formatter)
+            self.axis.set_ylabel("Value/(Share*Price) (%)")
         else:
             self.axis.yaxis.set_major_formatter(self._reported_formatter)
             self.axis.set_ylabel("Reported Value")
@@ -2130,7 +2136,7 @@ class FinancePlotFrame(ttk.Frame):
                 legend_kwargs["ncol"] = 2
             self.axis.legend(handles=legend_handles, **legend_kwargs)
 
-        self.figure.tight_layout()
+        self._apply_layout_margins()
         self.canvas.draw()
 
     def _ensure_context_menu(self) -> tk.Menu:
@@ -2563,6 +2569,11 @@ class BarHoverHelper:
                 return f"{raw:,.2f}"
             return "—"
 
+        def _format_percent(raw: Any) -> str:
+            if isinstance(raw, (int, float)) and math.isfinite(raw):
+                return f"{raw * 100:,.2f}%"
+            return "—"
+
         lines = [
             f"TYPE: {type_value}",
             f"CATEGORY: {category}",
@@ -2573,7 +2584,7 @@ class BarHoverHelper:
             f"NUMBER OF SHARES: {_format_scientific(share_count)}",
             f"VALUE/SHARE: {_format_decimal(value_per_share)}",
             f"SHARE PRICE: {_format_decimal(share_price_value)}",
-            f"VALUE/(SHARE*PRICE): {_format_decimal(value_share_price_ratio)}",
+            f"VALUE/(SHARE*PRICE): {_format_percent(value_share_price_ratio)}",
         ]
 
         return "\n".join(lines)
@@ -2819,7 +2830,7 @@ class FinanceAnalystApp:
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Radiobutton(
             values_frame,
-            text="Value/(Share*Price)",
+            text="Value/(Share*Price) %",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
             command=self._on_normalization_change,
