@@ -623,11 +623,22 @@ class ReportApp:
     def _on_canvas_configure(self, event: tk.Event) -> None:  # type: ignore[override]
         self.canvas.itemconfigure(self.canvas_window, width=event.width)
 
+    def _mousewheel_sequences(self) -> Tuple[str, ...]:
+        return (
+            "<MouseWheel>",
+            "<Button-4>",
+            "<Button-5>",
+            "<Shift-Button-4>",
+            "<Shift-Button-5>",
+        )
+
     def _bind_mousewheel(self, _: tk.Event) -> None:  # type: ignore[override]
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        for sequence in self._mousewheel_sequences():
+            self.canvas.bind_all(sequence, self._on_mousewheel)
 
     def _unbind_mousewheel(self, _: tk.Event) -> None:  # type: ignore[override]
-        self.canvas.unbind_all("<MouseWheel>")
+        for sequence in self._mousewheel_sequences():
+            self.canvas.unbind_all(sequence)
 
     def _on_mousewheel(self, event: tk.Event) -> None:  # type: ignore[override]
         if event.num == 4 or event.delta > 0:
@@ -2744,11 +2755,13 @@ class ReportApp:
             pix = page.get_pixmap(matrix=zoom_matrix)
             mode = "RGBA" if pix.alpha else "RGB"
             image = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+            if image.mode == "RGBA":
+                image = image.convert("RGB")
             if target_width > 0 and image.width != target_width:
                 ratio = target_width / image.width
                 new_size = (int(image.width * ratio), int(image.height * ratio))
                 image = image.resize(new_size, Image.LANCZOS)
-            return ImageTk.PhotoImage(image)
+            return ImageTk.PhotoImage(image, master=self.root)
         except Exception as exc:  # pragma: no cover - guard for rendering issues
             messagebox.showwarning("Render Error", f"Could not render page {page_index + 1}: {exc}")
             return None
