@@ -11,47 +11,99 @@ You will be given the text of one or more financial statements.
    - Read left-to-right within each page, then top-to-bottom.
    - Stop when the next primary statement begins (e.g., Income Statement, Cash Flows).
 
-2. **Before extracting numbers**, determine whether the statement indicates a presentation scale such as "Amounts in thousands", "USD millions", "€m", "AUD $ million", "All figures are in thousands", etc.
-   - "thousand" / "000" → multiply every numeric value by 1,000.
-   - "million" / "m" → multiply by 1,000,000.
-   - "billion" / "bn" → multiply by 1,000,000,000.
-   - If multiple scales appear, use the one directly tied to the table (e.g., "($ in millions)" overrides a general note).
-   - If no clear scale, use factor 1.
-   - Remove commas or spaces from every numeric cell before scaling.
-   - You must always output scaled numbers. If the scale is ($000s), output 130 → 130000. Never return raw values.
-   - Apply this multiplier to every numeric cell you output, including negatives, parentheses, and 0/– entries.
+---
 
-3. **Extract the Balance Sheet** into a single, strictly tab-separated table with these columns: `CATEGORY;ITEM;DATE1;DATE2;...;DATE(N)`, where `N` is the number of date columns that appear in the statement. You **must not assume a fixed number of date columns** and should adjust the output dynamically based on the actual number of dates present in the statement.
-   - Enclose every `CATEGORY` and `ITEM` entry in double quotes.
-   - Include every line item exactly as shown, including intermediate subtotals (even if the category is implied or missing in the PDF).
-   - If a row has numbers but no label (e.g., "6,791 6,791"), assign it the most recent `CATEGORY` and use "UNSPECIFIED" as `ITEM`.
-   - Keep subsection headers like "Non-current assets", "Equity", etc. Do not skip or summarize.
-   - If a label wraps across lines, join with a single space. Remove hyphenation at line breaks (e.g., "non-cur-" + "rent" → "non current").
-   - Remove footnote markers (superscripts, asterisks, bracketed note numbers) from `ITEM` text only.
+2. **Determine the Numeric Scale Factor (CRITICAL).**
 
-4. **Parsing rules:**
-   - Remove all commas from numbers before applying the scale factor.
-   - After scaling, double-check that each numeric cell you output reflects the multiplier (if factor ≠ 1). Do not skip or partially scale any value.
-   - Convert all `CATEGORY` and `ITEM` text to UPPER CASE and strip commas/tabs.
-   - Replace any dash (–, —, -) in numeric cells with 0 before applying the factor.
-   - If a value is in parentheses (e.g., (123.4)), output the negative of that value (after scaling).
-   - If a value is blank for a date, leave it empty.
+Before extracting any numbers, determine the presentation scale associated with the balance sheet table.
 
-5. **Output rules:**
-   - Use exactly one semicolon (`;`) as the separator.
-   - Output exactly one table, starting with the headers.
-   - No text before or after the table.
-   - Do not repeat headers.
-   - No extra tables, no explanations.
+**a. Recognized scale indicators (case-insensitive):**
 
-**Example output (semicolon-separated):**
+| Indicator examples | Multiplier |
+|--------------------|-------------|
+| “in thousands”, “$’000”, “$000s”, “000”, “Amounts in thousands” | 1,000 |
+| “in millions”, “($M)”, “$M”, “USD millions”, “€m”, “AUD $ million”, “m” | 1,000,000 |
+| “in billions”, “$B”, “bn”, “billion”, “USD billions” | 1,000,000,000 |
 
-CATEGORY;ITEM;31.12.2024;31.12.2023;31.12.2022;31.12.2021
-"ASSETS";"CASH AND CASH EQUIVALENTS";1234000000;5678000000;5678000000;1234000000
-"CURRENT ASSETS";"INVENTORIES";3330000;4440000;3330000;4440000
-"CURRENT ASSETS";"UNSPECIFIED";6791000;6791000;6791000;6791000
-"LIABILITIES";"TRADE AND OTHER PAYABLES";555000000;666000000;555000000;666000000
-"TOTAL EQUITY";"TOTAL EQUITY";777000000;888000000;777000000;888000000
+**b. Selection logic:**
+
+1. Detect the scale indicator located **closest to the numeric columns** (e.g., above, within, or immediately adjacent to the table).
+2. If multiple indicators exist, **table-level** or **column-level** markings override general document-level ones.
+   - Example: Header says “Figures in AUD” but column label says “$M” → use **millions**.
+3. If column headers show different symbols (e.g., “$M” in one, “$000” in another), choose the most **specific and numeric** indicator.
+4. If no explicit indicator is found, default to **factor = 1**.
+
+**c. Scaling rules:**
+
+1. Remove commas, spaces, and currency symbols before scaling.  
+   - Example: `2,095.1` → `2095.1`
+2. Convert parentheses into negatives.  
+   - Example: `(47.1)` → `-47.1`
+3. Convert any dash, en dash, or em dash (–, —, -) into `0`.
+4. Multiply **every numeric cell** (including zeros or negatives) by the determined scale factor.  
+   - `$M` → ×1,000,000  
+   - `$’000` → ×1,000  
+   - `$B` → ×1,000,000,000
+5. Output **fully scaled values as integers**, never abbreviated.
+   - Example: `$M` scale and `2,095.1` → `2095100000`
+6. Do not mix scaled and unscaled values within the same output.
+
+**d. Verification logic (sanity check):**
+
+After determining the factor, cross-check that totals align logically:
+- If subtotals (e.g., "Total Assets") are numerically consistent with components only after applying your chosen factor, confirm that factor.
+- If inconsistency remains, fall back to **factor = 1,000,000** if “M” or “million” appears anywhere near the table header.
 
 ---
+
+3. **Extract the Balance Sheet** into a strictly semicolon-separated table with dynamic date columns.
+
+**Output format:**
+CATEGORY;ITEM;DATE1;DATE2;...;DATEN
+
+**Rules:**
+- Use exactly one semicolon (`;`) as the separator.
+- Adjust the number of date columns dynamically based on the actual table.
+- Enclose all text entries for `CATEGORY` and `ITEM` in double quotes.
+- Extract every line item, including subtotals, section headers, and unspecified lines.
+- If a row has numbers but no label, inherit the last `CATEGORY` and use `"UNSPECIFIED"` for `ITEM`.
+- Preserve order as shown in the original statement.
+
+**Text normalization:**
+- Convert all `CATEGORY` and `ITEM` to **UPPER CASE**.
+- Join wrapped labels with a space and remove hyphenation (e.g., `non-cur-` + `rent` → `NON CURRENT`).
+- Strip out footnote markers (e.g., `(1)`, `*`, `[a]`) from item text.
+- Remove commas, tabs, and extraneous whitespace.
+
+---
+
+4. **Numeric formatting:**
+- Ensure every numeric cell reflects the scaling factor (no partial scaling).
+- Leave cells empty if no value is shown for that date.
+
+---
+
+5. **Output rules:**
+- Output exactly one table.
+- No text before or after the table.
+- No repeated headers.
+- No extra commentary, explanations, or metadata.
+
+---
+
+**Example output:**
+
+CATEGORY;ITEM;30.06.2017;30.06.2016
+"CURRENT ASSETS";"CASH AND CASH EQUIVALENTS";2095100000;1337000000
+"CURRENT ASSETS";"RECEIVABLES";552000000;404100000
+"CURRENT ASSETS";"INVENTORIES";709700000;687000000
+"CURRENT ASSETS";"ASSET HELD FOR SALE";203600000;0
+"CURRENT ASSETS";"OTHER FINANCIAL ASSETS";27300000;0
+"CURRENT ASSETS";"OTHER ASSETS";14700000;15700000
+"TOTAL CURRENT ASSETS";"TOTAL CURRENT ASSETS";3602400000;2443800000
+"NON CURRENT ASSETS";"RECEIVABLES";34800000;34300000
+"TOTAL EQUITY";"TOTAL EQUITY";8622200000;8393300000
+
+---
+
 
