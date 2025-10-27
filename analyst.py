@@ -51,7 +51,14 @@ NOTE_ASIS = "asis"
 NOTE_NEGATED = "negated"
 NOTE_EXCLUDED = "excluded"
 NOTE_SHARE_COUNT = "share_count"
-VALID_NOTES = {NOTE_ASIS, NOTE_NEGATED, NOTE_EXCLUDED, NOTE_SHARE_COUNT}
+NOTE_SHARE_PRICE = "share_price"
+VALID_NOTES = {
+    NOTE_ASIS,
+    NOTE_NEGATED,
+    NOTE_EXCLUDED,
+    NOTE_SHARE_COUNT,
+    NOTE_SHARE_PRICE,
+}
 
 
 @dataclass
@@ -165,6 +172,7 @@ class FinanceDataset:
 
     NORMALIZATION_SHARES = "shares"
     NORMALIZATION_REPORTED = "reported"
+    NORMALIZATION_SHARE_PRICE = "share_price"
 
     _TYPE_TO_LABEL = {
         "financial": FINANCE_LABEL,
@@ -181,6 +189,7 @@ class FinanceDataset:
         self.income_segments: List[RowSegment] = []
         self._color_cache: Dict[str, str] = {}
         self.share_counts: List[float] = []
+        self.share_prices: List[float] = []
         self._normalization_mode = self.NORMALIZATION_REPORTED
         self._load()
         self._load_metadata()
@@ -241,6 +250,7 @@ class FinanceDataset:
             self.finance_segments = []
             self.income_segments = []
             share_counts: Optional[List[float]] = None
+            share_prices: Optional[List[float]] = None
 
             for row_number, row in enumerate(reader, start=1):
                 if note_index >= len(row):
@@ -266,6 +276,12 @@ class FinanceDataset:
                     if share_counts is not None:
                         raise ValueError("Multiple share_count rows found in combined.csv")
                     share_counts = values
+                    continue
+
+                if note_key == NOTE_SHARE_PRICE:
+                    if share_prices is not None:
+                        raise ValueError("Multiple share_price rows found in combined.csv")
+                    share_prices = values
                     continue
 
                 if not any(value != 0 for value in values):
@@ -336,6 +352,9 @@ class FinanceDataset:
                         f"share_count value for period '{self.periods[index]}' is zero"
                     )
 
+            if share_prices is not None and len(share_prices) != len(self.periods):
+                raise ValueError("share_price row does not match the number of periods")
+
             sort_indices = list(range(len(self.periods)))
             try:
                 parsed_periods = [
@@ -354,27 +373,62 @@ class FinanceDataset:
                 ]
                 self.periods = [self.periods[idx] for idx in sort_indices]
                 share_counts = [share_counts[idx] for idx in sort_indices]
+                if share_prices is not None:
+                    share_prices = [share_prices[idx] for idx in sort_indices]
             for segment in self.finance_segments + self.income_segments:
                 segment.values = [segment.values[idx] for idx in sort_indices]
                 segment.periods = [self.periods[idx] for idx in sort_indices]
                 segment.raw_values = list(segment.values)
 
             self.share_counts = list(share_counts)
+            self.share_prices = list(share_prices) if share_prices is not None else []
             self.set_normalization_mode(self.NORMALIZATION_SHARES)
 
     def set_normalization_mode(self, mode: str) -> None:
-        if mode not in {self.NORMALIZATION_SHARES, self.NORMALIZATION_REPORTED}:
+        valid_modes = {
+            self.NORMALIZATION_SHARES,
+            self.NORMALIZATION_REPORTED,
+            self.NORMALIZATION_SHARE_PRICE,
+        }
+        if mode not in valid_modes:
             raise ValueError(f"Unsupported normalization mode: {mode}")
-        if mode == self._normalization_mode and self.share_counts:
+
+        if mode == self._normalization_mode:
             return
+
         if mode == self.NORMALIZATION_SHARES:
             if not self.share_counts:
                 raise ValueError("combined.csv is missing a share_count row")
             for segment in self.finance_segments + self.income_segments:
-                segment.values = [
-                    value / self.share_counts[idx]
-                    for idx, value in enumerate(segment.raw_values)
-                ]
+                per_share: List[float] = []
+                for idx, value in enumerate(segment.raw_values):
+                    count = self.share_counts[idx] if idx < len(self.share_counts) else 0.0
+                    if count == 0:
+                        per_share.append(0.0)
+                    else:
+                        per_share.append(value / count)
+                segment.values = per_share
+        elif mode == self.NORMALIZATION_SHARE_PRICE:
+            if not self.share_counts:
+                raise ValueError("combined.csv is missing a share_count row")
+            latest_price = self.latest_share_price()
+            if latest_price is None:
+                raise ValueError(
+                    f"Share price data is not available for {self.company_root.name or 'the selected company'}."
+                )
+            for segment in self.finance_segments + self.income_segments:
+                multiples: List[float] = []
+                for idx, value in enumerate(segment.raw_values):
+                    count = self.share_counts[idx] if idx < len(self.share_counts) else 0.0
+                    if count == 0:
+                        multiples.append(0.0)
+                        continue
+                    per_share = value / count
+                    if per_share == 0:
+                        multiples.append(0.0)
+                    else:
+                        multiples.append(latest_price / per_share)
+                segment.values = multiples
         else:
             for segment in self.finance_segments + self.income_segments:
                 segment.values = list(segment.raw_values)
@@ -493,6 +547,12 @@ class FinanceDataset:
 
         return values, present
 
+    def latest_share_price(self) -> Optional[float]:
+        for value in reversed(self.share_prices):
+            if math.isfinite(value) and value > 0:
+                return value
+        return None
+
     def has_data(self) -> bool:
         return bool(self.finance_segments or self.income_segments)
 
@@ -539,6 +599,9 @@ class FinancePlotFrame(ttk.Frame):
         self._share_count_formatter = ScalarFormatter(useOffset=False)
         self._share_count_formatter.set_scientific(True)
         self._share_count_formatter.set_powerlimits((0, 0))
+        self._share_price_formatter = ScalarFormatter(useOffset=False)
+        self._share_price_formatter.set_scientific(True)
+        self._share_price_formatter.set_powerlimits((0, 0))
         self._render_empty()
 
     @staticmethod
@@ -578,38 +641,53 @@ class FinancePlotFrame(ttk.Frame):
         else:
             self._render_empty()
 
-    def set_normalization_mode(self, mode: str) -> None:
+    def set_normalization_mode(self, mode: str) -> bool:
         valid_modes = {
             FinanceDataset.NORMALIZATION_SHARES,
             FinanceDataset.NORMALIZATION_REPORTED,
+            FinanceDataset.NORMALIZATION_SHARE_PRICE,
             self.VALUE_MODE_SHARE_COUNT,
         }
         if mode not in valid_modes:
-            return
+            return False
 
         if mode == self.VALUE_MODE_SHARE_COUNT:
             if self.normalization_mode == mode:
-                return
+                return True
             self.normalization_mode = mode
             if self.datasets:
                 self._render()
             else:
                 self._render_empty()
-            return
+            return True
 
         if self._dataset_normalization_mode != mode:
+            previous_mode = self._dataset_normalization_mode
+            updated: List[FinanceDataset] = []
             for dataset in self.datasets.values():
-                dataset.set_normalization_mode(mode)
+                try:
+                    dataset.set_normalization_mode(mode)
+                except ValueError as exc:
+                    messagebox.showwarning("Normalize Values", str(exc))
+                    for updated_dataset in updated:
+                        try:
+                            updated_dataset.set_normalization_mode(previous_mode)
+                        except ValueError:
+                            pass
+                    return False
+                else:
+                    updated.append(dataset)
             self._dataset_normalization_mode = mode
 
         if self.normalization_mode == mode:
-            return
+            return True
 
         self.normalization_mode = mode
         if self.datasets:
             self._render()
         else:
             self._render_empty()
+        return True
 
     def _next_color_pair(self) -> Tuple[str, str]:
         index = len(self._company_colors)
@@ -670,7 +748,7 @@ class FinancePlotFrame(ttk.Frame):
         self._visible_periods = None
         self._render_empty()
 
-    def add_company(self, company: str, dataset: FinanceDataset) -> bool:
+    def add_company(self, company: str, dataset: FinanceDataset) -> Tuple[bool, Optional[str]]:
         previous_periods = set(self.periods or [])
         self._register_periods(dataset)
         previous_visible = (
@@ -692,12 +770,27 @@ class FinancePlotFrame(ttk.Frame):
         if is_new_company and company not in self._company_colors:
             self._company_colors[company] = self._next_color_pair()
 
-        dataset.set_normalization_mode(self._dataset_normalization_mode)
+        normalization_warning: Optional[str] = None
+        try:
+            dataset.set_normalization_mode(self._dataset_normalization_mode)
+        except ValueError as exc:
+            if self._dataset_normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
+                normalization_warning = str(exc)
+                fallback_mode = FinanceDataset.NORMALIZATION_SHARES
+                dataset.set_normalization_mode(fallback_mode)
+                for existing in self.datasets.values():
+                    existing.set_normalization_mode(fallback_mode)
+                self._dataset_normalization_mode = fallback_mode
+                if self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
+                    self.normalization_mode = fallback_mode
+            else:
+                raise
+
         self.datasets[company] = dataset
         # Preserve insertion order by moving refreshed companies to the end.
         self.datasets.move_to_end(company)
         self._render()
-        return is_new_company
+        return is_new_company, normalization_warning
 
     def all_periods(self) -> List[str]:
         return list(self.periods or [])
@@ -1049,6 +1142,9 @@ class FinancePlotFrame(ttk.Frame):
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARES:
             self.axis.yaxis.set_major_formatter(self._per_share_formatter)
             self.axis.set_ylabel("Value per Share")
+        elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
+            self.axis.yaxis.set_major_formatter(self._share_price_formatter)
+            self.axis.set_ylabel("Share Price Multiple")
         else:
             self.axis.yaxis.set_major_formatter(self._reported_formatter)
             self.axis.set_ylabel("Reported Value")
@@ -1496,6 +1592,13 @@ class FinanceAnalystApp:
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Radiobutton(
             values_frame,
+            text="Normalize over latest share price",
+            variable=self.normalization_var,
+            value=FinanceDataset.NORMALIZATION_SHARE_PRICE,
+            command=self._on_normalization_change,
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Radiobutton(
+            values_frame,
             text="As reported",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_REPORTED,
@@ -1521,11 +1624,14 @@ class FinanceAnalystApp:
     def _on_mode_change(self) -> None:
         mode = self.mode_var.get()
         self.plot_frame.set_display_mode(mode)
-        self.plot_frame.set_normalization_mode(self.normalization_var.get())
+        success = self.plot_frame.set_normalization_mode(self.normalization_var.get())
+        if not success:
+            self.normalization_var.set(self.plot_frame.normalization_mode)
 
     def _on_normalization_change(self) -> None:
         mode = self.normalization_var.get()
-        self.plot_frame.set_normalization_mode(mode)
+        if not self.plot_frame.set_normalization_mode(mode):
+            self.normalization_var.set(self.plot_frame.normalization_mode)
 
     def _on_period_toggle(self) -> None:
         self._apply_period_filters()
@@ -1611,13 +1717,18 @@ class FinanceAnalystApp:
             )
             return
         try:
-            added = self.plot_frame.add_company(company, dataset)
+            added, normalization_warning = self.plot_frame.add_company(company, dataset)
         except ValueError as exc:
             messagebox.showerror("Load Company", str(exc))
             return
         if not added:
             messagebox.showinfo("Load Company", f"{company} data refreshed on the chart.")
-        self.plot_frame.set_normalization_mode(self.normalization_var.get())
+        if normalization_warning:
+            messagebox.showwarning("Normalize Values", normalization_warning)
+            self.normalization_var.set(self.plot_frame.normalization_mode)
+        success = self.plot_frame.set_normalization_mode(self.normalization_var.get())
+        if not success:
+            self.normalization_var.set(self.plot_frame.normalization_mode)
         self._refresh_period_controls()
 
 
