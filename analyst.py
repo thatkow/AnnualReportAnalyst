@@ -202,7 +202,14 @@ def open_pdf(pdf_path: Path, page: Optional[int] = None) -> None:
 class PdfPageViewer(tk.Toplevel):
     """Display a single rendered PDF page inside a scrollable window."""
 
-    def __init__(self, master: tk.Widget, pdf_path: Path, page_number: int) -> None:
+    def __init__(
+        self,
+        master: tk.Widget,
+        pdf_path: Path,
+        page_number: int,
+        *,
+        placement: str = "full",
+    ) -> None:
         super().__init__(master)
         if fitz is None:
             messagebox.showerror(
@@ -218,6 +225,10 @@ class PdfPageViewer(tk.Toplevel):
         self._photo: Optional[ImageTk.PhotoImage] = None
         self._pdf_path = pdf_path
         self._page_number = page_number
+        placement_normalized = placement.lower()
+        if placement_normalized not in {"full", "left", "right"}:
+            placement_normalized = "full"
+        self._placement = placement_normalized
         self._build_widgets()
         self._render_page()
         self._enter_fullscreen_on_preferred_monitor()
@@ -262,9 +273,9 @@ class PdfPageViewer(tk.Toplevel):
         self._canvas.configure(scrollregion=(0, 0, pix.width, pix.height))
 
     def _enter_fullscreen_on_preferred_monitor(self) -> None:
-        """Expand the viewer to fullscreen, preferring a secondary monitor when present."""
+        """Expand the viewer to a preferred monitor, splitting width when requested."""
 
-        target_geometry: Optional[str] = None
+        monitor_info: Optional[Dict[str, int]] = None
         monitor_count = 1
         try:
             monitor_count = int(self.tk.call("winfo", "monitorcount", self))
@@ -297,41 +308,75 @@ class PdfPageViewer(tk.Toplevel):
                         primary = text in {"1", "true"}
                         break
 
-                monitors.append({
-                    "x": x,
-                    "y": y,
-                    "width": width,
-                    "height": height,
-                    "primary": primary,
-                })
-
-            non_primary = [monitor for monitor in monitors if not monitor.get("primary")]
-            target_monitor: Optional[Dict[str, Any]]
-            if non_primary:
-                target_monitor = non_primary[0]
-            elif monitors:
-                target_monitor = monitors[0]
-            else:
-                target_monitor = None
-
-            if target_monitor:
-                target_geometry = (
-                    f"{int(target_monitor['width'])}x{int(target_monitor['height'])}+"
-                    f"{int(target_monitor['x'])}+{int(target_monitor['y'])}"
+                monitors.append(
+                    {
+                        "x": x,
+                        "y": y,
+                        "width": width,
+                        "height": height,
+                        "primary": primary,
+                    }
                 )
 
-        if not target_geometry:
-            width = self.winfo_screenwidth()
-            height = self.winfo_screenheight()
-            target_geometry = f"{width}x{height}+0+0"
+            non_primary = [monitor for monitor in monitors if not monitor.get("primary")]
+            if non_primary:
+                monitor_info = {
+                    "x": int(non_primary[0]["x"]),
+                    "y": int(non_primary[0]["y"]),
+                    "width": int(non_primary[0]["width"]),
+                    "height": int(non_primary[0]["height"]),
+                }
+            elif monitors:
+                monitor_info = {
+                    "x": int(monitors[0]["x"]),
+                    "y": int(monitors[0]["y"]),
+                    "width": int(monitors[0]["width"]),
+                    "height": int(monitors[0]["height"]),
+                }
 
-        self.geometry(target_geometry)
+        if monitor_info is None:
+            monitor_info = {
+                "x": 0,
+                "y": 0,
+                "width": int(self.winfo_screenwidth()),
+                "height": int(self.winfo_screenheight()),
+            }
+
+        width = int(monitor_info["width"])
+        height = int(monitor_info["height"])
+        x = int(monitor_info["x"])
+        y = int(monitor_info["y"])
+
+        placement = getattr(self, "_placement", "full")
+        if placement in {"left", "right"} and width > 1:
+            left_width = max(1, width // 2)
+            right_width = max(1, width - left_width)
+            if placement == "left":
+                width = left_width
+            else:
+                width = right_width
+                x += left_width
+
+        geometry = f"{width}x{height}+{x}+{y}"
+        self.geometry(geometry)
         self.update_idletasks()
-        try:
-            self.attributes("-fullscreen", True)
-        except tk.TclError:
+
+        if placement == "full":
             try:
-                self.state("zoomed")
+                self.attributes("-fullscreen", True)
+                return
+            except tk.TclError:
+                try:
+                    self.state("zoomed")
+                except tk.TclError:
+                    pass
+        else:
+            try:
+                self.attributes("-fullscreen", False)
+            except tk.TclError:
+                pass
+            try:
+                self.state("normal")
             except tk.TclError:
                 pass
 
@@ -369,6 +414,7 @@ class FinanceDataset:
         self._color_cache: Dict[str, str] = {}
         self.share_counts: List[float] = []
         self.share_prices: List[float] = []
+        self.share_count_sources: Dict[str, SegmentSource] = {}
         self._normalization_mode = self.NORMALIZATION_REPORTED
         self._load()
         self._load_metadata()
@@ -616,6 +662,7 @@ class FinanceDataset:
             return
 
         metadata_map: Dict[Tuple[str, str, str], Dict[str, SegmentSource]] = {}
+        share_count_sources: Dict[str, SegmentSource] = {}
 
         for entry in rows:
             if not isinstance(entry, dict):
@@ -624,6 +671,7 @@ class FinanceDataset:
             category_value = str(entry.get("category", ""))
             item_value = str(entry.get("item", ""))
             key = (type_value, category_value, item_value)
+            note_value = str(entry.get("note", "")).strip().lower()
             periods = entry.get("periods", {})
             if not isinstance(periods, dict):
                 continue
@@ -650,9 +698,16 @@ class FinanceDataset:
                         page = None
                 period_sources[str(label)] = SegmentSource(pdf_path=pdf_path, page=page)
             if period_sources:
+                if note_value == NOTE_SHARE_COUNT:
+                    share_count_sources = {
+                        str(label): source for label, source in period_sources.items()
+                    }
+                    continue
                 metadata_map[key] = period_sources
 
         if not metadata_map:
+            if share_count_sources:
+                self.share_count_sources = share_count_sources
             return
 
         for segment in self.finance_segments + self.income_segments:
@@ -660,6 +715,8 @@ class FinanceDataset:
             sources = metadata_map.get(key)
             if sources:
                 segment.sources = sources
+        if share_count_sources:
+            self.share_count_sources = share_count_sources
 
     def aggregate_totals(
         self, periods: Sequence[str], *, series: str
@@ -713,6 +770,27 @@ class FinanceDataset:
             present.append(True)
 
         return values, present
+
+    def source_for_series(self, series: str, period: str) -> Optional[SegmentSource]:
+        lookup: Sequence[RowSegment]
+        if series == self.FINANCE_LABEL:
+            lookup = self.finance_segments
+        elif series == self.INCOME_LABEL:
+            lookup = self.income_segments
+        else:
+            return None
+        for segment in lookup:
+            if not segment.sources:
+                continue
+            source = segment.sources.get(str(period))
+            if source:
+                return source
+        return None
+
+    def share_count_source_for(self, period: str) -> Optional[SegmentSource]:
+        if not self.share_count_sources:
+            return None
+        return self.share_count_sources.get(str(period))
 
     def latest_share_price(self) -> Optional[float]:
         for value in reversed(self.share_prices):
@@ -1002,7 +1080,7 @@ class FinancePlotFrame(ttk.Frame):
         legend_handles: List[Any] = []
 
         if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
-            hover_helper.begin_update(None)
+            hover_helper.begin_update(self._show_context_menu)
             x_positions = period_indices
             for company, dataset in self.datasets.items():
                 finance_color, _ = self._company_colors.setdefault(
@@ -1026,6 +1104,31 @@ class FinancePlotFrame(ttk.Frame):
                     label=f"{company} Number of shares",
                 )
                 legend_handles.append(line[0])
+                for idx, present in enumerate(share_presence):
+                    if not present:
+                        continue
+                    value = share_points[idx]
+                    if not math.isfinite(value):
+                        continue
+                    period_label = periods[idx] if idx < len(periods) else str(idx)
+                    metadata: Dict[str, Any] = {
+                        "key": f"{company}_share_count",
+                        "type_label": "Number of Shares",
+                        "type_value": "Number of Shares",
+                        "category": company,
+                        "item": "Shares",
+                        "period": period_label,
+                        "value": value,
+                        "company": company,
+                        "series": self.VALUE_MODE_SHARE_COUNT,
+                    }
+                    source = dataset.share_count_source_for(period_label)
+                    if source:
+                        metadata["pdf_path"] = str(source.pdf_path)
+                        metadata["pdf_page"] = source.page
+                    hover_helper.add_point_target(
+                        float(x_positions[idx]), float(value), metadata
+                    )
 
             if period_indices:
                 self.axis.set_xticks(period_indices)
@@ -1109,6 +1212,7 @@ class FinancePlotFrame(ttk.Frame):
                             finance_periods_active,
                             company,
                             values=filtered_values,
+                            series_label=FinanceDataset.FINANCE_LABEL,
                         )
 
                 income_segment_values: List[Tuple[RowSegment, List[float]]] = []
@@ -1166,6 +1270,7 @@ class FinancePlotFrame(ttk.Frame):
                             income_periods_active,
                             company,
                             values=filtered_values,
+                            series_label=FinanceDataset.INCOME_LABEL,
                         )
 
                 if finance_active_indices:
@@ -1359,57 +1464,137 @@ class FinancePlotFrame(ttk.Frame):
             menu.grab_release()
 
     def _open_pdf_from_context(self) -> None:
-        if not self._context_metadata:
+        metadata = self._context_metadata
+        if not metadata:
             return
-        pdf_path_value = self._context_metadata.get("pdf_path")
-        if not pdf_path_value:
-            messagebox.showinfo("Open PDF", "No PDF is associated with this bar segment.")
-            return
-        pdf_path = Path(str(pdf_path_value))
-        page_value = self._context_metadata.get("pdf_page")
-        page: Optional[int]
-        try:
-            page = int(page_value) if page_value is not None else None
-        except (TypeError, ValueError):
-            page = None
-        if page is not None and page <= 0:
-            page = None
+
+        def _parse_page(value: Any) -> Optional[int]:
+            try:
+                number = int(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+            if number is None or number <= 0:
+                return None
+            return number
+
+        def _context_source(path_value: Any, page_value: Any) -> Optional[SegmentSource]:
+            if not path_value:
+                return None
+            pdf_path = Path(str(path_value))
+            return SegmentSource(pdf_path=pdf_path, page=_parse_page(page_value))
+
+        company_value = metadata.get("company")
+        period_value = metadata.get("period")
+        period_label = str(period_value) if period_value is not None else None
+        dataset = None
+        if company_value is not None:
+            dataset = self.datasets.get(str(company_value))
+        series_value = metadata.get("series")
+        pdf_path_value = metadata.get("pdf_path")
+        page_value = metadata.get("pdf_page")
+
+        sources_to_open: List[Tuple[str, SegmentSource, str]] = []
+
+        if series_value == self.VALUE_MODE_SHARE_COUNT:
+            if dataset is not None and period_label is not None:
+                share_source = dataset.share_count_source_for(period_label)
+                if share_source is not None:
+                    sources_to_open.append(("Number of Shares", share_source, "full"))
+            if not sources_to_open:
+                fallback = _context_source(pdf_path_value, page_value)
+                if fallback is not None:
+                    sources_to_open.append(("Number of Shares", fallback, "full"))
+                else:
+                    messagebox.showinfo(
+                        "Open PDF", "No PDF is associated with this data point."
+                    )
+                    self._context_metadata = None
+                    return
+        else:
+            finance_source: Optional[SegmentSource] = None
+            income_source: Optional[SegmentSource] = None
+            if dataset is not None and period_label is not None:
+                finance_source = dataset.source_for_series(
+                    FinanceDataset.FINANCE_LABEL, period_label
+                )
+                income_source = dataset.source_for_series(
+                    FinanceDataset.INCOME_LABEL, period_label
+                )
+            if finance_source or income_source:
+                if finance_source is not None and income_source is not None:
+                    sources_to_open.append(
+                        (FinanceDataset.FINANCE_LABEL, finance_source, "left")
+                    )
+                    sources_to_open.append(
+                        (FinanceDataset.INCOME_LABEL, income_source, "right")
+                    )
+                elif finance_source is not None:
+                    sources_to_open.append(
+                        (FinanceDataset.FINANCE_LABEL, finance_source, "full")
+                    )
+                elif income_source is not None:
+                    sources_to_open.append(
+                        (FinanceDataset.INCOME_LABEL, income_source, "full")
+                    )
+            else:
+                fallback = _context_source(pdf_path_value, page_value)
+                if fallback is not None:
+                    label_text = (
+                        metadata.get("type_label")
+                        or metadata.get("type_value")
+                        or "Entry"
+                    )
+                    sources_to_open.append((str(label_text), fallback, "full"))
+                else:
+                    messagebox.showinfo(
+                        "Open PDF", "No PDF is associated with this bar segment."
+                    )
+                    self._context_metadata = None
+                    return
+
+        for label_text, source, placement in sources_to_open:
+            self._open_pdf_source(source, str(label_text), placement)
+
+        self._context_metadata = None
+
+    def _open_pdf_source(
+        self, source: SegmentSource, label: str, placement: str = "full"
+    ) -> None:
+        pdf_path = source.pdf_path
+        page = source.page
         if not pdf_path.exists():
             messagebox.showwarning(
                 "Open PDF",
-                f"The PDF for this bar segment could not be found at {pdf_path}.",
+                f"The PDF for {label} could not be found at {pdf_path}.",
             )
             return
         if page is None:
             messagebox.showinfo(
                 "Open PDF",
-                "No page number is available for this entry. The PDF will open to its first page.",
+                f"No page number is available for {label}. The PDF will open to its first page.",
             )
             open_pdf(pdf_path, None)
-            self._context_metadata = None
             return
         if fitz is None:
             messagebox.showwarning(
                 "Open PDF",
                 (
                     "Viewing individual PDF pages requires the PyMuPDF package (import name 'fitz').\n"
-                    "The full PDF will be opened instead."
+                    f"The full PDF for {label} will be opened instead."
                 ),
             )
             open_pdf(pdf_path, page)
-            self._context_metadata = None
             return
         try:
-            viewer = PdfPageViewer(self, pdf_path, page)
+            viewer = PdfPageViewer(self, pdf_path, page, placement=placement)
             viewer.focus_set()
         except Exception as exc:
             messagebox.showwarning(
                 "Open PDF",
-                f"Could not display page {page} from {pdf_path.name}: {exc}\n"
+                f"Could not display page {page} from {pdf_path.name} ({label}): {exc}\n"
                 "The full PDF will be opened instead.",
             )
             open_pdf(pdf_path, page)
-        self._context_metadata = None
 
 
 class BarHoverHelper:
@@ -1418,6 +1603,7 @@ class BarHoverHelper:
     def __init__(self, axis) -> None:
         self.axis = axis
         self._rectangles: List[Tuple[Rectangle, Dict[str, Any]]] = []
+        self._point_targets: List[Tuple[Tuple[float, float], Dict[str, Any]]] = []
         self._annotation = self._create_annotation()
         self._canvas: Optional[FigureCanvasTkAgg] = None
         self._tk_widget: Optional[tk.Widget] = None
@@ -1426,6 +1612,8 @@ class BarHoverHelper:
         self._motion_binding_id: Optional[str] = None
         self._leave_binding_id: Optional[str] = None
         self._active_rectangle: Optional[Rectangle] = None
+        self._active_point: Optional[Tuple[float, float]] = None
+        self._point_hit_radius: float = 12.0
         self._context_callback: Optional[Callable[[Dict[str, Any], Any], None]] = None
 
     def _create_annotation(self):
@@ -1502,7 +1690,9 @@ class BarHoverHelper:
     def reset(self) -> None:
         self._ensure_annotation()
         self._rectangles.clear()
+        self._point_targets.clear()
         self._active_rectangle = None
+        self._active_point = None
         self._annotation.set_visible(False)
 
     def _on_tk_motion(self, tk_event: tk.Event) -> None:  # type: ignore[name-defined]
@@ -1562,6 +1752,7 @@ class BarHoverHelper:
         company: str,
         *,
         values: Optional[Sequence[float]] = None,
+        series_label: Optional[str] = None,
     ) -> None:
         for index, rect in enumerate(bar_container.patches):
             value_list = values if values is not None else segment.values
@@ -1575,6 +1766,8 @@ class BarHoverHelper:
                 "value": value_list[index] if index < len(value_list) else 0.0,
                 "company": company,
             }
+            if series_label:
+                metadata["series"] = series_label
             period_label = metadata["period"]
             if period_label is not None and segment.sources:
                 source = segment.sources.get(str(period_label))
@@ -1582,6 +1775,9 @@ class BarHoverHelper:
                     metadata["pdf_path"] = str(source.pdf_path)
                     metadata["pdf_page"] = source.page
             self._rectangles.append((rect, metadata))
+
+    def add_point_target(self, x: float, y: float, metadata: Dict[str, Any]) -> None:
+        self._point_targets.append(((float(x), float(y)), metadata))
 
     def clear(self) -> None:
         self.reset()
@@ -1646,8 +1842,30 @@ class BarHoverHelper:
             return
         self._annotation.set_visible(False)
         self._active_rectangle = None
+        self._active_point = None
         if self._canvas is not None:
             self._canvas.draw_idle()
+
+    def _find_point_hit(
+        self, display_x: float, display_y: float
+    ) -> Optional[Tuple[float, float, Dict[str, Any]]]:
+        if not self._point_targets:
+            return None
+        transform = self.axis.transData.transform
+        threshold_sq = self._point_hit_radius * self._point_hit_radius
+        closest: Optional[Tuple[float, float, Dict[str, Any]]] = None
+        best_distance = threshold_sq
+        for (x, y), metadata in self._point_targets:
+            if not math.isfinite(x) or not math.isfinite(y):
+                continue
+            pixel_x, pixel_y = transform((x, y))
+            dx = display_x - pixel_x
+            dy = display_y - pixel_y
+            distance_sq = dx * dx + dy * dy
+            if distance_sq <= best_distance:
+                closest = (x, y, metadata)
+                best_distance = distance_sq
+        return closest
 
     def _handle_motion_at(self, display_x: float, display_y: float) -> None:
         if self._canvas is None:
@@ -1678,6 +1896,26 @@ class BarHoverHelper:
             self._canvas.draw_idle()
             return
 
+        point_hit = self._find_point_hit(display_x, display_y)
+        if point_hit is not None:
+            point_x, point_y, metadata = point_hit
+            if (
+                self._active_point != (point_x, point_y)
+                or not self._annotation.get_visible()
+            ):
+                self._annotation.set_text(self._format_text(metadata))
+                self._annotation.set_visible(True)
+            self._active_rectangle = None
+            self._active_point = (point_x, point_y)
+            raw_value = metadata.get("value")
+            if isinstance(raw_value, (int, float)) and math.isfinite(raw_value):
+                numeric_value = float(raw_value)
+            else:
+                numeric_value = 0.0
+            self._position_annotation(point_x, point_y, numeric_value)
+            self._canvas.draw_idle()
+            return
+
         self._hide_annotation()
 
     def _on_motion(self, event) -> None:
@@ -1698,6 +1936,11 @@ class BarHoverHelper:
             contains, _ = rect.contains(event)
             if contains:
                 return metadata
+        if event.x is None or event.y is None:
+            return None
+        point_hit = self._find_point_hit(float(event.x), float(event.y))
+        if point_hit is not None:
+            return point_hit[2]
         return None
 
     def _on_button_press(self, event) -> None:
