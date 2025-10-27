@@ -2553,9 +2553,9 @@ class BarHoverHelper:
             f"ITEM: {item}",
             f"DATE: {date_value}",
             f"AMOUNT: {formatted_value}",
+            f"REPORTED SUM: {_format_scientific(reported_sum)}",
             f"NUMBER OF SHARES: {_format_scientific(share_count)}",
             f"SHARE PRICE: {_format_decimal(share_price_value)}",
-            f"REPORTED SUM: {_format_scientific(reported_sum)}",
             f"V/E SUM: {_format_decimal(ve_sum)}",
             f"P2V/E: {_format_decimal(p2ve)}",
         ]
