@@ -1304,21 +1304,19 @@ class BarHoverHelper:
             self._canvas.draw_idle()
 
     def _format_text(self, metadata: Dict[str, Any]) -> str:
-        value = metadata.get("value", 0.0)
-        formatted_value = f"{value:,.2f}"
+        value = metadata.get("value")
+        if isinstance(value, (int, float)) and math.isfinite(value):
+            formatted_value = f"{value:,.2f}"
+        else:
+            formatted_value = "—"
         type_value = metadata.get("type_value") or metadata.get("type_label") or "—"
         category = metadata.get("category") or "—"
         item = metadata.get("item") or "—"
-        key = metadata.get("key") or "—"
-        period = metadata.get("period") or "Period"
-        company = metadata.get("company") or "—"
         return (
-            f"Company: {company}\n"
-            f"Key: {key}\n"
-            f"Type: {type_value}\n"
-            f"Category: {category}\n"
-            f"Item: {item}\n"
-            f"{period}: {formatted_value}"
+            f"TYPE: {type_value}\n"
+            f"CATEGORY: {category}\n"
+            f"ITEM: {item}\n"
+            f"AMOUNT: {formatted_value}"
         )
 
     def _position_annotation(self, x: float, y: float, value: float) -> None:
