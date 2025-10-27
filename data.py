@@ -3036,7 +3036,16 @@ class ReportApp:
         dialog = tk.Toplevel(self.root)
         dialog.title(f"{entry.path.name} - Page {page_index + 1}")
         dialog.transient(self.root)
-        dialog.grab_set()
+
+        def _attempt_grab() -> None:
+            if not dialog.winfo_exists():
+                return
+            try:
+                dialog.grab_set()
+            except tk.TclError:
+                dialog.after(50, _attempt_grab)
+
+        dialog.after(0, _attempt_grab)
         dialog.focus_set()
 
         # Ensure the zoom dialog opens maximized so reviewers can inspect the page comfortably.
