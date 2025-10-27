@@ -39,6 +39,7 @@ from PIL import Image, ImageTk
 matplotlib.use("TkAgg")
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backend_bases import MouseEvent
 from matplotlib.figure import Figure
 from matplotlib import colors, colormaps
 from matplotlib.patches import Patch, Rectangle
@@ -1037,8 +1038,11 @@ class BarHoverHelper:
             self._annotation.arrow_patch.set_zorder(1000)
         self._annotation.set_visible(False)
         self._canvas: Optional[FigureCanvasTkAgg] = None
+        self._tk_widget: Optional[tk.Widget] = None
         self._connection_id: Optional[int] = None
         self._button_connection_id: Optional[int] = None
+        self._motion_binding_id: Optional[str] = None
+        self._leave_binding_id: Optional[str] = None
         self._active_rectangle: Optional[Rectangle] = None
         self._context_callback: Optional[Callable[[Dict[str, Any], Any], None]] = None
 
@@ -1047,11 +1051,22 @@ class BarHoverHelper:
             self._canvas.mpl_disconnect(self._connection_id)
         if self._button_connection_id is not None and self._canvas is not None:
             self._canvas.mpl_disconnect(self._button_connection_id)
+        if self._tk_widget is not None:
+            if self._motion_binding_id is not None:
+                self._tk_widget.unbind("<Motion>", self._motion_binding_id)
+            if self._leave_binding_id is not None:
+                self._tk_widget.unbind("<Leave>", self._leave_binding_id)
+        self._motion_binding_id = None
+        self._leave_binding_id = None
         self._canvas = canvas
+        self._tk_widget = canvas.get_tk_widget()
         self.reset()
         self._connection_id = canvas.mpl_connect("motion_notify_event", self._on_motion)
         self._button_connection_id = None
         self._context_callback = None
+        if self._tk_widget is not None:
+            self._motion_binding_id = self._tk_widget.bind("<Motion>", self._on_tk_motion, add="+")
+            self._leave_binding_id = self._tk_widget.bind("<Leave>", self._on_tk_leave, add="+")
 
     def _set_context_callback(
         self, callback: Optional[Callable[[Dict[str, Any], Any], None]]
@@ -1080,6 +1095,44 @@ class BarHoverHelper:
         self._rectangles.clear()
         self._active_rectangle = None
         self._annotation.set_visible(False)
+
+    def _on_tk_motion(self, tk_event: tk.Event) -> None:  # type: ignore[name-defined]
+        if self._canvas is None:
+            return
+        height = tk_event.widget.winfo_height() if hasattr(tk_event, "widget") else 0
+        width = tk_event.widget.winfo_width() if hasattr(tk_event, "widget") else 0
+        if height <= 0 or width <= 0:
+            return
+        figure_bbox = self._canvas.figure.bbox
+        scale_x = figure_bbox.width / width
+        scale_y = figure_bbox.height / height
+        display_x = tk_event.x * scale_x
+        display_y = (height - tk_event.y) * scale_y
+        mouse_event = MouseEvent(
+            "motion_notify_event",
+            self._canvas.figure.canvas,
+            display_x,
+            display_y,
+            guiEvent=tk_event,
+        )
+        if self.axis.bbox.contains(mouse_event.x, mouse_event.y):
+            mouse_event.inaxes = self.axis
+            mouse_event.xdata, mouse_event.ydata = self.axis.transData.inverted().transform(
+                (mouse_event.x, mouse_event.y)
+            )
+        else:
+            mouse_event.inaxes = None
+            mouse_event.xdata = None
+            mouse_event.ydata = None
+        self._on_motion(mouse_event)
+
+    def _on_tk_leave(self, _event: tk.Event) -> None:  # type: ignore[name-defined]
+        if not self._annotation.get_visible():
+            return
+        self._annotation.set_visible(False)
+        self._active_rectangle = None
+        if self._canvas is not None:
+            self._canvas.draw_idle()
 
     def add_segment(
         self,
