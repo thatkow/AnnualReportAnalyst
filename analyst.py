@@ -2086,13 +2086,13 @@ class FinancePlotFrame(ttk.Frame):
             self.axis.set_ylabel("Share Price")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARES:
             self.axis.yaxis.set_major_formatter(self._per_share_formatter)
-            self.axis.set_ylabel("V/E (Value per Share)")
+            self.axis.set_ylabel("V (Value per Share)")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
             self.axis.yaxis.set_major_formatter(self._share_price_formatter)
             self.axis.set_ylabel("Share Price Multiple")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD:
             self.axis.yaxis.set_major_formatter(self._share_price_formatter)
-            self.axis.set_ylabel("P2V/E (Share Price ÷ Value per Share)")
+            self.axis.set_ylabel("V/P (Share Price ÷ Value per Share)")
         else:
             self.axis.yaxis.set_major_formatter(self._reported_formatter)
             self.axis.set_ylabel("Reported Value")
@@ -2559,9 +2559,9 @@ class BarHoverHelper:
             f"AMOUNT: {formatted_value}",
             f"REPORTED SUM: {_format_scientific(reported_sum)}",
             f"NUMBER OF SHARES: {_format_scientific(share_count)}",
-            f"V/E SUM: {_format_decimal(ve_sum)}",
+            f"V SUM: {_format_decimal(ve_sum)}",
             f"SHARE PRICE: {_format_decimal(share_price_value)}",
-            f"P2V/E: {_format_decimal(p2ve)}",
+            f"V/P: {_format_decimal(p2ve)}",
         ]
 
         return "\n".join(lines)
@@ -2793,7 +2793,7 @@ class FinanceAnalystApp:
         ttk.Label(values_frame, text="Values:").pack(side=tk.LEFT)
         ttk.Radiobutton(
             values_frame,
-            text="V/E",
+            text="V",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_SHARES,
             command=self._on_normalization_change,
@@ -2807,7 +2807,7 @@ class FinanceAnalystApp:
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Radiobutton(
             values_frame,
-            text="P2V/E",
+            text="V/P",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
             command=self._on_normalization_change,
