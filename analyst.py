@@ -1414,31 +1414,48 @@ class BarHoverHelper:
     def _on_tk_motion(self, tk_event: tk.Event) -> None:  # type: ignore[name-defined]
         if self._canvas is None:
             return
-        widget = self._tk_widget if self._tk_widget is not None else getattr(tk_event, "widget", None)
-        if widget is None:
-            return
-        width = widget.winfo_width()
-        height = widget.winfo_height()
-        if height <= 0 or width <= 0:
-            return
         canvas_backend = getattr(self._canvas.figure, "canvas", None)
         if canvas_backend is None:
             return
-        backend_width, backend_height = canvas_backend.get_width_height()
-        if backend_width <= 0 or backend_height <= 0:
-            backend_width, backend_height = width, height
-        scale_x = backend_width / width if width else 1.0
-        scale_y = backend_height / height if height else 1.0
-        tk_canvas = getattr(canvas_backend, "_tkcanvas", None)
-        if tk_canvas is not None:
-            canvas_x = tk_canvas.canvasx(tk_event.x)
-            canvas_y = tk_canvas.canvasy(tk_event.y)
-        else:
-            canvas_x = tk_event.x
-            canvas_y = tk_event.y
-        display_x = canvas_x * scale_x
-        display_y = (backend_height - canvas_y) * scale_y
-        self._handle_motion_at(display_x, display_y)
+
+        motion_handler = getattr(canvas_backend, "motion_notify_event", None)
+        if motion_handler is None:
+            return
+
+        try:
+            # Matplotlib 3.8+ accepts the original Tk event and performs the
+            # coordinate translation internally, ensuring consistency with the
+            # values reported to motion_notify_event callbacks.
+            motion_handler(tk_event)
+            return
+        except TypeError:
+            # Older Matplotlib versions expect explicit canvas coordinates. If
+            # the call above raises, fall back to the previous manual
+            # conversion routine so legacy environments continue to work.
+            widget = (
+                self._tk_widget if self._tk_widget is not None else getattr(tk_event, "widget", None)
+            )
+            if widget is None:
+                return
+            width = widget.winfo_width()
+            height = widget.winfo_height()
+            if height <= 0 or width <= 0:
+                return
+            backend_width, backend_height = canvas_backend.get_width_height()
+            if backend_width <= 0 or backend_height <= 0:
+                backend_width, backend_height = width, height
+            scale_x = backend_width / width if width else 1.0
+            scale_y = backend_height / height if height else 1.0
+            tk_canvas = getattr(canvas_backend, "_tkcanvas", None)
+            if tk_canvas is not None:
+                canvas_x = tk_canvas.canvasx(tk_event.x)
+                canvas_y = tk_canvas.canvasy(tk_event.y)
+            else:
+                canvas_x = tk_event.x
+                canvas_y = tk_event.y
+            display_x = canvas_x * scale_x
+            display_y = (backend_height - canvas_y) * scale_y
+            self._handle_motion_at(display_x, display_y)
 
     def _on_tk_leave(self, _event: tk.Event) -> None:  # type: ignore[name-defined]
         self._hide_annotation()
