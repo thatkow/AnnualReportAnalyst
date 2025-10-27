@@ -14,6 +14,7 @@ import calendar
 import csv
 import math
 import re
+from bisect import bisect_left
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1292,15 +1293,13 @@ class FinanceDataset:
             target_date = target_datetime.date()
             price = date_prices.get(target_date)
             if price is None:
-                closest_date = None
-                smallest_delta: Optional[int] = None
-                for candidate in available_dates:
-                    delta = abs((candidate - target_date).days)
-                    if smallest_delta is None or delta < smallest_delta:
-                        smallest_delta = delta
-                        closest_date = candidate
-                if closest_date is not None and smallest_delta is not None and smallest_delta <= 7:
-                    price = date_prices[closest_date]
+                index = bisect_left(available_dates, target_date)
+                while index < len(available_dates):
+                    candidate = available_dates[index]
+                    if candidate >= target_date:
+                        price = date_prices[candidate]
+                        break
+                    index += 1
             if price is not None and price > 0 and math.isfinite(price):
                 prices[str(label)] = float(price)
 
