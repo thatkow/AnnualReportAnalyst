@@ -588,6 +588,15 @@ class FinanceDataset:
         self._normalization_mode = self.NORMALIZATION_REPORTED
         self._load()
         self._load_metadata()
+        self._prefetch_share_prices()
+
+    def _prefetch_share_prices(self) -> None:
+        if self._period_share_price_map is not None or self._share_price_error is not None:
+            return
+        try:
+            self._period_share_price_map = self._fetch_period_share_prices()
+        except ValueError as exc:
+            self._share_price_error = str(exc)
 
     @staticmethod
     def _clean_numeric(value: str) -> float:
@@ -981,8 +990,22 @@ class FinanceDataset:
 
         return values, present
 
-    def share_prices_for(self, periods: Sequence[str]) -> Tuple[List[float], List[bool]]:
-        price_map = self._get_period_share_price_map()
+    def _try_get_period_share_price_map(self) -> Dict[str, float]:
+        if self._period_share_price_map is not None:
+            return self._period_share_price_map
+        if self._share_price_error is not None:
+            return {}
+        try:
+            self._period_share_price_map = self._fetch_period_share_prices()
+        except ValueError as exc:
+            self._share_price_error = str(exc)
+            return {}
+        return self._period_share_price_map or {}
+
+    def _build_share_price_list(
+        self, periods: Sequence[str]
+    ) -> Tuple[List[float], List[bool]]:
+        price_map = self._try_get_period_share_price_map()
         period_index = {label: idx for idx, label in enumerate(self.periods)}
         values: List[float] = []
         present: List[bool] = []
@@ -1005,12 +1028,55 @@ class FinanceDataset:
                 values.append(math.nan)
                 present.append(False)
 
+        return values, present
+
+    def share_prices_for(self, periods: Sequence[str]) -> Tuple[List[float], List[bool]]:
+        values, present = self._build_share_price_list(periods)
         if not any(present):
-            raise ValueError(
+            message = self._share_price_error or (
                 f"Share price data is not available for {self.company_root.name or 'the selected company'}."
             )
-
+            raise ValueError(message)
         return values, present
+
+    def share_prices_for_optional(
+        self, periods: Sequence[str]
+    ) -> Tuple[List[float], List[bool]]:
+        return self._build_share_price_list(periods)
+
+    def aggregate_raw_totals(
+        self, periods: Sequence[str], *, series: str
+    ) -> Tuple[List[float], List[bool]]:
+        if series == self.FINANCE_LABEL:
+            segments = self.finance_segments
+        elif series == self.INCOME_LABEL:
+            segments = self.income_segments
+        else:
+            return [math.nan] * len(periods), [False] * len(periods)
+
+        period_index = {label: idx for idx, label in enumerate(self.periods)}
+        totals: List[float] = []
+        has_data: List[bool] = []
+
+        for label in periods:
+            idx = period_index.get(label)
+            if idx is None:
+                totals.append(math.nan)
+                has_data.append(False)
+                continue
+
+            total = 0.0
+            present = False
+            for segment in segments:
+                if idx >= len(segment.raw_values):
+                    continue
+                present = True
+                total += segment.raw_values[idx]
+
+            totals.append(total if present else math.nan)
+            has_data.append(present)
+
+        return totals, has_data
 
     def source_for_series(self, series: str, period: str) -> Optional[SegmentSource]:
         lookup: Sequence[RowSegment]
@@ -1254,6 +1320,71 @@ class FinancePlotFrame(ttk.Frame):
         self.hover_helper.begin_update(context_callback)
         self.figure.tight_layout()
         self.canvas.draw()
+
+    def _compute_period_metrics(
+        self,
+        dataset: FinanceDataset,
+        periods: Sequence[str],
+        *,
+        series: str,
+    ) -> Dict[str, Dict[str, Any]]:
+        if not periods:
+            return {}
+
+        share_counts, share_count_presence = dataset.share_counts_for(periods)
+        share_prices, share_price_presence = dataset.share_prices_for_optional(periods)
+        reported_totals, reported_presence = dataset.aggregate_raw_totals(periods, series=series)
+
+        metrics: Dict[str, Dict[str, Any]] = {}
+        for idx, label in enumerate(periods):
+            label_key = str(label)
+
+            share_count_value = (
+                float(share_counts[idx])
+                if idx < len(share_counts)
+                and share_count_presence[idx]
+                and math.isfinite(share_counts[idx])
+                and share_counts[idx] > 0
+                else math.nan
+            )
+
+            reported_value = (
+                float(reported_totals[idx])
+                if idx < len(reported_totals)
+                and reported_presence[idx]
+                and reported_totals[idx] is not None
+                and math.isfinite(reported_totals[idx])
+                else math.nan
+            )
+
+            share_price_value = (
+                float(share_prices[idx])
+                if idx < len(share_prices)
+                and share_price_presence[idx]
+                and math.isfinite(share_prices[idx])
+                and share_prices[idx] > 0
+                else math.nan
+            )
+
+            if math.isfinite(reported_value) and math.isfinite(share_count_value) and share_count_value != 0:
+                ve_sum = reported_value / share_count_value
+            else:
+                ve_sum = math.nan
+
+            if math.isfinite(ve_sum) and ve_sum != 0 and math.isfinite(share_price_value):
+                p2ve_value = share_price_value / ve_sum
+            else:
+                p2ve_value = math.nan
+
+            metrics[label_key] = {
+                "date": label,
+                "share_count": share_count_value,
+                "reported_sum": reported_value,
+                "ve_sum": ve_sum,
+                "p2ve": p2ve_value,
+            }
+
+        return metrics
 
     def set_display_mode(self, mode: str) -> None:
         if mode not in {self.MODE_STACKED, self.MODE_LINE}:
@@ -1602,6 +1733,11 @@ class FinancePlotFrame(ttk.Frame):
                     share_prices[idx] if share_presence[idx] else math.nan
                     for idx in range(len(share_prices))
                 ]
+                share_price_metrics = self._compute_period_metrics(
+                    dataset,
+                    periods,
+                    series=FinanceDataset.FINANCE_LABEL,
+                )
                 scatter = self.axis.scatter(
                     x_positions,
                     price_points,
@@ -1624,11 +1760,14 @@ class FinancePlotFrame(ttk.Frame):
                         "type_value": "Share Price",
                         "category": company,
                         "item": dataset.share_price_symbol or "Share Price",
-                        "period": period_label,
+                        "period": str(period_label),
                         "value": value,
                         "company": company,
                         "series": self.VALUE_MODE_SHARE_PRICE,
                     }
+                    extra = share_price_metrics.get(str(period_label))
+                    if extra:
+                        metadata.update(extra)
                     hover_helper.add_point_target(
                         float(x_positions[idx]), float(value), metadata
                     )
@@ -1697,6 +1836,11 @@ class FinancePlotFrame(ttk.Frame):
                 ]
                 finance_pos_totals = [0.0] * len(finance_active_indices)
                 finance_neg_totals = [0.0] * len(finance_active_indices)
+                finance_metrics = self._compute_period_metrics(
+                    dataset,
+                    finance_periods_active,
+                    series=FinanceDataset.FINANCE_LABEL,
+                )
 
                 if finance_active_indices:
                     for segment, segment_values in finance_segment_values:
@@ -1725,6 +1869,7 @@ class FinancePlotFrame(ttk.Frame):
                             values=filtered_values,
                             series_label=FinanceDataset.FINANCE_LABEL,
                             totals=finance_totals_active,
+                            metadata_overrides=finance_metrics,
                         )
 
                 income_segment_values: List[Tuple[RowSegment, List[float]]] = []
@@ -1764,6 +1909,11 @@ class FinancePlotFrame(ttk.Frame):
                 ]
                 income_pos_totals = [0.0] * len(income_active_indices)
                 income_neg_totals = [0.0] * len(income_active_indices)
+                income_metrics = self._compute_period_metrics(
+                    dataset,
+                    income_periods_active,
+                    series=FinanceDataset.INCOME_LABEL,
+                )
 
                 if income_active_indices:
                     for segment, segment_values in income_segment_values:
@@ -1792,6 +1942,7 @@ class FinancePlotFrame(ttk.Frame):
                             values=filtered_values,
                             series_label=FinanceDataset.INCOME_LABEL,
                             totals=income_totals_active,
+                            metadata_overrides=income_metrics,
                         )
 
                 if finance_active_indices:
@@ -1930,7 +2081,7 @@ class FinancePlotFrame(ttk.Frame):
             self.axis.set_ylabel("Share Price")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARES:
             self.axis.yaxis.set_major_formatter(self._per_share_formatter)
-            self.axis.set_ylabel("Value per Share")
+            self.axis.set_ylabel("V/E (Value per Share)")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
             self.axis.yaxis.set_major_formatter(self._share_price_formatter)
             self.axis.set_ylabel("Share Price Multiple")
@@ -2331,6 +2482,7 @@ class BarHoverHelper:
         values: Optional[Sequence[float]] = None,
         series_label: Optional[str] = None,
         totals: Optional[Sequence[float]] = None,
+        metadata_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> None:
         for index, rect in enumerate(bar_container.patches):
             value_list = values if values is not None else segment.values
@@ -2340,7 +2492,7 @@ class BarHoverHelper:
                 "type_value": segment.type_value,
                 "category": segment.category,
                 "item": segment.item,
-                "period": periods[index] if index < len(periods) else str(index),
+                "period": str(periods[index]) if index < len(periods) else str(index),
                 "value": value_list[index] if index < len(value_list) else 0.0,
                 "company": company,
             }
@@ -2354,6 +2506,10 @@ class BarHoverHelper:
                     metadata["pdf_page"] = source.page
             if totals is not None and index < len(totals):
                 metadata["sum_value"] = totals[index]
+            if metadata_overrides:
+                extra = metadata_overrides.get(str(period_label))
+                if extra:
+                    metadata.update(extra)
             self._rectangles.append((rect, metadata))
 
     def add_point_target(self, x: float, y: float, metadata: Dict[str, Any]) -> None:
@@ -2378,13 +2534,36 @@ class BarHoverHelper:
         type_value = metadata.get("type_value") or metadata.get("type_label") or "—"
         category = metadata.get("category") or "—"
         item = metadata.get("item") or "—"
-        return (
-            f"TYPE: {type_value}\n"
-            f"CATEGORY: {category}\n"
-            f"ITEM: {item}\n"
-            f"AMOUNT: {formatted_value}\n"
-            f"SUM: {formatted_sum}"
-        )
+        date_value = metadata.get("date") or metadata.get("period") or "—"
+        share_count = metadata.get("share_count")
+        reported_sum = metadata.get("reported_sum")
+        ve_sum = metadata.get("ve_sum")
+        p2ve = metadata.get("p2ve")
+
+        def _format_scientific(raw: Any) -> str:
+            if isinstance(raw, (int, float)) and math.isfinite(raw):
+                return f"{raw:.3e}"
+            return "—"
+
+        def _format_decimal(raw: Any) -> str:
+            if isinstance(raw, (int, float)) and math.isfinite(raw):
+                return f"{raw:,.2f}"
+            return "—"
+
+        lines = [
+            f"TYPE: {type_value}",
+            f"CATEGORY: {category}",
+            f"ITEM: {item}",
+            f"DATE: {date_value}",
+            f"AMOUNT: {formatted_value}",
+            f"SUM: {formatted_sum}",
+            f"NUMBER OF SHARES: {_format_scientific(share_count)}",
+            f"REPORTED SUM: {_format_scientific(reported_sum)}",
+            f"V/E SUM: {_format_decimal(ve_sum)}",
+            f"P2V/E: {_format_decimal(p2ve)}",
+        ]
+
+        return "\n".join(lines)
 
     def _position_annotation(self, x: float, y: float, value: float) -> None:
         xlim = self.axis.get_xlim()
@@ -2613,7 +2792,7 @@ class FinanceAnalystApp:
         ttk.Label(values_frame, text="Values:").pack(side=tk.LEFT)
         ttk.Radiobutton(
             values_frame,
-            text="Normalize over number of shares",
+            text="V/E",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_SHARES,
             command=self._on_normalization_change,
