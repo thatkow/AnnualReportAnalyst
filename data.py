@@ -1872,14 +1872,14 @@ class ReportApp:
                 preview_window.destroy()
             return
 
-        copied_files = 0
+        moved_files = 0
         for pdf_path in recent_pdfs:
             try:
                 destination = self._ensure_unique_path(raw_dir / pdf_path.name)
-                shutil.copy2(pdf_path, destination)
-                copied_files += 1
+                shutil.move(str(pdf_path), str(destination))
+                moved_files += 1
             except Exception as exc:
-                messagebox.showwarning("Copy PDF", f"Could not copy '{pdf_path.name}': {exc}")
+                messagebox.showwarning("Move PDF", f"Could not move '{pdf_path.name}': {exc}")
 
         self._refresh_company_options()
         if hasattr(self, "company_combo"):
@@ -1893,8 +1893,8 @@ class ReportApp:
         self._open_company_tab()
         if preview_window is not None and preview_window.winfo_exists():
             preview_window.destroy()
-        if copied_files:
-            messagebox.showinfo("Create Company", f"Copied {copied_files} PDF(s) into '{safe_name}/raw'.")
+        if moved_files:
+            messagebox.showinfo("Create Company", f"Moved {moved_files} PDF(s) into '{safe_name}/raw'.")
 
     def _open_in_file_manager(self, path: Path) -> None:
         try:
