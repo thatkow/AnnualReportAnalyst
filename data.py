@@ -419,6 +419,7 @@ class ReportApp:
         self.combined_preview_target: Optional[
             Tuple[PDFEntry, int, Tuple[str, str, str]]
         ] = None
+        self.scraped_table_sources: Dict[ttk.Treeview, Dict[str, Any]] = {}
         self.combined_split_pane: Optional[ttk.Panedwindow] = None
         self.combined_preview_detail_var = tk.StringVar(
             master=self.root, value="Select a row to view the PDF page."
@@ -3225,6 +3226,7 @@ class ReportApp:
         for child in self.scraped_inner.winfo_children():
             child.destroy()
         self.scraped_images.clear()
+        self.scraped_table_sources = {}
         self._clear_combined_tab()
         if hasattr(self, "scrape_progress"):
             self.scrape_progress["value"] = 0
@@ -3255,6 +3257,8 @@ class ReportApp:
                 preview_path: Optional[Path] = None
                 preview_text: Optional[str] = None
                 rows: List[List[str]] = []
+                csv_target_path: Optional[Path] = None
+                csv_delimiter = ","
 
                 txt_name = meta.get("txt")
                 if isinstance(txt_name, str) and txt_name:
@@ -3273,7 +3277,9 @@ class ReportApp:
                     csv_name = meta.get("csv")
                     if isinstance(csv_name, str) and csv_name:
                         candidate_csv = doc_dir / csv_name
+                        csv_target_path = candidate_csv
                         if candidate_csv.exists():
+                            csv_delimiter = self._detect_csv_delimiter(candidate_csv)
                             rows = self._read_csv_rows(candidate_csv)
                             if rows:
                                 preview_mode = "csv"
@@ -3385,7 +3391,8 @@ class ReportApp:
                     ttk.Label(image_frame, text="Preview unavailable").pack(expand=True, fill=tk.BOTH)
 
                 table_frame.columnconfigure(0, weight=1)
-                table_frame.rowconfigure(0, weight=1)
+                table_frame.columnconfigure(1, weight=0)
+                table_frame.rowconfigure(1, weight=1)
 
                 if not rows:
                     ttk.Label(table_frame, text="No data available").grid(
@@ -3397,28 +3404,56 @@ class ReportApp:
                     if not any(heading.strip() for heading in headings):
                         headings = [f"Column {idx + 1}" for idx in range(len(headings))]
                     columns = [f"col_{idx}" for idx in range(len(headings))]
+                    controls_frame = ttk.Frame(table_frame)
+                    controls_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+                    controls_frame.columnconfigure(0, weight=1)
                     tree = ttk.Treeview(
                         table_frame,
                         columns=columns,
                         show="headings",
                         height=min(15, max(3, len(data_rows))),
+                        selectmode="extended",
                     )
                     y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
                     x_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=tree.xview)
                     tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
-                    tree.grid(row=0, column=0, sticky="nsew")
-                    y_scroll.grid(row=0, column=1, sticky="ns")
-                    x_scroll.grid(row=1, column=0, sticky="ew")
+                    tree.grid(row=1, column=0, sticky="nsew")
+                    y_scroll.grid(row=1, column=1, sticky="ns")
+                    x_scroll.grid(row=2, column=0, sticky="ew")
                     for col, heading in zip(columns, headings):
                         tree.heading(col, text=heading)
                         tree.column(col, anchor="center", stretch=True, width=120)
+                    table_rows: List[List[str]] = []
                     if data_rows:
                         for data in data_rows:
                             values = list(data)
                             if len(values) < len(columns):
                                 values.extend([""] * (len(columns) - len(values)))
+                            elif len(values) > len(columns):
+                                values = values[: len(columns)]
+                            table_rows.append(values.copy())
                             display_values = [self._format_table_value(value) for value in values]
                             tree.insert("", tk.END, values=display_values)
+
+                    delete_row_button = ttk.Button(
+                        controls_frame,
+                        text="Delete Row",
+                        command=lambda t=tree: self._delete_scraped_row(t),
+                        width=12,
+                    )
+                    delete_row_button.grid(row=0, column=1, sticky="e")
+                    if csv_target_path is None or not table_rows:
+                        delete_row_button.state(["disabled"])
+
+                    self.scraped_table_sources[tree] = {
+                        "header": list(headings),
+                        "rows": table_rows,
+                        "csv_path": csv_target_path,
+                        "delimiter": csv_delimiter,
+                        "doc_dir": doc_dir,
+                        "category": category,
+                        "button": delete_row_button,
+                    }
 
                 row_index += 1
 
@@ -5417,6 +5452,65 @@ class ReportApp:
         except Exception as exc:
             messagebox.showwarning("Open CSV", f"Could not open CSV file: {exc}")
 
+    def _delete_scraped_row(self, tree: ttk.Treeview) -> None:
+        info = self.scraped_table_sources.get(tree)
+        if not info:
+            return
+
+        selection = tree.selection()
+        if not selection:
+            messagebox.showinfo("Delete Row", "Select a row to delete from the table.")
+            return
+
+        csv_path: Optional[Path] = info.get("csv_path")
+        if csv_path is None:
+            messagebox.showinfo(
+                "Delete Row",
+                "This table is not associated with a CSV file that can be updated.",
+            )
+            return
+
+        data_rows: List[List[str]] = info.get("rows", [])
+        if not data_rows:
+            messagebox.showinfo("Delete Row", "There are no rows available to delete.")
+            return
+
+        # Map current tree items to the backing data row positions.
+        index_map = {item: idx for idx, item in enumerate(tree.get_children())}
+        delete_indices = sorted(
+            {index_map[item] for item in selection if item in index_map}, reverse=True
+        )
+        if not delete_indices:
+            messagebox.showinfo("Delete Row", "Select a row to delete from the table.")
+            return
+
+        for item in selection:
+            tree.delete(item)
+
+        for idx in delete_indices:
+            if 0 <= idx < len(data_rows):
+                data_rows.pop(idx)
+
+        tree.configure(height=min(15, max(3, len(data_rows))))
+
+        header: List[str] = info.get("header", [])
+        delimiter: str = info.get("delimiter", ",")
+        if not self._write_scraped_csv_rows(csv_path, header, data_rows, delimiter=delimiter):
+            doc_dir: Optional[Path] = info.get("doc_dir")
+            category: Optional[str] = info.get("category")
+            if isinstance(doc_dir, Path) and isinstance(category, str):
+                self._reload_scraped_csv(doc_dir, category)
+            return
+
+        info["rows"] = data_rows
+        button: Optional[ttk.Button] = info.get("button")
+        if isinstance(button, ttk.Button) and data_rows:
+            button.state(["!disabled"])
+        elif isinstance(button, ttk.Button) and not data_rows:
+            button.state(["disabled"])
+
+        self._refresh_combined_tab(auto_update=True)
+
     def _delete_all_scraped(self) -> None:
         company = self.company_var.get()
         if not company:
@@ -5464,6 +5558,48 @@ class ReportApp:
             ]
         except Exception:
             return []
+
+    def _detect_csv_delimiter(self, csv_path: Path) -> str:
+        try:
+            with csv_path.open("r", encoding="utf-8", newline="") as fh:
+                sample = fh.read(4096)
+        except Exception:
+            return ","
+        return "\t" if "\t" in sample else ","
+
+    def _write_scraped_csv_rows(
+        self,
+        csv_path: Path,
+        header: List[str],
+        rows: List[List[str]],
+        *,
+        delimiter: str = ",",
+    ) -> bool:
+        if not header:
+            messagebox.showwarning(
+                "Delete Row", "The table could not be saved because it does not include headers."
+            )
+            return False
+
+        normalized_rows: List[List[str]] = []
+        header_length = len(header)
+        for row in rows:
+            values = list(row)
+            if len(values) < header_length:
+                values.extend([""] * (header_length - len(values)))
+            elif len(values) > header_length:
+                values = values[:header_length]
+            normalized_rows.append(values)
+
+        try:
+            with csv_path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh, delimiter=delimiter)
+                writer.writerow(header)
+                writer.writerows(normalized_rows)
+        except Exception as exc:
+            messagebox.showwarning("Delete Row", f"Could not save updated CSV: {exc}")
+            return False
+        return True
 
     def _get_prompt_text(self, company: str, category: str) -> Optional[str]:
         candidate_paths: List[Path] = []
