@@ -37,6 +37,7 @@ from PIL import Image, ImageTk
 matplotlib.use("TkAgg")
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backend_bases import MouseEvent
 from matplotlib.figure import Figure
 from matplotlib import colors, colormaps
 from matplotlib.patches import Patch, Rectangle
@@ -1117,9 +1118,32 @@ class BarHoverHelper:
             backend_width, backend_height = width, height
         scale_x = backend_width / width if width else 1.0
         scale_y = backend_height / height if height else 1.0
-        display_x = tk_event.x * scale_x
-        display_y = (height - tk_event.y) * scale_y
-        canvas_backend.motion_notify_event(display_x, display_y)
+        tk_canvas = getattr(canvas_backend, "_tkcanvas", None)
+        if tk_canvas is not None:
+            canvas_x = tk_canvas.canvasx(tk_event.x)
+            canvas_y = tk_canvas.canvasy(tk_event.y)
+        else:
+            canvas_x = tk_event.x
+            canvas_y = tk_event.y
+        display_x = canvas_x * scale_x
+        display_y = (backend_height - canvas_y) * scale_y
+        buttons_getter = getattr(canvas_backend, "_mpl_buttons", None)
+        modifiers_getter = getattr(canvas_backend, "_mpl_modifiers", None)
+        buttons = buttons_getter(tk_event) if callable(buttons_getter) else None
+        modifiers = (
+            modifiers_getter(tk_event)
+            if callable(modifiers_getter)
+            else None
+        )
+        MouseEvent(
+            "motion_notify_event",
+            canvas_backend,
+            display_x,
+            display_y,
+            guiEvent=tk_event,
+            buttons=buttons,
+            modifiers=modifiers,
+        )._process()
 
     def _on_tk_leave(self, _event: tk.Event) -> None:  # type: ignore[name-defined]
         if not self._annotation.get_visible():
