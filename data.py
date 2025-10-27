@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 from dataclasses import dataclass, field
@@ -4025,6 +4025,86 @@ class ReportApp:
 
         records.sort(key=_sort_key)
 
+    def _parse_combined_period_label(self, label: str) -> Optional[date]:
+        text = str(label).strip()
+        if not text:
+            return None
+        formats = [
+            "%d.%m.%Y",
+            "%Y-%m-%d",
+            "%m/%d/%Y",
+            "%d/%m/%Y",
+            "%Y/%m/%d",
+            "%Y.%m.%d",
+            "%b %d %Y",
+            "%B %d %Y",
+            "%b %Y",
+            "%B %Y",
+            "%Y",
+        ]
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+            if fmt in {"%b %Y", "%B %Y"}:
+                return date(parsed.year, parsed.month, 1)
+            if fmt == "%Y":
+                return date(parsed.year, 1, 1)
+            return parsed.date()
+        forward_quarter = re.match(r"(?i)^Q([1-4])\s*(\d{4})$", text)
+        if forward_quarter:
+            quarter = int(forward_quarter.group(1))
+            year = int(forward_quarter.group(2))
+            month = (quarter - 1) * 3 + 1
+            return date(year, month, 1)
+        reverse_quarter = re.match(r"(?i)^(\d{4})\s*Q([1-4])$", text)
+        if reverse_quarter:
+            year = int(reverse_quarter.group(1))
+            quarter = int(reverse_quarter.group(2))
+            month = (quarter - 1) * 3 + 1
+            return date(year, month, 1)
+        fiscal_match = re.match(r"(?i)^FY\s*(\d{4})$", text)
+        if fiscal_match:
+            year = int(fiscal_match.group(1))
+            return date(year, 1, 1)
+        return None
+
+    def _sort_combined_period_columns(
+        self,
+        columns: List[str],
+        column_name_map: Dict[str, Tuple[Path, str]],
+    ) -> List[str]:
+        if not columns:
+            return columns
+        base_columns_order = [
+            column for column in columns if column in {"Type", "Category", "Item", "Note"}
+        ]
+        data_columns = [
+            column for column in columns if column not in {"Type", "Category", "Item", "Note"}
+        ]
+        if not data_columns:
+            return base_columns_order
+        pdf_priority = {path: index for index, path in enumerate(self.combined_pdf_order)}
+        decorated: List[Tuple[int, Optional[date], int, int, str]] = []
+        for index, column_name in enumerate(data_columns):
+            mapping = column_name_map.get(column_name)
+            label_value = mapping[1] if mapping else column_name
+            parsed_date = self._parse_combined_period_label(label_value)
+            pdf_index = pdf_priority.get(mapping[0], len(pdf_priority)) if mapping else len(pdf_priority)
+            sort_group = 0 if parsed_date is not None else 1
+            decorated.append((sort_group, parsed_date, pdf_index, index, column_name))
+        decorated.sort(
+            key=lambda item: (
+                item[0],
+                item[1] or date.max,
+                item[2],
+                item[3],
+            )
+        )
+        sorted_data_columns = [item[4] for item in decorated]
+        return base_columns_order + sorted_data_columns
+
     def _apply_reference_sort_to_combined(self) -> None:
         if not self.combined_all_records:
             return
@@ -4936,6 +5016,8 @@ class ReportApp:
                 column_name_map[column_name] = (path, label_value)
             logger.info("Combined labels for %s -> %s", path.name, labels)
             column_labels_by_pdf[path] = labels
+
+        ordered_columns = self._sort_combined_period_columns(ordered_columns, column_name_map)
 
         logger.info("Combined ordered columns: %s", ordered_columns)
         self.combined_labels_by_pdf = {path: labels[:] for path, labels in column_labels_by_pdf.items()}
