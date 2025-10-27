@@ -3196,7 +3196,7 @@ class ReportApp:
         if not messagebox.askyesno(
             "Confirm Commit",
             f"Commit the current assignments for {company}?",
-            parent=self,
+            parent=self.root,
         ):
             return
         if self.assigned_pages_path is None:
