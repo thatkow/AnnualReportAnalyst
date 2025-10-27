@@ -1861,6 +1861,7 @@ class FinancePlotFrame(ttk.Frame):
                             color=dataset.color_for_key(segment.key),
                             edgecolor=finance_color,
                             linewidth=2.4,
+                            linestyle="-",
                         )
                         hover_helper.add_segment(
                             rectangles,
@@ -1932,8 +1933,9 @@ class FinancePlotFrame(ttk.Frame):
                             width=bar_width,
                             bottom=bottoms,
                             color=dataset.color_for_key(segment.key),
-                            edgecolor=income_color,
+                            edgecolor=finance_color,
                             linewidth=2.4,
+                            linestyle="--",
                         )
                         hover_helper.add_segment(
                             rectangles,
@@ -1964,6 +1966,7 @@ class FinancePlotFrame(ttk.Frame):
                             facecolor="white",
                             edgecolor=finance_color,
                             linewidth=1.0,
+                            linestyle="-",
                             label=f"{company} {FinanceDataset.FINANCE_LABEL}",
                         )
                     )
@@ -1984,8 +1987,9 @@ class FinancePlotFrame(ttk.Frame):
                     legend_handles.append(
                         Patch(
                             facecolor="white",
-                            edgecolor=income_color,
+                            edgecolor=finance_color,
                             linewidth=1.0,
+                            linestyle="--",
                             label=f"{company} {FinanceDataset.INCOME_LABEL}",
                         )
                     )
@@ -2845,6 +2849,7 @@ class FinanceAnalystApp:
 
         self.plot_frame = FinancePlotFrame(outer)
         self.plot_frame.pack(fill=tk.BOTH, expand=True)
+        self.plot_frame.set_normalization_mode(self.normalization_var.get())
 
     def _on_mode_change(self) -> None:
         mode = self.mode_var.get()
