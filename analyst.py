@@ -1757,15 +1757,19 @@ class FinancePlotFrame(ttk.Frame):
                     periods,
                     series=FinanceDataset.FINANCE_LABEL,
                 )
-                scatter = self.axis.scatter(
+                line = self.axis.plot(
                     x_positions,
                     price_points,
-                    color=finance_color,
+                    linestyle="-",
                     marker="o",
-                    s=48,
+                    color=finance_color,
+                    markerfacecolor=finance_color,
+                    markeredgecolor=finance_color,
+                    linewidth=1.6,
+                    markersize=6,
                     label=f"{company} Share Price",
                 )
-                legend_handles.append(scatter)
+                legend_handles.append(line[0])
                 for idx, present in enumerate(share_presence):
                     if not present:
                         continue
@@ -2028,7 +2032,7 @@ class FinancePlotFrame(ttk.Frame):
                 self.axis.set_xticks([])
 
         else:
-            hover_helper.begin_update(None)
+            hover_helper.begin_update(self._show_context_menu)
             x_positions = period_indices
             for company, dataset in self.datasets.items():
                 finance_color, income_color = self._company_colors.setdefault(
@@ -2041,13 +2045,18 @@ class FinancePlotFrame(ttk.Frame):
                 )
                 finance_included = [
                     finance_presence[idx]
-                    and not math.isclose(value, 0.0, abs_tol=1e-12)
-                    for idx, value in enumerate(finance_totals)
+                    and math.isfinite(finance_totals[idx])
+                    for idx in range(len(finance_totals))
                 ]
                 finance_points = [
                     value if finance_included[idx] else math.nan
                     for idx, value in enumerate(finance_totals)
                 ]
+                finance_metrics = self._compute_period_metrics(
+                    dataset,
+                    periods,
+                    series=FinanceDataset.FINANCE_LABEL,
+                )
                 if any(finance_included):
                     line = self.axis.plot(
                         x_positions,
@@ -2060,19 +2069,54 @@ class FinancePlotFrame(ttk.Frame):
                         label=f"{company} {FinanceDataset.FINANCE_LABEL}",
                     )
                     legend_handles.append(line[0])
+                    for idx, present in enumerate(finance_included):
+                        if not present:
+                            continue
+                        value = finance_points[idx]
+                        if not math.isfinite(value):
+                            continue
+                        period_label = periods[idx] if idx < len(periods) else str(idx)
+                        metadata: Dict[str, Any] = {
+                            "key": f"{company}_finance_total",
+                            "type_label": FinanceDataset.FINANCE_LABEL,
+                            "type_value": FinanceDataset.FINANCE_LABEL,
+                            "category": company,
+                            "item": "Total",
+                            "period": str(period_label),
+                            "value": float(value),
+                            "company": company,
+                            "series": FinanceDataset.FINANCE_LABEL,
+                        }
+                        source = dataset.source_for_series(
+                            FinanceDataset.FINANCE_LABEL, str(period_label)
+                        )
+                        if source:
+                            metadata["pdf_path"] = str(source.pdf_path)
+                            metadata["pdf_page"] = source.page
+                        extra = finance_metrics.get(str(period_label))
+                        if extra:
+                            metadata.update(extra)
+                        hover_helper.add_point_target(
+                            float(x_positions[idx]), float(value), metadata
+                        )
 
                 income_totals, income_presence = dataset.aggregate_totals(
                     periods, series=FinanceDataset.INCOME_LABEL
                 )
                 income_included = [
                     income_presence[idx]
-                    and not math.isclose(value, 0.0, abs_tol=1e-12)
-                    for idx, value in enumerate(income_totals)
+                    and math.isfinite(income_totals[idx])
+                    for idx in range(len(income_totals))
                 ]
                 income_points = [
                     value if income_included[idx] else math.nan
                     for idx, value in enumerate(income_totals)
                 ]
+                income_metrics = self._compute_period_metrics(
+                    dataset,
+                    periods,
+                    series=FinanceDataset.INCOME_LABEL,
+                )
                 if any(income_included):
                     line = self.axis.plot(
                         x_positions,
@@ -2085,6 +2129,36 @@ class FinancePlotFrame(ttk.Frame):
                         label=f"{company} {FinanceDataset.INCOME_LABEL}",
                     )
                     legend_handles.append(line[0])
+                    for idx, present in enumerate(income_included):
+                        if not present:
+                            continue
+                        value = income_points[idx]
+                        if not math.isfinite(value):
+                            continue
+                        period_label = periods[idx] if idx < len(periods) else str(idx)
+                        metadata = {
+                            "key": f"{company}_income_total",
+                            "type_label": FinanceDataset.INCOME_LABEL,
+                            "type_value": FinanceDataset.INCOME_LABEL,
+                            "category": company,
+                            "item": "Total",
+                            "period": str(period_label),
+                            "value": float(value),
+                            "company": company,
+                            "series": FinanceDataset.INCOME_LABEL,
+                        }
+                        source = dataset.source_for_series(
+                            FinanceDataset.INCOME_LABEL, str(period_label)
+                        )
+                        if source:
+                            metadata["pdf_path"] = str(source.pdf_path)
+                            metadata["pdf_page"] = source.page
+                        extra = income_metrics.get(str(period_label))
+                        if extra:
+                            metadata.update(extra)
+                        hover_helper.add_point_target(
+                            float(x_positions[idx]), float(value), metadata
+                        )
 
             if period_indices:
                 self.axis.set_xticks(period_indices)
@@ -2819,13 +2893,6 @@ class FinanceAnalystApp:
             text="Value/Share",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_SHARES,
-            command=self._on_normalization_change,
-        ).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Radiobutton(
-            values_frame,
-            text="Normalize over latest share price",
-            variable=self.normalization_var,
-            value=FinanceDataset.NORMALIZATION_SHARE_PRICE,
             command=self._on_normalization_change,
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Radiobutton(
