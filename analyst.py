@@ -10,6 +10,7 @@ see how individual entries contribute to each reporting period.
 
 from __future__ import annotations
 
+import calendar
 import csv
 import math
 import re
@@ -59,6 +60,102 @@ VALID_NOTES = {
     NOTE_SHARE_COUNT,
     NOTE_SHARE_PRICE,
 }
+
+
+_PERIOD_DATE_FORMATS = (
+    "%d.%m.%Y",
+    "%d/%m/%Y",
+    "%d-%m-%Y",
+    "%Y-%m-%d",
+    "%Y.%m.%d",
+    "%Y/%m/%d",
+    "%d %b %Y",
+    "%d %B %Y",
+    "%b %Y",
+    "%B %Y",
+    "%Y",
+)
+
+
+def _normalize_two_digit_year(year_text: str) -> Optional[int]:
+    try:
+        value = int(year_text)
+    except ValueError:
+        return None
+    if 0 <= value <= 99:
+        return 2000 + value if value < 50 else 1900 + value
+    return value if value >= 1900 else None
+
+
+def _parse_period_label(label: str) -> Optional[datetime]:
+    """Best-effort parsing for period labels into comparable datetimes."""
+
+    text = label.strip()
+    if not text:
+        return None
+
+    normalized = (
+        text.replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
+    candidates = {normalized, normalized.replace("  ", " ")}
+    simplified = normalized.replace(".", "/")
+    candidates.update({simplified, simplified.replace("/", "-"), normalized.replace("/", "-")})
+
+    upper_text = normalized.upper()
+    if upper_text.startswith("FY"):
+        candidates.add(normalized[2:].strip())
+    candidates.add(re.sub(r"\bFY\b", "", normalized, flags=re.IGNORECASE).strip())
+
+    for candidate in list(candidates):
+        collapsed = re.sub(r"\s+", " ", candidate).strip()
+        if collapsed:
+            candidates.add(collapsed)
+
+    for candidate in candidates:
+        for date_format in _PERIOD_DATE_FORMATS:
+            try:
+                parsed = datetime.strptime(candidate, date_format)
+            except ValueError:
+                continue
+            else:
+                return parsed
+
+    year_match = re.search(r"(?<!\d)(\d{4})(?!\d)", normalized)
+    year_value: Optional[int] = None
+    if year_match:
+        year_value = int(year_match.group(1))
+    else:
+        short_match = re.search(r"(?<!\d)(\d{2})(?!\d)", normalized)
+        if short_match:
+            year_value = _normalize_two_digit_year(short_match.group(1))
+
+    if year_value is None:
+        return None
+
+    month = 1
+    quarter_match = re.search(r"Q([1-4])", normalized, flags=re.IGNORECASE)
+    if quarter_match:
+        quarter = int(quarter_match.group(1))
+        month = min(quarter * 3, 12)
+    else:
+        half_match = re.search(r"H([12])", normalized, flags=re.IGNORECASE)
+        if half_match:
+            half = int(half_match.group(1))
+            month = 6 if half == 1 else 12
+        elif re.search(r"FY", normalized, flags=re.IGNORECASE):
+            month = 12
+
+    day = min(28, calendar.monthrange(year_value, month)[1])
+    return datetime(year_value, month, day)
+
+
+def _period_sort_key(label: str) -> Tuple[int, Any]:
+    parsed = _parse_period_label(label)
+    if parsed is not None:
+        return (0, parsed)
+    return (1, label.strip().lower())
 
 
 @dataclass
@@ -355,22 +452,10 @@ class FinanceDataset:
             if share_prices is not None and len(share_prices) != len(self.periods):
                 raise ValueError("share_price row does not match the number of periods")
 
-            sort_indices = list(range(len(self.periods)))
-            try:
-                parsed_periods = [
-                    datetime.strptime(self.periods[idx].strip(), "%d.%m.%Y")
-                    for idx in sort_indices
-                ]
-            except ValueError:
-                parsed_periods = []
-
-            if parsed_periods:
-                sort_indices = [
-                    index
-                    for _, index in sorted(
-                        zip(parsed_periods, sort_indices), key=lambda pair: pair[0]
-                    )
-                ]
+            sort_indices = sorted(
+                range(len(self.periods)), key=lambda idx: _period_sort_key(self.periods[idx])
+            )
+            if sort_indices != list(range(len(self.periods))):
                 self.periods = [self.periods[idx] for idx in sort_indices]
                 share_counts = [share_counts[idx] for idx in sort_indices]
                 if share_prices is not None:
@@ -701,14 +786,7 @@ class FinancePlotFrame(ttk.Frame):
 
     @staticmethod
     def _sort_periods(periods: Sequence[str]) -> List[str]:
-        def sort_key(label: str) -> Tuple[int, Any]:
-            try:
-                parsed = datetime.strptime(label.strip(), "%d.%m.%Y")
-                return (0, parsed)
-            except ValueError:
-                return (1, label)
-
-        return sorted(periods, key=sort_key)
+        return sorted(periods, key=_period_sort_key)
 
     @staticmethod
     def _merge_periods(existing: Sequence[str], new_periods: Sequence[str]) -> List[str]:
