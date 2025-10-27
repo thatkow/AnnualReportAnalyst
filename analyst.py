@@ -37,7 +37,6 @@ from PIL import Image, ImageTk
 matplotlib.use("TkAgg")
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.backend_bases import MouseEvent
 from matplotlib.figure import Figure
 from matplotlib import colors, colormaps
 from matplotlib.patches import Patch, Rectangle
@@ -723,7 +722,7 @@ class FinancePlotFrame(ttk.Frame):
                             bottom=bottoms,
                             color=dataset.color_for_key(segment.key),
                             edgecolor=finance_color,
-                            linewidth=0.8,
+                            linewidth=2.4,
                         )
                         hover_helper.add_segment(
                             rectangles,
@@ -780,7 +779,7 @@ class FinancePlotFrame(ttk.Frame):
                             bottom=bottoms,
                             color=dataset.color_for_key(segment.key),
                             edgecolor=income_color,
-                            linewidth=0.8,
+                            linewidth=2.4,
                         )
                         hover_helper.add_segment(
                             rectangles,
@@ -1111,7 +1110,7 @@ class BarHoverHelper:
         if height <= 0 or width <= 0:
             return
         canvas_backend = getattr(self._canvas.figure, "canvas", None)
-        if canvas_backend is None or not hasattr(canvas_backend, "motion_notify_event"):
+        if canvas_backend is None:
             return
         backend_width, backend_height = canvas_backend.get_width_height()
         if backend_width <= 0 or backend_height <= 0:
@@ -1127,31 +1126,10 @@ class BarHoverHelper:
             canvas_y = tk_event.y
         display_x = canvas_x * scale_x
         display_y = (backend_height - canvas_y) * scale_y
-        buttons_getter = getattr(canvas_backend, "_mpl_buttons", None)
-        modifiers_getter = getattr(canvas_backend, "_mpl_modifiers", None)
-        buttons = buttons_getter(tk_event) if callable(buttons_getter) else None
-        modifiers = (
-            modifiers_getter(tk_event)
-            if callable(modifiers_getter)
-            else None
-        )
-        MouseEvent(
-            "motion_notify_event",
-            canvas_backend,
-            display_x,
-            display_y,
-            guiEvent=tk_event,
-            buttons=buttons,
-            modifiers=modifiers,
-        )._process()
+        self._handle_motion_at(display_x, display_y)
 
     def _on_tk_leave(self, _event: tk.Event) -> None:  # type: ignore[name-defined]
-        if not self._annotation.get_visible():
-            return
-        self._annotation.set_visible(False)
-        self._active_rectangle = None
-        if self._canvas is not None:
-            self._canvas.draw_idle()
+        self._hide_annotation()
 
     def add_segment(
         self,
@@ -1242,19 +1220,28 @@ class BarHoverHelper:
         self._annotation.set_ha(ha)
         self._annotation.set_va(va)
 
-    def _on_motion(self, event) -> None:
+    def _hide_annotation(self) -> None:
+        if not self._annotation.get_visible():
+            return
+        self._annotation.set_visible(False)
+        self._active_rectangle = None
+        if self._canvas is not None:
+            self._canvas.draw_idle()
+
+    def _handle_motion_at(self, display_x: float, display_y: float) -> None:
         if self._canvas is None:
             return
-        if event.inaxes != self.axis:
-            if self._annotation.get_visible():
-                self._annotation.set_visible(False)
-                self._canvas.draw_idle()
-            self._active_rectangle = None
+        if math.isnan(display_x) or math.isnan(display_y):
+            self._hide_annotation()
+            return
+        if not self.axis.bbox.contains(display_x, display_y):
+            self._hide_annotation()
             return
 
         for rect, metadata in self._rectangles:
-            contains, _ = rect.contains(event)
-            if not contains:
+            if not rect.get_visible():
+                continue
+            if not rect.contains_point((display_x, display_y)):
                 continue
             if self._active_rectangle is not rect or not self._annotation.get_visible():
                 self._annotation.set_text(self._format_text(metadata))
@@ -1270,10 +1257,18 @@ class BarHoverHelper:
             self._canvas.draw_idle()
             return
 
-        if self._annotation.get_visible():
-            self._annotation.set_visible(False)
-            self._canvas.draw_idle()
-        self._active_rectangle = None
+        self._hide_annotation()
+
+    def _on_motion(self, event) -> None:
+        if self._canvas is None:
+            return
+        if event.inaxes not in (None, self.axis):
+            self._hide_annotation()
+            return
+        if event.x is None or event.y is None:
+            self._hide_annotation()
+            return
+        self._handle_motion_at(event.x, event.y)
 
     def _metadata_for_event(self, event) -> Optional[Dict[str, Any]]:
         if event.inaxes != self.axis:
