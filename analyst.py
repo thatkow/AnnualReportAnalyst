@@ -203,98 +203,28 @@ def open_pdf(pdf_path: Path, page: Optional[int] = None) -> None:
         messagebox.showwarning("Open PDF", f"Could not open PDF: {exc}")
 
 
-class PdfPageViewer(tk.Toplevel):
-    """Display a single rendered PDF page inside a scrollable window."""
+class _PdfMonitorPlacementMixin:
+    """Utilities for positioning PDF viewers on the preferred monitor."""
 
-    def __init__(
-        self,
-        master: tk.Widget,
-        pdf_path: Path,
-        page_number: int,
-        *,
-        placement: str = "full",
-    ) -> None:
-        super().__init__(master)
-        if fitz is None:
-            messagebox.showerror(
-                "PyMuPDF Required",
-                (
-                    "Viewing a single PDF page requires the PyMuPDF package (import name 'fitz').\n"
-                    "Install it with 'pip install PyMuPDF' to enable in-app previews."
-                ),
-            )
-            self.after(0, self.destroy)
-            raise RuntimeError("PyMuPDF (fitz) is not installed")
-        self.title(f"{pdf_path.name} — Page {page_number}")
-        self._photo: Optional[ImageTk.PhotoImage] = None
-        self._pdf_path = pdf_path
-        self._page_number = page_number
-        placement_normalized = placement.lower()
-        if placement_normalized not in {"full", "left", "right"}:
-            placement_normalized = "full"
-        self._placement = placement_normalized
-        self._build_widgets()
-        self._render_page()
-        self._enter_fullscreen_on_preferred_monitor()
-        self.bind("<Escape>", self._close_from_escape)
+    _placement: str = "full"
 
-    def _build_widgets(self) -> None:
-        self.configure(bg="#2b2b2b")
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=1)
-
-        self._canvas = tk.Canvas(self, bg="#2b2b2b", highlightthickness=0)
-        self._canvas.grid(row=0, column=0, sticky="nsew")
-
-        self._vbar = tk.Scrollbar(self, orient=tk.VERTICAL, command=self._canvas.yview)
-        self._vbar.grid(row=0, column=1, sticky="ns")
-        self._hbar = tk.Scrollbar(self, orient=tk.HORIZONTAL, command=self._canvas.xview)
-        self._hbar.grid(row=1, column=0, sticky="ew")
-
-        self._canvas.configure(yscrollcommand=self._vbar.set, xscrollcommand=self._hbar.set)
-
-    def _render_page(self) -> None:
-        if fitz is None:
-            raise RuntimeError("PyMuPDF (fitz) is not installed")
-        try:
-            with fitz.open(self._pdf_path) as doc:
-                page = doc.load_page(self._page_number - 1)
-                zoom_matrix = fitz.Matrix(1.5, 1.5)
-                pix = page.get_pixmap(matrix=zoom_matrix)
-        except Exception as exc:
-            messagebox.showwarning(
-                "Open PDF",
-                f"Could not render page {self._page_number} from {self._pdf_path.name}: {exc}",
-            )
-            self.after(0, self.destroy)
-            return
-
-        mode = "RGBA" if pix.alpha else "RGB"
-        image = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
-        self._photo = ImageTk.PhotoImage(image)
-        self._canvas.delete("all")
-        self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
-        self._canvas.configure(scrollregion=(0, 0, pix.width, pix.height))
-
-    def _enter_fullscreen_on_preferred_monitor(self) -> None:
-        """Expand the viewer to a preferred monitor, splitting width when requested."""
-
+    def _preferred_monitor_info(self) -> Dict[str, int]:
         monitor_info: Optional[Dict[str, int]] = None
         monitor_count = 1
         try:
-            monitor_count = int(self.tk.call("winfo", "monitorcount", self))
+            monitor_count = int(self.tk.call("winfo", "monitorcount", self))  # type: ignore[attr-defined]
         except tk.TclError:
             monitor_count = 1
 
         if monitor_count > 1:
             monitors: List[Dict[str, Any]] = []
             try:
-                monitors_raw = self.tk.splitlist(self.tk.call("winfo", "monitors", self))
+                monitors_raw = self.tk.splitlist(self.tk.call("winfo", "monitors", self))  # type: ignore[attr-defined]
             except tk.TclError:
                 monitors_raw = []
 
             for raw_monitor in monitors_raw:
-                parts = list(self.tk.splitlist(raw_monitor))
+                parts = list(self.tk.splitlist(raw_monitor))  # type: ignore[attr-defined]
                 if len(parts) < 4:
                     continue
                 try:
@@ -346,43 +276,275 @@ class PdfPageViewer(tk.Toplevel):
                 "height": int(self.winfo_screenheight()),
             }
 
+        return monitor_info
+
+    def _apply_monitor_geometry(self, placement: str = "full") -> None:
+        monitor_info = self._preferred_monitor_info()
         width = int(monitor_info["width"])
         height = int(monitor_info["height"])
         x = int(monitor_info["x"])
         y = int(monitor_info["y"])
 
-        placement = getattr(self, "_placement", "full")
-        if placement in {"left", "right"} and width > 1:
+        normalized = placement.lower()
+        if normalized not in {"full", "left", "right"}:
+            normalized = "full"
+        self._placement = normalized
+
+        if normalized in {"left", "right"} and width > 1:
             left_width = max(1, width // 2)
             right_width = max(1, width - left_width)
-            if placement == "left":
+            if normalized == "left":
                 width = left_width
             else:
                 width = right_width
                 x += left_width
 
         geometry = f"{width}x{height}+{x}+{y}"
-        self.geometry(geometry)
+        self.geometry(geometry)  # type: ignore[misc]
         self.update_idletasks()
 
-        if placement == "full":
+        if normalized == "full":
             try:
-                self.attributes("-fullscreen", True)
+                self.attributes("-fullscreen", True)  # type: ignore[attr-defined]
                 return
             except tk.TclError:
                 try:
-                    self.state("zoomed")
+                    self.state("zoomed")  # type: ignore[attr-defined]
                 except tk.TclError:
                     pass
         else:
             try:
-                self.attributes("-fullscreen", False)
+                self.attributes("-fullscreen", False)  # type: ignore[attr-defined]
             except tk.TclError:
                 pass
             try:
-                self.state("normal")
+                self.state("normal")  # type: ignore[attr-defined]
             except tk.TclError:
                 pass
+
+
+def _render_pdf_page(pdf_path: Path, page_number: int) -> ImageTk.PhotoImage:
+    if fitz is None:
+        raise RuntimeError("PyMuPDF (fitz) is not installed")
+    if page_number <= 0:
+        raise ValueError("page_number must be 1 or greater")
+    with fitz.open(pdf_path) as doc:  # type: ignore[union-attr]
+        page = doc.load_page(page_number - 1)
+        zoom_matrix = fitz.Matrix(1.5, 1.5)
+        pix = page.get_pixmap(matrix=zoom_matrix)
+    mode = "RGBA" if pix.alpha else "RGB"
+    image = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+    return ImageTk.PhotoImage(image)
+
+
+class PdfPageViewer(_PdfMonitorPlacementMixin, tk.Toplevel):
+    """Display a single rendered PDF page inside a scrollable window."""
+
+    def __init__(
+        self,
+        master: tk.Widget,
+        pdf_path: Path,
+        page_number: int,
+        *,
+        placement: str = "full",
+    ) -> None:
+        super().__init__(master)
+        if fitz is None:
+            messagebox.showerror(
+                "PyMuPDF Required",
+                (
+                    "Viewing a single PDF page requires the PyMuPDF package (import name 'fitz').\n"
+                    "Install it with 'pip install PyMuPDF' to enable in-app previews."
+                ),
+            )
+            self.after(0, self.destroy)
+            raise RuntimeError("PyMuPDF (fitz) is not installed")
+        self.title(f"{pdf_path.name} — Page {page_number}")
+        self._photo: Optional[ImageTk.PhotoImage] = None
+        self._pdf_path = pdf_path
+        self._page_number = page_number
+        self._build_widgets()
+        self._render_page()
+        self._apply_monitor_geometry(placement)
+        self.bind("<Escape>", self._close_from_escape)
+
+    def _build_widgets(self) -> None:
+        self.configure(bg="#2b2b2b")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        self._canvas = tk.Canvas(self, bg="#2b2b2b", highlightthickness=0)
+        self._canvas.grid(row=0, column=0, sticky="nsew")
+
+        self._vbar = tk.Scrollbar(self, orient=tk.VERTICAL, command=self._canvas.yview)
+        self._vbar.grid(row=0, column=1, sticky="ns")
+        self._hbar = tk.Scrollbar(self, orient=tk.HORIZONTAL, command=self._canvas.xview)
+        self._hbar.grid(row=1, column=0, sticky="ew")
+
+        self._canvas.configure(yscrollcommand=self._vbar.set, xscrollcommand=self._hbar.set)
+
+    def _render_page(self) -> None:
+        if fitz is None:
+            raise RuntimeError("PyMuPDF (fitz) is not installed")
+        try:
+            self._photo = _render_pdf_page(self._pdf_path, self._page_number)
+        except Exception as exc:
+            messagebox.showwarning(
+                "Open PDF",
+                f"Could not render page {self._page_number} from {self._pdf_path.name}: {exc}",
+            )
+            self.after(0, self.destroy)
+            return
+
+        if self._photo is None:
+            return
+
+        width = self._photo.width()
+        height = self._photo.height()
+        self._canvas.delete("all")
+        self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
+        self._canvas.configure(scrollregion=(0, 0, width, height))
+
+    def _close_from_escape(self, _event: Any) -> None:
+        try:
+            self.attributes("-fullscreen", False)
+        except tk.TclError:
+            pass
+        self.destroy()
+
+
+class PdfSplitViewer(_PdfMonitorPlacementMixin, tk.Toplevel):
+    """Display two PDF pages side-by-side on the preferred monitor."""
+
+    def __init__(
+        self,
+        master: tk.Widget,
+        left: Tuple[str, SegmentSource],
+        right: Tuple[str, SegmentSource],
+        title: str,
+    ) -> None:
+        super().__init__(master)
+        if fitz is None:
+            messagebox.showerror(
+                "PyMuPDF Required",
+                (
+                    "Viewing individual PDF pages requires the PyMuPDF package (import name 'fitz').\n"
+                    "Install PyMuPDF to enable in-app previews."
+                ),
+            )
+            self.after(0, self.destroy)
+            raise RuntimeError("PyMuPDF (fitz) is not installed")
+
+        self.title(title)
+        self._left_label, self._left_source = left
+        self._right_label, self._right_source = right
+        self._left_photo: Optional[ImageTk.PhotoImage] = None
+        self._right_photo: Optional[ImageTk.PhotoImage] = None
+        self._build_widgets()
+        self._render_pages()
+        self._apply_monitor_geometry("full")
+        self.bind("<Escape>", self._close_from_escape)
+
+    def _build_widgets(self) -> None:
+        self.configure(bg="#1f1f1f")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        paned.grid(row=0, column=0, sticky="nsew")
+
+        self._left_frame = ttk.Frame(paned)
+        self._left_frame.grid_rowconfigure(1, weight=1)
+        self._left_frame.grid_columnconfigure(0, weight=1)
+        self._right_frame = ttk.Frame(paned)
+        self._right_frame.grid_rowconfigure(1, weight=1)
+        self._right_frame.grid_columnconfigure(0, weight=1)
+        paned.add(self._left_frame, weight=1)
+        paned.add(self._right_frame, weight=1)
+
+        ttk.Label(
+            self._left_frame,
+            text=self._left_label,
+            anchor="center",
+            padding=(0, 6),
+        ).grid(row=0, column=0, columnspan=2, sticky="ew")
+
+        self._left_canvas = tk.Canvas(
+            self._left_frame, bg="#2b2b2b", highlightthickness=0
+        )
+        self._left_canvas.grid(row=1, column=0, sticky="nsew")
+        self._left_vbar = tk.Scrollbar(
+            self._left_frame, orient=tk.VERTICAL, command=self._left_canvas.yview
+        )
+        self._left_vbar.grid(row=1, column=1, sticky="ns")
+        self._left_canvas.configure(yscrollcommand=self._left_vbar.set)
+        self._left_hbar = tk.Scrollbar(
+            self._left_frame, orient=tk.HORIZONTAL, command=self._left_canvas.xview
+        )
+        self._left_hbar.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self._left_canvas.configure(xscrollcommand=self._left_hbar.set)
+
+        ttk.Label(
+            self._right_frame,
+            text=self._right_label,
+            anchor="center",
+            padding=(0, 6),
+        ).grid(row=0, column=0, columnspan=2, sticky="ew")
+
+        self._right_canvas = tk.Canvas(
+            self._right_frame, bg="#2b2b2b", highlightthickness=0
+        )
+        self._right_canvas.grid(row=1, column=0, sticky="nsew")
+        self._right_vbar = tk.Scrollbar(
+            self._right_frame, orient=tk.VERTICAL, command=self._right_canvas.yview
+        )
+        self._right_vbar.grid(row=1, column=1, sticky="ns")
+        self._right_canvas.configure(yscrollcommand=self._right_vbar.set)
+        self._right_hbar = tk.Scrollbar(
+            self._right_frame, orient=tk.HORIZONTAL, command=self._right_canvas.xview
+        )
+        self._right_hbar.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self._right_canvas.configure(xscrollcommand=self._right_hbar.set)
+
+    def _render_pages(self) -> None:
+        if fitz is None:
+            raise RuntimeError("PyMuPDF (fitz) is not installed")
+
+        try:
+            left_page = int(self._left_source.page)
+            self._left_photo = _render_pdf_page(self._left_source.pdf_path, left_page)
+        except Exception as exc:
+            messagebox.showwarning(
+                "Open PDF",
+                f"Could not render {self._left_label} page {self._left_source.page}: {exc}",
+            )
+            self.after(0, self.destroy)
+            return
+
+        try:
+            right_page = int(self._right_source.page)
+            self._right_photo = _render_pdf_page(self._right_source.pdf_path, right_page)
+        except Exception as exc:
+            messagebox.showwarning(
+                "Open PDF",
+                f"Could not render {self._right_label} page {self._right_source.page}: {exc}",
+            )
+            self.after(0, self.destroy)
+            return
+
+        if self._left_photo is not None:
+            width = self._left_photo.width()
+            height = self._left_photo.height()
+            self._left_canvas.delete("all")
+            self._left_canvas.create_image(0, 0, anchor="nw", image=self._left_photo)
+            self._left_canvas.configure(scrollregion=(0, 0, width, height))
+
+        if self._right_photo is not None:
+            width = self._right_photo.width()
+            height = self._right_photo.height()
+            self._right_canvas.delete("all")
+            self._right_canvas.create_image(0, 0, anchor="nw", image=self._right_photo)
+            self._right_canvas.configure(scrollregion=(0, 0, width, height))
 
     def _close_from_escape(self, _event: Any) -> None:
         try:
@@ -1723,6 +1885,9 @@ class FinancePlotFrame(ttk.Frame):
         page_value = metadata.get("pdf_page")
 
         sources_to_open: List[Tuple[str, SegmentSource, str]] = []
+        paired_sources: Optional[
+            Tuple[Tuple[str, SegmentSource], Tuple[str, SegmentSource]]
+        ] = None
 
         if series_value == self.VALUE_MODE_SHARE_COUNT:
             if dataset is not None and period_label is not None:
@@ -1750,21 +1915,25 @@ class FinancePlotFrame(ttk.Frame):
                     FinanceDataset.INCOME_LABEL, period_label
                 )
             if finance_source or income_source:
-                if finance_source is not None and income_source is not None:
-                    sources_to_open.append(
-                        (FinanceDataset.FINANCE_LABEL, finance_source, "left")
+                if (
+                    finance_source is not None
+                    and finance_source.page is not None
+                    and income_source is not None
+                    and income_source.page is not None
+                ):
+                    paired_sources = (
+                        (FinanceDataset.FINANCE_LABEL, finance_source),
+                        (FinanceDataset.INCOME_LABEL, income_source),
                     )
-                    sources_to_open.append(
-                        (FinanceDataset.INCOME_LABEL, income_source, "right")
-                    )
-                elif finance_source is not None:
-                    sources_to_open.append(
-                        (FinanceDataset.FINANCE_LABEL, finance_source, "full")
-                    )
-                elif income_source is not None:
-                    sources_to_open.append(
-                        (FinanceDataset.INCOME_LABEL, income_source, "full")
-                    )
+                else:
+                    if finance_source is not None:
+                        sources_to_open.append(
+                            (FinanceDataset.FINANCE_LABEL, finance_source, "full")
+                        )
+                    if income_source is not None:
+                        sources_to_open.append(
+                            (FinanceDataset.INCOME_LABEL, income_source, "full")
+                        )
             else:
                 fallback = _context_source(pdf_path_value, page_value)
                 if fallback is not None:
@@ -1780,6 +1949,17 @@ class FinancePlotFrame(ttk.Frame):
                     )
                     self._context_metadata = None
                     return
+
+        if paired_sources is not None:
+            company_label = metadata.get("company") or "Company"
+            period_label = metadata.get("period") or "Period"
+            title = f"{company_label} — {period_label}"
+            if not self._open_pdf_pair(paired_sources[0], paired_sources[1], title):
+                for label_text, source, placement in (
+                    (paired_sources[0][0], paired_sources[0][1], "left"),
+                    (paired_sources[1][0], paired_sources[1][1], "right"),
+                ):
+                    sources_to_open.append((label_text, source, placement))
 
         for label_text, source, placement in sources_to_open:
             self._open_pdf_source(source, str(label_text), placement)
@@ -1824,6 +2004,34 @@ class FinancePlotFrame(ttk.Frame):
                 "The full PDF will be opened instead.",
             )
             open_pdf(pdf_path, page)
+
+    def _open_pdf_pair(
+        self,
+        left: Tuple[str, SegmentSource],
+        right: Tuple[str, SegmentSource],
+        title: str,
+    ) -> bool:
+        left_source = left[1]
+        right_source = right[1]
+        if left_source.page is None or right_source.page is None:
+            return False
+        if not left_source.pdf_path.exists() or not right_source.pdf_path.exists():
+            return False
+        if fitz is None:
+            return False
+        try:
+            viewer = PdfSplitViewer(self, left, right, title)
+            viewer.focus_set()
+            return True
+        except Exception as exc:
+            messagebox.showwarning(
+                "Open PDF",
+                (
+                    "Could not display the Finance and Income PDFs together. "
+                    f"The individual documents will be opened instead.\nDetails: {exc}"
+                ),
+            )
+            return False
 
 
 class BarHoverHelper:
