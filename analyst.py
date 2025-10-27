@@ -1119,7 +1119,7 @@ class BarHoverHelper:
         scale_y = backend_height / height if height else 1.0
         display_x = tk_event.x * scale_x
         display_y = (height - tk_event.y) * scale_y
-        canvas_backend.motion_notify_event(display_x, display_y, guiEvent=tk_event)
+        canvas_backend.motion_notify_event(display_x, display_y)
 
     def _on_tk_leave(self, _event: tk.Event) -> None:  # type: ignore[name-defined]
         if not self._annotation.get_visible():
