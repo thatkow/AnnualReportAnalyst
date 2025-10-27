@@ -1336,22 +1336,7 @@ class BarHoverHelper:
     def __init__(self, axis) -> None:
         self.axis = axis
         self._rectangles: List[Tuple[Rectangle, Dict[str, Any]]] = []
-        self._annotation = axis.annotate(
-            "",
-            xy=(0, 0),
-            xytext=(12, 12),
-            textcoords="offset points",
-            bbox={"boxstyle": "round", "fc": "#f9f9f9", "ec": "#555555", "alpha": 0.95},
-            arrowprops={"arrowstyle": "->", "color": "#555555"},
-        )
-        # Ensure the tooltip annotation renders above all bar segments so it is always visible.
-        self._annotation.set_zorder(1000)
-        bbox_patch = self._annotation.get_bbox_patch()
-        if bbox_patch is not None:
-            bbox_patch.set_zorder(1000)
-        if hasattr(self._annotation, "arrow_patch") and self._annotation.arrow_patch is not None:
-            self._annotation.arrow_patch.set_zorder(1000)
-        self._annotation.set_visible(False)
+        self._annotation = self._create_annotation()
         self._canvas: Optional[FigureCanvasTkAgg] = None
         self._tk_widget: Optional[tk.Widget] = None
         self._connection_id: Optional[int] = None
@@ -1360,6 +1345,30 @@ class BarHoverHelper:
         self._leave_binding_id: Optional[str] = None
         self._active_rectangle: Optional[Rectangle] = None
         self._context_callback: Optional[Callable[[Dict[str, Any], Any], None]] = None
+
+    def _create_annotation(self):
+        annotation = self.axis.annotate(
+            "",
+            xy=(0, 0),
+            xytext=(12, 12),
+            textcoords="offset points",
+            bbox={"boxstyle": "round", "fc": "#f9f9f9", "ec": "#555555", "alpha": 0.95},
+            arrowprops={"arrowstyle": "->", "color": "#555555"},
+        )
+        # Ensure the tooltip annotation renders above all bar segments so it is always visible.
+        annotation.set_zorder(1000)
+        bbox_patch = annotation.get_bbox_patch()
+        if bbox_patch is not None:
+            bbox_patch.set_zorder(1000)
+        if hasattr(annotation, "arrow_patch") and annotation.arrow_patch is not None:
+            annotation.arrow_patch.set_zorder(1000)
+        annotation.set_visible(False)
+        return annotation
+
+    def _ensure_annotation(self) -> None:
+        if self._annotation.axes is self.axis:
+            return
+        self._annotation = self._create_annotation()
 
     def attach(self, canvas: FigureCanvasTkAgg) -> None:
         if self._connection_id is not None and self._canvas is not None:
@@ -1375,6 +1384,7 @@ class BarHoverHelper:
         self._leave_binding_id = None
         self._canvas = canvas
         self._tk_widget = canvas.get_tk_widget()
+        self._ensure_annotation()
         self.reset()
         self._connection_id = canvas.mpl_connect("motion_notify_event", self._on_motion)
         self._button_connection_id = None
@@ -1403,10 +1413,12 @@ class BarHoverHelper:
     def begin_update(
         self, context_callback: Optional[Callable[[Dict[str, Any], Any], None]]
     ) -> None:
+        self._ensure_annotation()
         self._set_context_callback(context_callback)
         self.reset()
 
     def reset(self) -> None:
+        self._ensure_annotation()
         self._rectangles.clear()
         self._active_rectangle = None
         self._annotation.set_visible(False)
