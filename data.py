@@ -3248,8 +3248,18 @@ class ReportApp:
         if not scrape_root.exists():
             return
 
-        self.scraped_inner.columnconfigure(0, weight=1)
-        self.scraped_inner.columnconfigure(1, weight=2)
+        self.scraped_inner.columnconfigure(0, weight=1, uniform="scraped_split")
+        self.scraped_inner.columnconfigure(1, weight=2, uniform="scraped_split")
+        if hasattr(self, "scraped_canvas"):
+            self.scraped_canvas.update_idletasks()
+            available_width = self.scraped_canvas.winfo_width()
+        else:
+            available_width = 0
+        if available_width <= 0:
+            available_width = self.root.winfo_width()
+        if available_width <= 0:
+            available_width = 900
+        pdf_target_width = max(200, available_width // 3)
         row_index = 0
         header_added = False
         for entry in self.pdf_entries:
@@ -3385,21 +3395,23 @@ class ReportApp:
 
                 image_frame = ttk.Frame(self.scraped_inner, padding=8)
                 image_frame.grid(row=row_index, column=0, sticky="nsew", padx=4)
+                image_frame.columnconfigure(0, weight=1)
+                image_frame.rowconfigure(0, weight=1)
                 table_frame = ttk.Frame(self.scraped_inner, padding=8)
                 table_frame.grid(row=row_index, column=1, sticky="nsew", padx=4)
                 self.scraped_inner.rowconfigure(row_index, weight=1)
 
-                photo = self._render_page(entry.doc, int(page_index), 350)
+                photo = self._render_page(entry.doc, int(page_index), pdf_target_width)
                 if photo is not None:
                     self.scraped_images.append(photo)
                     image_label = ttk.Label(image_frame, image=photo, cursor="hand2")
-                    image_label.pack(expand=True, fill=tk.BOTH)
+                    image_label.grid(row=0, column=0, sticky="nsew")
                     image_label.bind(
                         "<Button-1>",
                         lambda _e, e=entry, p=int(page_index): self.open_thumbnail_zoom(e, p),
                     )
                 else:
-                    ttk.Label(image_frame, text="Preview unavailable").pack(expand=True, fill=tk.BOTH)
+                    ttk.Label(image_frame, text="Preview unavailable").grid(row=0, column=0, sticky="nsew")
 
                 table_frame.columnconfigure(0, weight=1)
                 table_frame.columnconfigure(1, weight=0)
@@ -3422,7 +3434,7 @@ class ReportApp:
                         table_frame,
                         columns=columns,
                         show="headings",
-                        height=min(15, max(3, len(data_rows))),
+                        height=max(3, len(data_rows)),
                         selectmode="extended",
                     )
                     y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
