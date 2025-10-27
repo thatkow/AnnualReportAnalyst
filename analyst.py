@@ -17,7 +17,7 @@ import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import json
 import os
@@ -160,6 +160,44 @@ def _period_sort_key(label: str) -> Tuple[int, Any]:
     if parsed is not None:
         return (0, parsed)
     return (1, label.strip().lower())
+
+
+def _normalized_period_token(label: str) -> Tuple[str, int, int, str]:
+    """Return a hashable token so equivalent period labels can be aligned."""
+
+    normalized = re.sub(r"\s+", " ", label.strip().lower())
+    if not normalized:
+        return ("", 0, 0, "")
+
+    parsed = _parse_period_label(label)
+    if parsed is None:
+        return ("text", 0, 0, normalized)
+
+    year = parsed.year
+    quarter_match = re.search(r"q([1-4])", normalized)
+    if quarter_match:
+        return ("quarter", year, int(quarter_match.group(1)), "")
+    half_match = re.search(r"h([12])", normalized)
+    if half_match:
+        return ("half", year, int(half_match.group(1)), "")
+    if re.search(r"fy", normalized) or re.fullmatch(r"\d{4}", normalized):
+        return ("year", year, 0, "")
+
+    month = parsed.month
+    day = parsed.day
+    return ("date", year, month * 100 + day, "")
+
+
+def _lookup_period_value(collection: Dict[str, Any], label: str) -> Any:
+    """Attempt to find a period entry by direct label or normalized alias."""
+
+    if label in collection:
+        return collection[label]
+    token = _normalized_period_token(label)
+    for candidate_label, value in collection.items():
+        if _normalized_period_token(candidate_label) == token:
+            return value
+    raise KeyError(label)
 
 
 @dataclass
@@ -585,8 +623,11 @@ class FinanceDataset:
         self.share_price_symbol: Optional[str] = None
         self._period_share_price_map: Optional[Dict[str, float]] = None
         self._share_price_error: Optional[str] = None
+        self._period_index: Dict[str, int] = {}
+        self._period_token_index: Dict[Tuple[str, int, int, str], int] = {}
         self._normalization_mode = self.NORMALIZATION_REPORTED
         self._load()
+        self._refresh_period_indices()
         self._load_metadata()
         self._prefetch_share_prices()
 
@@ -597,6 +638,22 @@ class FinanceDataset:
             self._period_share_price_map = self._fetch_period_share_prices()
         except ValueError as exc:
             self._share_price_error = str(exc)
+
+    def _refresh_period_indices(self) -> None:
+        self._period_index = {label: idx for idx, label in enumerate(self.periods)}
+        token_map: Dict[Tuple[str, int, int, str], int] = {}
+        for idx, label in enumerate(self.periods):
+            token = _normalized_period_token(label)
+            if token not in token_map:
+                token_map[token] = idx
+        self._period_token_index = token_map
+
+    def _resolve_period_index(self, label: str) -> Optional[int]:
+        lookup_label = str(label)
+        if lookup_label in self._period_index:
+            return self._period_index[lookup_label]
+        token = _normalized_period_token(lookup_label)
+        return self._period_token_index.get(token)
 
     @staticmethod
     def _clean_numeric(value: str) -> float:
@@ -947,27 +1004,39 @@ class FinanceDataset:
         else:
             return [0.0] * len(periods), [False] * len(periods)
 
-        period_index = {label: idx for idx, label in enumerate(self.periods)}
+        if len(self._period_index) != len(self.periods):
+            self._refresh_period_indices()
+
         totals: List[float] = []
         has_data: List[bool] = []
 
         for label in periods:
-            idx = period_index.get(label)
+            idx = self._resolve_period_index(label)
             if idx is None:
-                totals.append(0.0)
+                totals.append(math.nan)
                 has_data.append(False)
                 continue
 
             total = 0.0
             present = False
+            has_nonzero = False
             for segment in segments:
                 if idx >= len(segment.values):
                     continue
+                value = segment.values[idx]
+                if not math.isfinite(value):
+                    continue
                 present = True
-                total += segment.values[idx]
+                total += value
+                if not has_nonzero and abs(value) > 1e-9:
+                    has_nonzero = True
 
-            totals.append(total)
-            has_data.append(present)
+            if present and has_nonzero:
+                totals.append(total)
+                has_data.append(True)
+            else:
+                totals.append(math.nan)
+                has_data.append(False)
 
         return totals, has_data
 
@@ -975,17 +1044,24 @@ class FinanceDataset:
         if not self.share_counts:
             return [math.nan] * len(periods), [False] * len(periods)
 
-        period_index = {label: idx for idx, label in enumerate(self.periods)}
+        if len(self._period_index) != len(self.periods):
+            self._refresh_period_indices()
+
         values: List[float] = []
         present: List[bool] = []
 
         for label in periods:
-            idx = period_index.get(label)
+            idx = self._resolve_period_index(label)
             if idx is None or idx >= len(self.share_counts):
                 values.append(math.nan)
                 present.append(False)
                 continue
-            values.append(self.share_counts[idx])
+            value = self.share_counts[idx]
+            if not math.isfinite(value) or abs(value) <= 1e-9:
+                values.append(math.nan)
+                present.append(False)
+                continue
+            values.append(float(value))
             present.append(True)
 
         return values, present
@@ -1006,7 +1082,8 @@ class FinanceDataset:
         self, periods: Sequence[str]
     ) -> Tuple[List[float], List[bool]]:
         price_map = self._try_get_period_share_price_map()
-        period_index = {label: idx for idx, label in enumerate(self.periods)}
+        if len(self._period_index) != len(self.periods):
+            self._refresh_period_indices()
         values: List[float] = []
         present: List[bool] = []
 
@@ -1014,9 +1091,12 @@ class FinanceDataset:
             lookup_label = str(label)
             price = price_map.get(lookup_label)
             if price is None:
-                idx = period_index.get(label)
-                if idx is None:
-                    idx = period_index.get(lookup_label)
+                try:
+                    price = _lookup_period_value(price_map, lookup_label)
+                except KeyError:
+                    price = None
+            if price is None:
+                idx = self._resolve_period_index(lookup_label)
                 if idx is not None and idx < len(self.share_prices):
                     fallback_price = self.share_prices[idx]
                     if fallback_price and math.isfinite(fallback_price) and fallback_price > 0:
@@ -1054,12 +1134,14 @@ class FinanceDataset:
         else:
             return [math.nan] * len(periods), [False] * len(periods)
 
-        period_index = {label: idx for idx, label in enumerate(self.periods)}
+        if len(self._period_index) != len(self.periods):
+            self._refresh_period_indices()
+
         totals: List[float] = []
         has_data: List[bool] = []
 
         for label in periods:
-            idx = period_index.get(label)
+            idx = self._resolve_period_index(label)
             if idx is None:
                 totals.append(math.nan)
                 has_data.append(False)
@@ -1067,14 +1149,24 @@ class FinanceDataset:
 
             total = 0.0
             present = False
+            has_nonzero = False
             for segment in segments:
                 if idx >= len(segment.raw_values):
                     continue
+                value = segment.raw_values[idx]
+                if not math.isfinite(value):
+                    continue
                 present = True
-                total += segment.raw_values[idx]
+                total += value
+                if not has_nonzero and abs(value) > 1e-9:
+                    has_nonzero = True
 
-            totals.append(total if present else math.nan)
-            has_data.append(present)
+            if present and has_nonzero:
+                totals.append(total)
+                has_data.append(True)
+            else:
+                totals.append(math.nan)
+                has_data.append(False)
 
         return totals, has_data
 
@@ -1089,15 +1181,19 @@ class FinanceDataset:
         for segment in lookup:
             if not segment.sources:
                 continue
-            source = segment.sources.get(str(period))
-            if source:
-                return source
+            try:
+                return _lookup_period_value(segment.sources, str(period))
+            except KeyError:
+                continue
         return None
 
     def share_count_source_for(self, period: str) -> Optional[SegmentSource]:
         if not self.share_count_sources:
             return None
-        return self.share_count_sources.get(str(period))
+        try:
+            return _lookup_period_value(self.share_count_sources, str(period))
+        except KeyError:
+            return None
 
     def latest_share_price(self) -> Optional[float]:
         for value in reversed(self.share_prices):
@@ -1497,11 +1593,12 @@ class FinancePlotFrame(ttk.Frame):
     @staticmethod
     def _merge_periods(existing: Sequence[str], new_periods: Sequence[str]) -> List[str]:
         ordered_unique: List[str] = []
-        seen = set()
+        seen_tokens: Set[Tuple[str, int, int, str]] = set()
         for label in list(existing) + list(new_periods):
-            if label in seen:
+            token = _normalized_period_token(label)
+            if token in seen_tokens:
                 continue
-            seen.add(label)
+            seen_tokens.add(token)
             ordered_unique.append(label)
         return FinancePlotFrame._sort_periods(ordered_unique)
 
@@ -2592,7 +2689,10 @@ class BarHoverHelper:
                 metadata["series"] = series_label
             period_label = metadata["period"]
             if period_label is not None and segment.sources:
-                source = segment.sources.get(str(period_label))
+                try:
+                    source = _lookup_period_value(segment.sources, str(period_label))
+                except KeyError:
+                    source = None
                 if source:
                     metadata["pdf_path"] = str(source.pdf_path)
                     metadata["pdf_page"] = source.page
