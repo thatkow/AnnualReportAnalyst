@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import csv
 import io
 import json
@@ -16,7 +18,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import fitz  # PyMuPDF
+try:
+    import fitz  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover - handled via runtime warning
+    fitz = None  # type: ignore[assignment]
+
+
+PYMUPDF_REQUIRED_MESSAGE = (
+    "PyMuPDF (import name 'fitz') is required to preview, assign, and export PDF pages.\n"
+    "Install it with 'pip install PyMuPDF' and then restart thatkowfinance_data."
+)
+
 from PIL import Image, ImageTk
 import webbrowser
 import requests
@@ -33,16 +45,18 @@ DEFAULT_PATTERNS = {
     "Shares": ["Movements in issued capital"],
 }
 YEAR_DEFAULT_PATTERNS = [r"(\d{4})\s+Annual\s+Report"]
-DEFAULT_NOTE_OPTIONS = ["", "excluded", "negated", "share_count"]
+DEFAULT_NOTE_OPTIONS = ["", "asis", "excluded", "negated", "share_count"]
 MAX_COMBINED_DATE_COLUMNS = 2
 DEFAULT_NOTE_BACKGROUND_COLORS = {
     "": "",
+    "asis": "",
     "excluded": "#ff4d4f",
     "negated": "#4da6ff",
     "share_count": "#ffb6c1",
 }
 DEFAULT_NOTE_LABELS = {
     "": "Clear note",
+    "asis": "As Is",
     "excluded": "Excluded",
     "negated": "Negated",
     "share_count": "Share Count",
@@ -50,9 +64,10 @@ DEFAULT_NOTE_LABELS = {
 HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{6})$")
 DEFAULT_NOTE_KEY_BINDINGS = {
     "": "`",
-    "excluded": "1",
-    "negated": "2",
-    "share_count": "3",
+    "asis": "1",
+    "excluded": "2",
+    "negated": "3",
+    "share_count": "4",
 }
 SPECIAL_KEYSYM_ALIASES = {
     "`": "grave",
@@ -323,9 +338,12 @@ class ReportApp:
         self.embedded = embedded
         if hasattr(self.root, "title") and not embedded:
             try:
-                self.root.title("Annual Report Analyst")
+                self.root.title("thatkowfinance_data")
             except tk.TclError:
                 pass
+        if fitz is None:
+            messagebox.showerror("PyMuPDF Required", PYMUPDF_REQUIRED_MESSAGE)
+            raise RuntimeError("PyMuPDF (fitz) is not installed")
         self.folder_path = tk.StringVar(master=self.root)
         if folder_override is not None:
             self.folder_path.set(str(folder_override))
@@ -349,6 +367,7 @@ class ReportApp:
         self.prompts_dir = self.app_root / "prompts"
         self.pattern_config_path = self.app_root / "pattern_config.json"
         self.type_item_category_path = self.app_root / "type_item_category.csv"
+        self.type_category_sort_order_path = self.app_root / "type_category_sort_order.csv"
         self.global_note_assignments_path = self.app_root / "type_category_item_assignments.csv"
         self.config_data: Dict[str, Any] = {}
         self.last_company_preference: str = ""
@@ -383,7 +402,9 @@ class ReportApp:
         self.combined_row_sources: Dict[Tuple[str, str, str], List[Path]] = {}
         self.combined_base_column_widths: Dict[str, int] = {}
         self.combined_other_column_width: Optional[int] = None
-        self.combined_show_blank_notes_var = tk.BooleanVar(master=self.root, value=False)
+        # Default to iterating blank notes so reviewers immediately focus on
+        # records that still need attention when the combined table loads.
+        self.combined_show_blank_notes_var = tk.BooleanVar(master=self.root, value=True)
         self.combined_save_button: Optional[ttk.Button] = None
         self.combined_preview_frame: Optional[ttk.Frame] = None
         self.combined_preview_canvas: Optional[tk.Canvas] = None
@@ -399,6 +420,7 @@ class ReportApp:
             master=self.root, value="Select a row to view the PDF page."
         )
         self._combined_zoom_save_job: Optional[str] = None
+        self._combined_blank_notification_shown = False
         self.type_color_map: Dict[str, str] = {}
         self.type_color_labels: Dict[str, str] = {}
         self.category_color_map: Dict[str, str] = {}
@@ -592,6 +614,8 @@ class ReportApp:
 
         self.combined_result_frame = ttk.Frame(combined_container, padding=8)
         self.combined_result_frame.pack(fill=tk.BOTH, expand=True)
+
+        notebook.bind("<<NotebookTabChanged>>", self._on_primary_tab_changed)
 
     def _on_frame_configure(self, _: tk.Event) -> None:  # type: ignore[override]
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -833,6 +857,10 @@ class ReportApp:
         configuration_menu.add_command(
             label="Configure Category Colors",
             command=lambda: self._configure_value_colors("Category"),
+        )
+        configuration_menu.add_command(
+            label="Generate Type/Category Sort Order CSV",
+            command=self._generate_type_category_sort_order_csv,
         )
         menubar.add_cascade(label="Configuration", menu=configuration_menu)
         try:
@@ -3010,6 +3038,12 @@ class ReportApp:
         if not company:
             messagebox.showinfo("Select Company", "Please choose a company before committing assignments.")
             return
+        if not messagebox.askyesno(
+            "Confirm Commit",
+            f"Commit the current assignments for {company}?",
+            parent=self,
+        ):
+            return
         if self.assigned_pages_path is None:
             self.assigned_pages_path = self.companies_dir / company / "assigned.json"
 
@@ -3028,7 +3062,7 @@ class ReportApp:
                         selections[category] = int(page_index)
 
         self._write_assigned_pages()
-        self.scrape_selections()
+        self._refresh_scraped_tab()
 
     def _refresh_scraped_tab(self) -> None:
         if not hasattr(self, "scraped_inner"):
@@ -3116,6 +3150,8 @@ class ReportApp:
                 header_frame.columnconfigure(2, weight=0)
                 header_frame.columnconfigure(3, weight=0)
                 header_frame.columnconfigure(4, weight=0)
+                header_frame.columnconfigure(5, weight=0)
+                header_frame.columnconfigure(6, weight=0)
                 ttk.Label(
                     header_frame,
                     text=f"{entry.path.name} - {category} (Page {int(page_index) + 1})",
@@ -3145,12 +3181,34 @@ class ReportApp:
                     ),
                     width=10,
                 ).grid(row=0, column=3, sticky="e", padx=(0, 4))
+                csv_name = meta.get("csv") if isinstance(meta, dict) else None
+                csv_path: Optional[Path] = None
+                if isinstance(csv_name, str) and csv_name:
+                    candidate_csv = doc_dir / csv_name
+                    if candidate_csv.exists():
+                        csv_path = candidate_csv
+                if csv_path is not None:
+                    ttk.Button(
+                        header_frame,
+                        text="Reload CSV",
+                        command=lambda d=doc_dir, c=category: self._reload_scraped_csv(d, c),
+                        width=12,
+                    ).grid(row=0, column=4, sticky="e", padx=(0, 4))
+                    ttk.Button(
+                        header_frame,
+                        text="Open CSV",
+                        command=lambda path=csv_path: self._open_csv_file(path) if path else None,
+                        width=10,
+                    ).grid(row=0, column=5, sticky="e", padx=(0, 4))
+                    delete_column = 6
+                else:
+                    delete_column = 4
                 ttk.Button(
                     header_frame,
                     text="Delete",
                     command=lambda d=doc_dir, c=category: self._delete_scrape_output(d, c),
                     width=10,
-                ).grid(row=0, column=4, sticky="e")
+                ).grid(row=0, column=delete_column, sticky="e")
                 row_index += 1
 
                 image_frame = ttk.Frame(self.scraped_inner, padding=8)
@@ -3543,6 +3601,65 @@ class ReportApp:
             str(category_value or "").strip().casefold(),
         )
 
+    def _normalize_type_category_key(self, type_value: str, category_value: str) -> Tuple[str, str]:
+        return (
+            str(type_value or "").strip().casefold(),
+            str(category_value or "").strip().casefold(),
+        )
+
+    def _load_type_category_entries(self) -> List[Tuple[str, str]]:
+        path = getattr(self, "type_category_sort_order_path", None)
+        if path is None:
+            return []
+        entries: List[Tuple[str, str]] = []
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as fh:
+                reader = csv.reader(fh)
+                header_parsed = False
+                type_idx: Optional[int] = None
+                category_idx: Optional[int] = None
+                for row in reader:
+                    if not row:
+                        continue
+                    trimmed = [cell.strip() for cell in row]
+                    if not any(trimmed):
+                        continue
+                    if not header_parsed:
+                        lowered = [cell.lower() for cell in trimmed]
+                        try:
+                            type_idx = lowered.index("type")
+                            category_idx = lowered.index("category")
+                        except ValueError:
+                            type_idx = 0 if len(trimmed) > 0 else None
+                            category_idx = 1 if len(trimmed) > 1 else None
+                            header_parsed = True
+                        else:
+                            header_parsed = True
+                            continue
+                    if type_idx is None or category_idx is None:
+                        continue
+                    if type_idx >= len(trimmed) or category_idx >= len(trimmed):
+                        continue
+                    type_value = trimmed[type_idx]
+                    category_value = trimmed[category_idx]
+                    if not (type_value or category_value):
+                        continue
+                    entries.append((type_value, category_value))
+        except FileNotFoundError:
+            return []
+        except Exception as exc:
+            logger.warning("Could not read %s: %s", path, exc)
+        return entries
+
+    def _load_type_category_order_map(self) -> Dict[Tuple[str, str], int]:
+        entries = self._load_type_category_entries()
+        order: Dict[Tuple[str, str], int] = {}
+        for index, (type_value, category_value) in enumerate(entries):
+            key = self._normalize_type_category_key(type_value, category_value)
+            if key not in order:
+                order[key] = index
+        return order
+
     def _load_type_item_category_entries(self) -> List[Tuple[str, str, str]]:
         path = getattr(self, "type_item_category_path", None)
         if path is None:
@@ -3607,7 +3724,8 @@ class ReportApp:
     def _sort_combined_records(self, records: List[Dict[str, str]]) -> None:
         if not records:
             return
-        order_map = self._load_type_item_category_order_map()
+        type_category_order_map = self._load_type_category_order_map()
+        type_item_order_map = self._load_type_item_category_order_map()
         type_priority = {name: index for index, name in enumerate(COLUMNS)}
         max_type_priority = len(type_priority)
 
@@ -3615,14 +3733,31 @@ class ReportApp:
             type_value = str(record.get("Type", "") or "").strip()
             category_value = str(record.get("Category", "") or "").strip()
             item_value = str(record.get("Item", "") or "").strip()
-            normalized = self._normalize_type_item_category_key(
+            normalized_full = self._normalize_type_item_category_key(
                 type_value, item_value, category_value
             )
-            order_index = order_map.get(normalized)
-            if order_index is not None:
-                return (0, order_index)
+            normalized_category = self._normalize_type_category_key(
+                type_value, category_value
+            )
+            category_index = type_category_order_map.get(normalized_category)
+            item_index = type_item_order_map.get(normalized_full)
+            fallback_strings = (
+                category_value.casefold(),
+                item_value.casefold(),
+                type_value.casefold(),
+            )
+            if category_index is not None:
+                return (
+                    0,
+                    category_index,
+                    0 if item_index is not None else 1,
+                    item_index if item_index is not None else 0,
+                    fallback_strings,
+                )
+            if item_index is not None:
+                return (1, item_index, fallback_strings)
             return (
-                1,
+                2,
                 type_priority.get(type_value, max_type_priority),
                 category_value.casefold(),
                 item_value.casefold(),
@@ -3637,6 +3772,103 @@ class ReportApp:
         self._sort_combined_records(self.combined_all_records)
         if self.combined_ordered_columns:
             self._update_combined_tree_display()
+
+    def _generate_type_category_sort_order_csv(self) -> None:
+        if not self.combined_all_records:
+            messagebox.showinfo(
+                "Type/Category Sort Order",
+                "Load a combined table before generating the Type/Category sort order.",
+            )
+            return
+
+        seen_keys: Set[Tuple[str, str]] = set()
+        unique_records: List[Tuple[str, str]] = []
+        for record in self.combined_all_records:
+            type_value = str(record.get("Type", "") or "").strip()
+            category_value = str(record.get("Category", "") or "").strip()
+            if not type_value or not category_value:
+                continue
+            normalized = self._normalize_type_category_key(type_value, category_value)
+            if normalized in seen_keys:
+                continue
+            seen_keys.add(normalized)
+            unique_records.append((type_value, category_value))
+
+        if not unique_records:
+            messagebox.showinfo(
+                "Type/Category Sort Order",
+                "No complete Type/Category values were found in the current combined table.",
+            )
+            return
+
+        existing_entries = self._load_type_category_entries()
+        existing_keys = {
+            self._normalize_type_category_key(type_value, category_value)
+            for type_value, category_value in existing_entries
+        }
+        new_entries = [
+            entry
+            for entry in unique_records
+            if self._normalize_type_category_key(*entry) not in existing_keys
+        ]
+
+        path = self.type_category_sort_order_path
+        appended = 0
+        if new_entries:
+            try:
+                write_header = not path.exists() or path.stat().st_size == 0
+            except OSError:
+                write_header = True
+            try:
+                with path.open("a", encoding="utf-8", newline="") as fh:
+                    writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
+                    if write_header:
+                        writer.writerow(["Type", "Category"])
+                    for type_value, category_value in new_entries:
+                        writer.writerow([type_value, category_value])
+                        appended += 1
+            except Exception as exc:
+                messagebox.showerror(
+                    "Type/Category Sort Order",
+                    f"Could not append new entries: {exc}",
+                )
+                return
+            logger.info(
+                "Appended %d Type/Category combination(s) to %s",
+                appended,
+                path,
+            )
+        else:
+            if not path.exists():
+                try:
+                    with path.open("w", encoding="utf-8", newline="") as fh:
+                        writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
+                        writer.writerow(["Type", "Category"])
+                        for type_value, category_value in unique_records:
+                            writer.writerow([type_value, category_value])
+                    logger.info("Created %s with existing Type/Category combinations.", path)
+                except Exception as exc:
+                    messagebox.showerror(
+                        "Type/Category Sort Order",
+                        f"Could not create the CSV: {exc}",
+                    )
+                    return
+                appended = len(unique_records)
+
+        self._sort_combined_records(self.combined_all_records)
+        if self.combined_ordered_columns:
+            self._update_combined_tree_display()
+
+        if appended:
+            message = f"Appended {appended} new combination(s) to {path.name}."
+        else:
+            message = "No new Type/Category combinations were found."
+
+        messagebox.showinfo(
+            "Type/Category Sort Order",
+            message + " Opening the file for review.",
+        )
+        self._open_in_file_manager(path)
 
     def _append_type_item_category_csv(self) -> None:
         if not self.combined_all_records:
@@ -3735,17 +3967,42 @@ class ReportApp:
             return
         self._destroy_note_editor()
         if not self.combined_show_blank_notes_var.get():
+            self._combined_blank_notification_shown = False
+            return
+        self._focus_first_blank_note(notify_if_missing=True)
+
+    def _focus_first_blank_note(self, *, notify_if_missing: bool = False) -> None:
+        if not self.combined_show_blank_notes_var.get():
+            return
+        tree = self.combined_result_tree
+        if tree is None:
+            return
+        if not self.combined_ordered_columns or "Note" not in self.combined_ordered_columns:
             return
         selection = tree.selection()
         current_item = selection[0] if selection else tree.focus()
         if current_item and self._is_blank_note_tree_item(tree, current_item):
+            self._combined_blank_notification_shown = False
             return
-        for item_id in tree.get_children(""):
+        children = tree.get_children("")
+        first_blank: Optional[str] = None
+        for item_id in children:
             if self._is_blank_note_tree_item(tree, item_id):
-                tree.selection_set(item_id)
-                tree.focus(item_id)
-                tree.see(item_id)
+                first_blank = item_id
                 break
+        if first_blank:
+            tree.selection_set(first_blank)
+            tree.focus(first_blank)
+            tree.see(first_blank)
+            self._combined_blank_notification_shown = False
+            return
+        if notify_if_missing and not self._combined_blank_notification_shown and children:
+            self._export_final_combined_csv()
+            messagebox.showinfo(
+                "Iterate blank notes only",
+                "All notes assigned. Do you wish to finalize and save report?",
+            )
+            self._combined_blank_notification_shown = True
 
     def _render_combined_tree(
         self,
@@ -3773,7 +4030,7 @@ class ReportApp:
         table_container = ttk.Frame(split_pane)
         table_container.columnconfigure(0, weight=1)
         table_container.rowconfigure(1, weight=1)
-        split_pane.add(table_container, weight=1)
+        split_pane.add(table_container, weight=3)
 
         controls_frame = ttk.Frame(table_container)
         controls_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
@@ -3815,13 +4072,13 @@ class ReportApp:
         preview_container = ttk.Frame(split_pane, padding=0)
         preview_container.columnconfigure(0, weight=1)
         preview_container.rowconfigure(0, weight=1)
-        split_pane.add(preview_container, weight=1)
+        split_pane.add(preview_container, weight=2)
 
         def _lock_split_position(event: tk.Event) -> None:  # type: ignore[override]
             total_width = event.width
             if total_width <= 2:
                 return
-            target = total_width // 2
+            target = int(total_width * 0.6)
             try:
                 current = split_pane.sashpos(0)
             except tk.TclError:
@@ -3838,7 +4095,7 @@ class ReportApp:
             total_width = split_pane.winfo_width()
             if total_width <= 2:
                 return
-            target = total_width // 2
+            target = int(total_width * 0.6)
             try:
                 split_pane.sashpos(0, target)
             except tk.TclError:
@@ -4009,6 +4266,8 @@ class ReportApp:
         else:
             self._clear_combined_preview()
         self._update_combined_save_button_state()
+        if self.combined_show_blank_notes_var.get():
+            self._focus_first_blank_note(notify_if_missing=True)
 
     def _on_confirm_combined_clicked(self) -> None:
         self._confirm_combined_table()
@@ -4041,28 +4300,158 @@ class ReportApp:
                 "Select a company before saving the combined CSV.",
             )
             return
-        scrape_root = self.companies_dir / company / "openapiscrape"
-        combined_path = scrape_root / "combined.csv"
+        company_root = self.companies_dir / company
+        combined_path = company_root / "combined.csv"
         try:
-            csv_header: List[str] = []
-            for column_name in self.combined_ordered_columns:
-                if column_name in {"Type", "Category", "Item", "Note"}:
-                    csv_header.append(column_name)
-                elif "." in column_name:
-                    csv_header.append(column_name.split(".", 1)[1])
-                else:
-                    csv_header.append(column_name)
-            csv_rows = [csv_header]
-            for record in self.combined_all_records:
-                csv_rows.append(
-                    [record.get(column_name, "") for column_name in self.combined_ordered_columns]
+            csv_rows = self._build_combined_csv_rows()
+            if not csv_rows:
+                messagebox.showinfo(
+                    "Save Combined CSV",
+                    "No combined data is currently available to save.",
                 )
+                return
             combined_path.parent.mkdir(parents=True, exist_ok=True)
             self._write_csv_rows(csv_rows, combined_path)
+            metadata = self._build_combined_metadata(company_root)
+            if metadata:
+                metadata_path = combined_path.with_name("combined_metadata.json")
+                with metadata_path.open("w", encoding="utf-8") as fh:
+                    json.dump(metadata, fh, indent=2)
         except Exception as exc:
             messagebox.showwarning("Save Combined CSV", f"Could not save the combined CSV: {exc}")
             return
         messagebox.showinfo("Save Combined CSV", f"Combined CSV saved to:\n{combined_path}")
+
+    def _build_combined_csv_rows(self) -> Optional[List[List[str]]]:
+        if not self.combined_all_records or not self.combined_ordered_columns:
+            return None
+        csv_header: List[str] = []
+        for column_name in self.combined_ordered_columns:
+            if column_name in {"Type", "Category", "Item", "Note"}:
+                csv_header.append(column_name)
+            elif "." in column_name:
+                csv_header.append(column_name.split(".", 1)[1])
+            else:
+                csv_header.append(column_name)
+        csv_rows: List[List[str]] = [csv_header]
+        for record in self.combined_all_records:
+            csv_rows.append(
+                [record.get(column_name, "") for column_name in self.combined_ordered_columns]
+            )
+        return csv_rows
+
+    def _build_combined_metadata(self, company_root: Path) -> Optional[Dict[str, Any]]:
+        if not self.combined_all_records or not self.combined_ordered_columns:
+            return None
+        if not getattr(self, "combined_column_name_map", None):
+            return None
+
+        periods: Dict[str, Dict[str, str]] = {}
+
+        def _relative_pdf(path: Path) -> str:
+            try:
+                return str(path.relative_to(company_root))
+            except ValueError:
+                return str(path)
+
+        for column_name in self.combined_ordered_columns:
+            if column_name in {"Type", "Category", "Item", "Note"}:
+                continue
+            mapping = self.combined_column_name_map.get(column_name)
+            if not mapping:
+                continue
+            pdf_path, label_value = mapping
+            periods.setdefault(
+                label_value,
+                {
+                    "label": label_value,
+                    "pdf": _relative_pdf(pdf_path),
+                    "pdf_name": pdf_path.name,
+                },
+            )
+
+        if not periods:
+            return None
+
+        rows: List[Dict[str, Any]] = []
+
+        for record in self.combined_all_records:
+            type_value = str(record.get("Type", ""))
+            category_value = str(record.get("Category", ""))
+            item_value = str(record.get("Item", ""))
+            row_entry: Dict[str, Any] = {
+                "type": type_value,
+                "category": category_value,
+                "item": item_value,
+                "note": str(record.get("Note", "")),
+                "periods": {},
+            }
+
+            for column_name in self.combined_ordered_columns:
+                if column_name in {"Type", "Category", "Item", "Note"}:
+                    continue
+                mapping = self.combined_column_name_map.get(column_name)
+                if not mapping:
+                    continue
+                pdf_path, label_value = mapping
+                assigned_page = self._get_assigned_page_number(pdf_path, type_value)
+                row_entry["periods"][label_value] = {
+                    "pdf": _relative_pdf(pdf_path),
+                    "page": assigned_page,
+                }
+
+            if row_entry["periods"]:
+                rows.append(row_entry)
+
+        if not rows:
+            return None
+
+        return {
+            "periods": periods,
+            "rows": rows,
+        }
+
+    def _get_assigned_page_number(self, pdf_path: Path, type_value: str) -> Optional[int]:
+        if not self.assigned_pages:
+            return None
+        record = self.assigned_pages.get(pdf_path.name)
+        if not isinstance(record, dict):
+            return None
+        selections = record.get("selections")
+        if not isinstance(selections, dict):
+            return None
+        page_value = selections.get(type_value)
+        if page_value is None:
+            return None
+        try:
+            page_index = int(page_value)
+        except (TypeError, ValueError):
+            return None
+        return page_index + 1 if page_index >= 0 else None
+
+    def _export_final_combined_csv(self) -> None:
+        if not self.combined_all_records or not self.combined_ordered_columns:
+            return
+        company = self.company_var.get().strip()
+        if not company:
+            return
+        csv_rows = self._build_combined_csv_rows()
+        if not csv_rows:
+            return
+        company_root = self.companies_dir / company
+        final_path = company_root / "combined.csv"
+        try:
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            self._write_csv_rows(csv_rows, final_path)
+            logger.info("Exported final combined CSV to %s", final_path)
+            metadata = self._build_combined_metadata(company_root)
+            if metadata:
+                metadata_path = final_path.with_name("combined_metadata.json")
+                with metadata_path.open("w", encoding="utf-8") as fh:
+                    json.dump(metadata, fh, indent=2)
+                logger.info("Exported combined metadata to %s", metadata_path)
+        except Exception:
+            logger.exception("Failed to export final combined CSV to company root")
 
     def _clear_combined_preview(self, message: Optional[str] = None) -> None:
         canvas = self.combined_preview_canvas
@@ -4243,6 +4632,26 @@ class ReportApp:
         if record is None:
             return
         record["Note"] = value
+        if isinstance(value, str):
+            normalized = value.strip()
+        else:
+            normalized = str(value or "").strip()
+        if not normalized:
+            self._combined_blank_notification_shown = False
+
+    def _on_primary_tab_changed(self, event: tk.Event) -> None:  # type: ignore[override]
+        widget = event.widget
+        if not isinstance(widget, ttk.Notebook):
+            return
+        try:
+            selected = widget.select()
+        except tk.TclError:
+            return
+        if not selected:
+            return
+        if self.combined_frame is not None and str(self.combined_frame) == selected:
+            if self.combined_show_blank_notes_var.get():
+                self._focus_first_blank_note(notify_if_missing=True)
 
     def _confirm_combined_table(self, auto: bool = False) -> None:
         if not self.combined_pdf_order or not self.combined_csv_sources:
@@ -4812,6 +5221,46 @@ class ReportApp:
         self._refresh_scraped_tab()
         if errors:
             messagebox.showwarning("Delete Output", "\n".join(errors))
+
+    def _reload_scraped_csv(self, doc_dir: Path, category: str) -> None:
+        metadata = self._load_doc_metadata(doc_dir)
+        if not metadata:
+            messagebox.showinfo("Reload CSV", "No scrape metadata found for this selection.")
+            return
+        meta = metadata.get(category)
+        if not isinstance(meta, dict):
+            messagebox.showinfo("Reload CSV", "No CSV file is associated with this selection.")
+            return
+        csv_name = meta.get("csv")
+        if not isinstance(csv_name, str) or not csv_name:
+            messagebox.showinfo("Reload CSV", "No CSV file is associated with this selection.")
+            return
+        csv_path = doc_dir / csv_name
+        if not csv_path.exists():
+            messagebox.showinfo("Reload CSV", "The recorded CSV file could not be found on disk.")
+            self._refresh_scraped_tab()
+            return
+        rows = self._read_csv_rows(csv_path)
+        if not rows:
+            messagebox.showwarning(
+                "Reload CSV",
+                "The CSV file could not be loaded or did not contain any data.",
+            )
+        self._refresh_scraped_tab()
+
+    def _open_csv_file(self, csv_path: Path) -> None:
+        if not csv_path.exists():
+            messagebox.showinfo("Open CSV", "The selected CSV file could not be found on disk.")
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(csv_path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(csv_path)])
+            else:
+                subprocess.Popen(["xdg-open", str(csv_path)])
+        except Exception as exc:
+            messagebox.showwarning("Open CSV", f"Could not open CSV file: {exc}")
 
     def _delete_all_scraped(self) -> None:
         company = self.company_var.get()
@@ -5558,12 +6007,16 @@ class ReportApp:
                 existing = metadata.get(category)
                 file_exists = False
                 if isinstance(existing, dict):
-                    for key in ("csv", "txt"):
-                        name = existing.get(key)
-                        if isinstance(name, str) and name:
-                            if (doc_dir / name).exists():
+                    csv_name = existing.get("csv")
+                    if isinstance(csv_name, str) and csv_name:
+                        csv_path = doc_dir / csv_name
+                        if csv_path.exists():
+                            file_exists = True
+                    else:
+                        txt_name = existing.get("txt")
+                        if isinstance(txt_name, str) and txt_name:
+                            if (doc_dir / txt_name).exists():
                                 file_exists = True
-                                break
                 if file_exists:
                     continue
                 entry_tasks.append((category, page_index))
@@ -5719,7 +6172,11 @@ class ReportApp:
 
 def main() -> None:
     root = tk.Tk()
-    app = ReportApp(root)
+    try:
+        ReportApp(root)
+    except RuntimeError:
+        root.destroy()
+        return
     root.mainloop()
 
 
