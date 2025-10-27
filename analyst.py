@@ -473,6 +473,25 @@ class FinanceDataset:
 
         return totals, has_data
 
+    def share_counts_for(self, periods: Sequence[str]) -> Tuple[List[float], List[bool]]:
+        if not self.share_counts:
+            return [math.nan] * len(periods), [False] * len(periods)
+
+        period_index = {label: idx for idx, label in enumerate(self.periods)}
+        values: List[float] = []
+        present: List[bool] = []
+
+        for label in periods:
+            idx = period_index.get(label)
+            if idx is None or idx >= len(self.share_counts):
+                values.append(math.nan)
+                present.append(False)
+                continue
+            values.append(self.share_counts[idx])
+            present.append(True)
+
+        return values, present
+
     def has_data(self) -> bool:
         return bool(self.finance_segments or self.income_segments)
 
@@ -490,6 +509,7 @@ class FinancePlotFrame(ttk.Frame):
     _PLOT_WIDTH = 0.82
     MODE_STACKED = "stacked"
     MODE_LINE = "line"
+    VALUE_MODE_SHARE_COUNT = "share_count"
 
     def __init__(self, parent: tk.Widget) -> None:
         super().__init__(parent)
@@ -509,6 +529,7 @@ class FinancePlotFrame(ttk.Frame):
         self._context_menu: Optional[tk.Menu] = None
         self._context_metadata: Optional[Dict[str, Any]] = None
         self.normalization_mode = FinanceDataset.NORMALIZATION_SHARES
+        self._dataset_normalization_mode = FinanceDataset.NORMALIZATION_SHARES
         self._render_empty()
 
     @staticmethod
@@ -549,16 +570,33 @@ class FinancePlotFrame(ttk.Frame):
             self._render_empty()
 
     def set_normalization_mode(self, mode: str) -> None:
-        if mode not in {
+        valid_modes = {
             FinanceDataset.NORMALIZATION_SHARES,
             FinanceDataset.NORMALIZATION_REPORTED,
-        }:
+            self.VALUE_MODE_SHARE_COUNT,
+        }
+        if mode not in valid_modes:
             return
+
+        if mode == self.VALUE_MODE_SHARE_COUNT:
+            if self.normalization_mode == mode:
+                return
+            self.normalization_mode = mode
+            if self.datasets:
+                self._render()
+            else:
+                self._render_empty()
+            return
+
+        if self._dataset_normalization_mode != mode:
+            for dataset in self.datasets.values():
+                dataset.set_normalization_mode(mode)
+            self._dataset_normalization_mode = mode
+
         if self.normalization_mode == mode:
             return
+
         self.normalization_mode = mode
-        for dataset in self.datasets.values():
-            dataset.set_normalization_mode(mode)
         if self.datasets:
             self._render()
         else:
@@ -630,7 +668,7 @@ class FinancePlotFrame(ttk.Frame):
         if is_new_company and company not in self._company_colors:
             self._company_colors[company] = self._next_color_pair()
 
-        dataset.set_normalization_mode(self.normalization_mode)
+        dataset.set_normalization_mode(self._dataset_normalization_mode)
         self.datasets[company] = dataset
         # Preserve insertion order by moving refreshed companies to the end.
         self.datasets.move_to_end(company)
@@ -652,12 +690,45 @@ class FinancePlotFrame(ttk.Frame):
         self.axis.clear()
         hover_helper = self.hover_helper
         mode = self.display_mode
-        context_callback = self._show_context_menu if mode == self.MODE_STACKED else None
-        hover_helper.begin_update(context_callback)
 
         legend_handles: List[Any] = []
 
-        if mode == self.MODE_STACKED:
+        if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
+            hover_helper.begin_update(None)
+            x_positions = period_indices
+            for company, dataset in self.datasets.items():
+                finance_color, _ = self._company_colors.setdefault(
+                    company, self._next_color_pair()
+                )
+                share_values, share_presence = dataset.share_counts_for(periods)
+                if not any(share_presence):
+                    continue
+                share_points = [
+                    share_values[idx] if share_presence[idx] else math.nan
+                    for idx in range(len(share_values))
+                ]
+                line = self.axis.plot(
+                    x_positions,
+                    share_points,
+                    linestyle=":",
+                    marker="o",
+                    color=finance_color,
+                    markerfacecolor=finance_color,
+                    markeredgecolor=finance_color,
+                    label=f"{company} Number of shares",
+                )
+                legend_handles.append(line[0])
+
+            if period_indices:
+                self.axis.set_xticks(period_indices)
+                self.axis.set_xticklabels(periods, rotation=45, ha="right")
+                self.axis.set_xlim(-0.5, len(period_indices) - 0.5)
+            else:
+                self.axis.set_xlim(-0.6, 0.6)
+                self.axis.set_xticks([])
+
+        elif mode == self.MODE_STACKED:
+            hover_helper.begin_update(self._show_context_menu)
             group_width = self._PLOT_WIDTH
             bar_width = group_width / max(2 * num_companies, 1)
             start_offset = -group_width / 2
@@ -849,6 +920,7 @@ class FinancePlotFrame(ttk.Frame):
                 self.axis.set_xticks([])
 
         else:
+            hover_helper.begin_update(None)
             x_positions = period_indices
             for company, dataset in self.datasets.items():
                 finance_color, income_color = self._company_colors.setdefault(
@@ -916,19 +988,27 @@ class FinancePlotFrame(ttk.Frame):
                 self.axis.set_xticks([])
 
         self.axis.axhline(0, color="#333333", linewidth=0.8)
-        if self.normalization_mode == FinanceDataset.NORMALIZATION_SHARES:
+        if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
+            self.axis.set_ylabel("Number of Shares")
+        elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARES:
             self.axis.set_ylabel("Value per Share")
         else:
             self.axis.set_ylabel("Reported Value")
         if self.datasets:
             companies_list = ", ".join(self.datasets.keys())
-            self.axis.set_title(f"Finance vs Income Statement — {companies_list}")
+            if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
+                self.axis.set_title(f"Number of Shares — {companies_list}")
+            else:
+                self.axis.set_title(f"Finance vs Income Statement — {companies_list}")
         else:
-            self.axis.set_title("Finance vs Income Statement")
+            if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
+                self.axis.set_title("Number of Shares")
+            else:
+                self.axis.set_title("Finance vs Income Statement")
 
         if legend_handles:
             legend_kwargs = {"loc": "upper left"}
-            if mode == self.MODE_STACKED:
+            if mode == self.MODE_STACKED and self.normalization_mode != self.VALUE_MODE_SHARE_COUNT:
                 legend_kwargs["ncol"] = 2
             self.axis.legend(handles=legend_handles, **legend_kwargs)
 
@@ -1362,6 +1442,13 @@ class FinanceAnalystApp:
             text="As reported",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_REPORTED,
+            command=self._on_normalization_change,
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Radiobutton(
+            values_frame,
+            text="Number of shares",
+            variable=self.normalization_var,
+            value=FinancePlotFrame.VALUE_MODE_SHARE_COUNT,
             command=self._on_normalization_change,
         ).pack(side=tk.LEFT, padx=(6, 0))
 
