@@ -28,7 +28,11 @@ import requests
 
 import matplotlib
 
-import fitz  # PyMuPDF
+try:
+    import fitz  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover - handled via runtime warning
+    fitz = None  # type: ignore[assignment]
+
 from PIL import Image, ImageTk
 
 # Ensure TkAgg is used when embedding plots inside Tkinter widgets.
@@ -96,6 +100,16 @@ class PdfPageViewer(tk.Toplevel):
 
     def __init__(self, master: tk.Widget, pdf_path: Path, page_number: int) -> None:
         super().__init__(master)
+        if fitz is None:
+            messagebox.showerror(
+                "PyMuPDF Required",
+                (
+                    "Viewing a single PDF page requires the PyMuPDF package (import name 'fitz').\n"
+                    "Install it with 'pip install PyMuPDF' to enable in-app previews."
+                ),
+            )
+            self.after(0, self.destroy)
+            raise RuntimeError("PyMuPDF (fitz) is not installed")
         self.title(f"{pdf_path.name} — Page {page_number}")
         self._photo: Optional[ImageTk.PhotoImage] = None
         self._pdf_path = pdf_path
@@ -120,6 +134,8 @@ class PdfPageViewer(tk.Toplevel):
         self._canvas.configure(yscrollcommand=self._vbar.set, xscrollcommand=self._hbar.set)
 
     def _render_page(self) -> None:
+        if fitz is None:
+            raise RuntimeError("PyMuPDF (fitz) is not installed")
         try:
             with fitz.open(self._pdf_path) as doc:
                 page = doc.load_page(self._page_number - 1)
@@ -972,6 +988,17 @@ class FinancePlotFrame(ttk.Frame):
                 "No page number is available for this entry. The PDF will open to its first page.",
             )
             open_pdf(pdf_path, None)
+            self._context_metadata = None
+            return
+        if fitz is None:
+            messagebox.showwarning(
+                "Open PDF",
+                (
+                    "Viewing individual PDF pages requires the PyMuPDF package (import name 'fitz').\n"
+                    "The full PDF will be opened instead."
+                ),
+            )
+            open_pdf(pdf_path, page)
             self._context_metadata = None
             return
         try:

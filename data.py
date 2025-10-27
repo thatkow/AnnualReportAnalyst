@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import csv
 import io
 import json
@@ -16,7 +18,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import fitz  # PyMuPDF
+try:
+    import fitz  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover - handled via runtime warning
+    fitz = None  # type: ignore[assignment]
+
+
+PYMUPDF_REQUIRED_MESSAGE = (
+    "PyMuPDF (import name 'fitz') is required to preview, assign, and export PDF pages.\n"
+    "Install it with 'pip install PyMuPDF' and then restart thatkowfinance_data."
+)
+
 from PIL import Image, ImageTk
 import webbrowser
 import requests
@@ -329,6 +341,9 @@ class ReportApp:
                 self.root.title("thatkowfinance_data")
             except tk.TclError:
                 pass
+        if fitz is None:
+            messagebox.showerror("PyMuPDF Required", PYMUPDF_REQUIRED_MESSAGE)
+            raise RuntimeError("PyMuPDF (fitz) is not installed")
         self.folder_path = tk.StringVar(master=self.root)
         if folder_override is not None:
             self.folder_path.set(str(folder_override))
@@ -6157,7 +6172,11 @@ class ReportApp:
 
 def main() -> None:
     root = tk.Tk()
-    app = ReportApp(root)
+    try:
+        ReportApp(root)
+    except RuntimeError:
+        root.destroy()
+        return
     root.mainloop()
 
 
