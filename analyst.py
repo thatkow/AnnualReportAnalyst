@@ -23,7 +23,7 @@ import json
 import os
 import sys
 import webbrowser
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 
 import matplotlib
 
@@ -45,6 +45,10 @@ from matplotlib.ticker import ScalarFormatter
 
 import tkinter as tk
 from tkinter import messagebox, ttk
+
+import urllib.error
+import urllib.request
+from urllib.parse import quote
 
 
 BASE_FIELDS = {"Type", "Category", "Item", "Note"}
@@ -397,6 +401,7 @@ class FinanceDataset:
     NORMALIZATION_SHARES = "shares"
     NORMALIZATION_REPORTED = "reported"
     NORMALIZATION_SHARE_PRICE = "share_price"
+    NORMALIZATION_SHARE_PRICE_PERIOD = "share_price_period"
 
     _TYPE_TO_LABEL = {
         "financial": FINANCE_LABEL,
@@ -415,6 +420,9 @@ class FinanceDataset:
         self.share_counts: List[float] = []
         self.share_prices: List[float] = []
         self.share_count_sources: Dict[str, SegmentSource] = {}
+        self.share_price_symbol: Optional[str] = None
+        self._period_share_price_map: Optional[Dict[str, float]] = None
+        self._share_price_error: Optional[str] = None
         self._normalization_mode = self.NORMALIZATION_REPORTED
         self._load()
         self._load_metadata()
@@ -602,6 +610,7 @@ class FinanceDataset:
             self.NORMALIZATION_SHARES,
             self.NORMALIZATION_REPORTED,
             self.NORMALIZATION_SHARE_PRICE,
+            self.NORMALIZATION_SHARE_PRICE_PERIOD,
         }
         if mode not in valid_modes:
             raise ValueError(f"Unsupported normalization mode: {mode}")
@@ -642,6 +651,30 @@ class FinanceDataset:
                     else:
                         multiples.append(latest_price / per_share)
                 segment.values = multiples
+        elif mode == self.NORMALIZATION_SHARE_PRICE_PERIOD:
+            if not self.share_counts:
+                raise ValueError("combined.csv is missing a share_count row")
+            price_map = self._get_period_share_price_map()
+            for segment in self.finance_segments + self.income_segments:
+                multiples: List[float] = []
+                for idx, value in enumerate(segment.raw_values):
+                    count = self.share_counts[idx] if idx < len(self.share_counts) else 0.0
+                    if idx < len(segment.periods):
+                        period_label = str(segment.periods[idx])
+                    elif idx < len(self.periods):
+                        period_label = str(self.periods[idx])
+                    else:
+                        period_label = str(idx)
+                    price = price_map.get(period_label)
+                    if count == 0 or price is None or price <= 0:
+                        multiples.append(0.0)
+                        continue
+                    per_share = value / count
+                    if per_share == 0:
+                        multiples.append(0.0)
+                    else:
+                        multiples.append(price / per_share)
+                segment.values = multiples
         else:
             for segment in self.finance_segments + self.income_segments:
                 segment.values = list(segment.raw_values)
@@ -656,6 +689,15 @@ class FinanceDataset:
                 payload = json.load(fh)
         except (OSError, json.JSONDecodeError):
             return
+
+        ticker_value = (
+            payload.get("share_price_symbol")
+            or payload.get("share_price_ticker")
+            or payload.get("ticker")
+            or payload.get("symbol")
+        )
+        if isinstance(ticker_value, str) and ticker_value.strip():
+            self.share_price_symbol = ticker_value.strip()
 
         rows = payload.get("rows")
         if not isinstance(rows, list):
@@ -798,6 +840,144 @@ class FinanceDataset:
                 return value
         return None
 
+    def _resolve_share_price_symbol(self) -> Optional[str]:
+        if self.share_price_symbol and self.share_price_symbol.strip():
+            return self.share_price_symbol.strip()
+        company_name = self.company_root.name.strip()
+        return company_name or None
+
+    def _fetch_period_share_prices(self) -> Dict[str, float]:
+        symbol = self._resolve_share_price_symbol()
+        if not symbol:
+            raise ValueError("A share price symbol could not be determined for this company.")
+
+        period_dates: List[Tuple[str, datetime]] = []
+        for label in self.periods:
+            parsed = _parse_period_label(label)
+            if parsed is None:
+                continue
+            period_dates.append((label, parsed))
+
+        if not period_dates:
+            raise ValueError("The reporting periods could not be translated into calendar dates.")
+
+        period_dates.sort(key=lambda item: item[1])
+        earliest = period_dates[0][1]
+        latest = period_dates[-1][1]
+        start_date = (earliest - timedelta(days=3)).date()
+        end_date = (latest + timedelta(days=3)).date()
+        start_dt = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
+        end_dt = datetime(end_date.year, end_date.month, end_date.day, tzinfo=timezone.utc) + timedelta(days=1)
+        period1 = int(start_dt.timestamp())
+        period2 = int(end_dt.timestamp())
+
+        encoded_symbol = quote(symbol)
+        url = (
+            "https://query1.finance.yahoo.com/v8/finance/chart/"
+            f"{encoded_symbol}?interval=1d&period1={period1}&period2={period2}"
+        )
+
+        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.URLError as exc:
+            raise ValueError(
+                f"Unable to download share price history for {symbol}: {exc.reason if hasattr(exc, 'reason') else exc}"
+            ) from exc
+
+        chart = payload.get("chart", {}) if isinstance(payload, dict) else {}
+        results = chart.get("result") if isinstance(chart, dict) else None
+        if not results:
+            error_info = chart.get("error") if isinstance(chart, dict) else None
+            description = ""
+            if isinstance(error_info, dict):
+                description = error_info.get("description") or error_info.get("message") or ""
+            raise ValueError(
+                "Share price data was not returned by Yahoo Finance"
+                + (f": {description}" if description else ".")
+            )
+
+        result = results[0]
+        timestamps = result.get("timestamp") if isinstance(result, dict) else None
+        indicators = result.get("indicators") if isinstance(result, dict) else None
+        quotes = indicators.get("quote") if isinstance(indicators, dict) else None
+        quote0 = quotes[0] if isinstance(quotes, list) and quotes else None
+        closes = quote0.get("close") if isinstance(quote0, dict) else None
+
+        if not timestamps or not closes:
+            raise ValueError("Share price history was returned without timestamp information.")
+
+        date_prices: Dict[date, float] = {}
+        for index, timestamp_value in enumerate(timestamps):
+            if index >= len(closes):
+                break
+            close_value = closes[index]
+            if close_value is None or not math.isfinite(close_value):
+                continue
+            try:
+                ts = float(timestamp_value)
+            except (TypeError, ValueError):
+                continue
+            closing_time = datetime.fromtimestamp(ts, tz=timezone.utc)
+            date_prices[closing_time.date()] = float(close_value)
+
+        if not date_prices:
+            raise ValueError("No valid share price entries were found in the Yahoo Finance response.")
+
+        available_dates = sorted(date_prices.keys())
+        prices: Dict[str, float] = {}
+        for label, target_datetime in period_dates:
+            target_date = target_datetime.date()
+            price = date_prices.get(target_date)
+            if price is None:
+                closest_date = None
+                smallest_delta: Optional[int] = None
+                for candidate in available_dates:
+                    delta = abs((candidate - target_date).days)
+                    if smallest_delta is None or delta < smallest_delta:
+                        smallest_delta = delta
+                        closest_date = candidate
+                if closest_date is not None and smallest_delta is not None and smallest_delta <= 7:
+                    price = date_prices[closest_date]
+            if price is not None and price > 0 and math.isfinite(price):
+                prices[str(label)] = float(price)
+
+        if len(prices) < len(period_dates) and self.share_prices:
+            for idx, label in enumerate(self.periods):
+                if label in prices:
+                    continue
+                if idx >= len(self.share_prices):
+                    continue
+                fallback_price = self.share_prices[idx]
+                if fallback_price and math.isfinite(fallback_price) and fallback_price > 0:
+                    prices[str(label)] = float(fallback_price)
+
+        if len(prices) < len(period_dates):
+            missing_labels = [label for label, _ in period_dates if str(label) not in prices]
+            missing_preview = ", ".join(missing_labels[:3])
+            if len(missing_labels) > 3:
+                missing_preview += ", …"
+            raise ValueError(
+                "Share price history is unavailable for the following periods: "
+                f"{missing_preview}"
+            )
+
+        return prices
+
+    def _get_period_share_price_map(self) -> Dict[str, float]:
+        if self._period_share_price_map is not None:
+            return self._period_share_price_map
+        if self._share_price_error is not None:
+            raise ValueError(self._share_price_error)
+        try:
+            price_map = self._fetch_period_share_prices()
+        except ValueError as exc:
+            self._share_price_error = str(exc)
+            raise
+        self._period_share_price_map = price_map
+        return price_map
+
     def has_data(self) -> bool:
         return bool(self.finance_segments or self.income_segments)
 
@@ -891,6 +1071,7 @@ class FinancePlotFrame(ttk.Frame):
             FinanceDataset.NORMALIZATION_SHARES,
             FinanceDataset.NORMALIZATION_REPORTED,
             FinanceDataset.NORMALIZATION_SHARE_PRICE,
+            FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
             self.VALUE_MODE_SHARE_COUNT,
         }
         if mode not in valid_modes:
@@ -979,12 +1160,51 @@ class FinancePlotFrame(ttk.Frame):
                 ordered.append(label)
         return self._sort_periods(ordered)
 
+    def _recalculate_periods_after_mutation(self) -> None:
+        if not self.datasets:
+            self.periods = None
+            self._periods_by_key.clear()
+            self._visible_periods = None
+            return
+        self._periods_by_key.clear()
+        for dataset in self.datasets.values():
+            self._register_periods(dataset)
+        self.periods = self._rebuild_period_sequence()
+        if self._visible_periods is None:
+            self._visible_periods = list(self.periods)
+        else:
+            previous = list(self._visible_periods)
+            allowed = set(self.periods)
+            updated = [label for label in previous if label in allowed]
+            if previous and not updated:
+                updated = list(self.periods)
+            self._visible_periods = updated
+
     def clear_companies(self) -> None:
         self.datasets.clear()
+        self._company_colors.clear()
         self.periods = None
         self._periods_by_key.clear()
         self._visible_periods = None
         self._render_empty()
+
+    def remove_company(self, company: str) -> bool:
+        if company not in self.datasets:
+            return False
+        self.datasets.pop(company, None)
+        self._company_colors.pop(company, None)
+        self._recalculate_periods_after_mutation()
+        if self.datasets:
+            self._render()
+        else:
+            self._render_empty()
+        return True
+
+    def has_companies(self) -> bool:
+        return bool(self.datasets)
+
+    def current_companies(self) -> List[str]:
+        return list(self.datasets.keys())
 
     def add_company(self, company: str, dataset: FinanceDataset) -> Tuple[bool, Optional[str]]:
         previous_periods = set(self.periods or [])
@@ -1012,14 +1232,20 @@ class FinancePlotFrame(ttk.Frame):
         try:
             dataset.set_normalization_mode(self._dataset_normalization_mode)
         except ValueError as exc:
-            if self._dataset_normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
+            if self._dataset_normalization_mode in {
+                FinanceDataset.NORMALIZATION_SHARE_PRICE,
+                FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
+            }:
                 normalization_warning = str(exc)
                 fallback_mode = FinanceDataset.NORMALIZATION_SHARES
                 dataset.set_normalization_mode(fallback_mode)
                 for existing in self.datasets.values():
                     existing.set_normalization_mode(fallback_mode)
                 self._dataset_normalization_mode = fallback_mode
-                if self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
+                if self.normalization_mode in {
+                    FinanceDataset.NORMALIZATION_SHARE_PRICE,
+                    FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
+                }:
                     self.normalization_mode = fallback_mode
             else:
                 raise
@@ -1410,6 +1636,9 @@ class FinancePlotFrame(ttk.Frame):
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
             self.axis.yaxis.set_major_formatter(self._share_price_formatter)
             self.axis.set_ylabel("Share Price Multiple")
+        elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD:
+            self.axis.yaxis.set_major_formatter(self._share_price_formatter)
+            self.axis.set_ylabel("Share Price Multiple (Period)")
         else:
             self.axis.yaxis.set_major_formatter(self._reported_formatter)
             self.axis.set_ylabel("Reported Value")
@@ -1992,6 +2221,14 @@ class FinanceAnalystApp:
 
         self.open_button = ttk.Button(controls, text="Add", command=self._open_selected_company)
         self.open_button.pack(side=tk.LEFT)
+        self.remove_button = ttk.Button(
+            controls, text="Remove", command=self._remove_selected_company
+        )
+        self.remove_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.clear_button = ttk.Button(
+            controls, text="Clear All", command=self._clear_all_companies
+        )
+        self.clear_button.pack(side=tk.LEFT, padx=(6, 0))
 
         mode_frame = ttk.Frame(outer)
         mode_frame.pack(fill=tk.X, pady=(0, 12))
@@ -2027,6 +2264,13 @@ class FinanceAnalystApp:
             text="Normalize over latest share price",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_SHARE_PRICE,
+            command=self._on_normalization_change,
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Radiobutton(
+            values_frame,
+            text="Normalize with share price at time",
+            variable=self.normalization_var,
+            value=FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
             command=self._on_normalization_change,
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Radiobutton(
@@ -2130,6 +2374,27 @@ class FinanceAnalystApp:
             if combined_path.exists():
                 candidates.append(path.name)
         return candidates
+
+    def _remove_selected_company(self) -> None:
+        company = self.company_var.get().strip()
+        if not company:
+            messagebox.showinfo(
+                "Remove Company", "Choose a company to remove from the chart."
+            )
+            return
+        if not self.plot_frame.remove_company(company):
+            messagebox.showinfo(
+                "Remove Company", f"{company} is not currently on the chart."
+            )
+            return
+        self._refresh_period_controls()
+
+    def _clear_all_companies(self) -> None:
+        if not self.plot_frame.has_companies():
+            messagebox.showinfo("Clear Chart", "There are no companies to clear from the chart.")
+            return
+        self.plot_frame.clear_companies()
+        self._refresh_period_controls()
 
     def _open_selected_company(self) -> None:
         company = self.company_var.get().strip()
