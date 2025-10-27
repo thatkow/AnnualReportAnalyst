@@ -40,6 +40,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib import colors, colormaps
 from matplotlib.patches import Patch, Rectangle
+from matplotlib.ticker import ScalarFormatter
 
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -530,6 +531,9 @@ class FinancePlotFrame(ttk.Frame):
         self._context_metadata: Optional[Dict[str, Any]] = None
         self.normalization_mode = FinanceDataset.NORMALIZATION_SHARES
         self._dataset_normalization_mode = FinanceDataset.NORMALIZATION_SHARES
+        self._default_y_formatter = ScalarFormatter()
+        self._share_count_formatter = ScalarFormatter(useOffset=False)
+        self._share_count_formatter.set_scientific(False)
         self._render_empty()
 
     @staticmethod
@@ -989,10 +993,13 @@ class FinancePlotFrame(ttk.Frame):
 
         self.axis.axhline(0, color="#333333", linewidth=0.8)
         if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
+            self.axis.yaxis.set_major_formatter(self._share_count_formatter)
             self.axis.set_ylabel("Number of Shares")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARES:
+            self.axis.yaxis.set_major_formatter(self._default_y_formatter)
             self.axis.set_ylabel("Value per Share")
         else:
+            self.axis.yaxis.set_major_formatter(self._default_y_formatter)
             self.axis.set_ylabel("Reported Value")
         if self.datasets:
             companies_list = ", ".join(self.datasets.keys())
