@@ -14,7 +14,10 @@ You are parsing an "Income Statement" (also called "Statement of Profit or Loss 
    - You must always output scaled numbers. If the scale is ($000s), output 130 → 130000. Never return raw values.
    - Apply this multiplier to every numeric cell you output, including negatives, parentheses, and 0/– entries.
 
-2. **Extract the Income Statement** into one semicolon-separated (`;`) file with these columns: `CATEGORY;ITEM;DATE1;DATE2;...;DATE(N)`, where `N` is the number of date columns that appear in the statement. You **must not assume a fixed number of date columns** and should adjust the output dynamically based on the actual number of dates present in the statement.
+2. **Extract the Income Statement** into one semicolon-separated (`;`) file with these columns:  
+   `CATEGORY;ITEM;DATE1;DATE2;...;DATE(N)`  
+   where `N` is the number of date columns that appear in the statement.  
+   You **must not assume a fixed number of date columns** and should adjust the output dynamically based on the actual number of dates present in the statement.
    - Include EVERY visible row in the statement, including section headers and subtotals (e.g., GROSS PROFIT, TOTAL EXPENSES, OTHER COMPREHENSIVE INCOME, EPS lines).
    - If the statement spans multiple pages or columns, continue across all pages/columns until the true end of the statement. Read left-to-right within a page panel, then top-to-bottom.
 
@@ -36,11 +39,16 @@ You are parsing an "Income Statement" (also called "Statement of Profit or Loss 
    - If you don’t know the category, leave `CATEGORY` as UNKNOWN, but `ITEM` must always be present.
 
 4. **Formatting for date columns (Columns other than `CATEGORY` and `ITEM`):**
-   - Remove commas from numbers before applying the scale factor.
-   - After scaling, verify that every numeric value reflects the multiplier (when factor ≠ 1). Do not partially scale or leave any original-unit figures in the table.
-   - Convert parentheses into negatives (then apply the factor).
-   - Treat dashes (–, —, -) as 0 only when they appear in numeric cells (then apply the factor).
-   - If no value is shown, leave the cell blank (not 0).
+
+   - Remove commas or spaces from numbers before applying the scale factor.  
+   - After scaling, verify that **every numeric value reflects the multiplier**.  
+   - **Parentheses `( )` MUST ALWAYS be converted to negative numbers.**  
+     - Example: `(46.9)` → `-46900000` (if scale = million).  
+     - Example: `(0.1)` → `-100000`.  
+     - **Never output parentheses in numeric fields.**
+   - Treat dashes (–, —, -) as `0` **only when they appear in numeric cells** (then apply the factor).  
+   - If a cell has no numeric value, leave it blank (do **not** use `0`).  
+   - After processing, **all numeric cells must contain only digits, a leading minus sign if negative, and no parentheses, spaces, or commas.**
 
 5. **Output rules:**
    - Use exactly one semicolon (`;`) as the separator.
@@ -49,14 +57,20 @@ You are parsing an "Income Statement" (also called "Statement of Profit or Loss 
    - The **number of date columns is variable**. Ensure the output adjusts dynamically to accommodate all date columns presented in the statement.
    - Do not output explanations, just the table.
 
-**Example:**
+---
 
-CATEGORY;ITEM;30.06.2019;30.06.2018;30.06.2017;30.06.2016
-REVENUE;SALES;196534930000;150628450000;140000000000;130000000000
-REVENUE;COST OF GOODS SOLD;-5011451000;-3802226000;-3100000000;-2900000000
-EXPENSES;EMPLOYEE EXPENSES;-8838047000;-7289702000;-6500000000;-6100000000
-TOTAL;PROFIT/(LOSS) AFTER INCOME TAX;2544339000;-20443388000;-12000000000;-11000000000
+✅ **Final validation rule:**  
+Before producing the final output, check every numeric cell.  
+- If any numeric field contains parentheses `( )`, convert them to negatives.  
+- Ensure all numbers are plain digits with an optional leading minus sign.  
+- **No parentheses may appear in the final output under any circumstances.**
 
 ---
 
+**Example:**
 
+CATEGORY;ITEM;30.06.2019;30.06.2018;30.06.2017;30.06.2016  
+REVENUE;SALES;196534930000;150628450000;140000000000;130000000000  
+REVENUE;COST OF GOODS SOLD;-5011451000;-3802226000;-3100000000;-2900000000  
+EXPENSES;EMPLOYEE EXPENSES;-8838047000;-7289702000;-6500000000;-6100000000  
+TOTAL;PROFIT/(LOSS) AFTER INCOME TAX;2544339000;-20443388000;-12000000000;-11000000000
