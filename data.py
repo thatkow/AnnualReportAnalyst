@@ -46,7 +46,6 @@ DEFAULT_PATTERNS = {
 }
 YEAR_DEFAULT_PATTERNS = [r"(\d{4})\s+Annual\s+Report"]
 DEFAULT_NOTE_OPTIONS = ["", "asis", "excluded", "negated", "share_count"]
-MAX_COMBINED_DATE_COLUMNS = 2
 DEFAULT_NOTE_BACKGROUND_COLORS = {
     "": "",
     "asis": "",
@@ -3588,9 +3587,6 @@ class ReportApp:
                     else:
                         data_indices.append(idx)
                         display_headers.append(heading.strip() or f"Column {idx + 1}")
-                if len(display_headers) > MAX_COMBINED_DATE_COLUMNS:
-                    display_headers = display_headers[:MAX_COMBINED_DATE_COLUMNS]
-                    data_indices = data_indices[:MAX_COMBINED_DATE_COLUMNS]
                 if category_index is None or item_index is None:
                     continue
                 data_rows = rows[1:] if len(rows) > 1 else []
@@ -3643,7 +3639,7 @@ class ReportApp:
             return
 
         self.combined_pdf_order = [entry.path for entry in pdf_entries_with_data]
-        self.combined_max_data_columns = min(max_data_columns, MAX_COMBINED_DATE_COLUMNS)
+        self.combined_max_data_columns = max_data_columns
         logger.info(
             "Combined PDF order: %s with max data columns=%d",
             [path.name for path in self.combined_pdf_order],
