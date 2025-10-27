@@ -1781,9 +1781,21 @@ class FinancePlotFrame(ttk.Frame):
                     share_values[idx] if share_presence[idx] else math.nan
                     for idx in range(len(share_values))
                 ]
+                plot_positions = [
+                    x_positions[idx]
+                    for idx, present in enumerate(share_presence)
+                    if present and math.isfinite(share_points[idx])
+                ]
+                plot_values = [
+                    share_points[idx]
+                    for idx, present in enumerate(share_presence)
+                    if present and math.isfinite(share_points[idx])
+                ]
+                if not plot_positions:
+                    continue
                 line = self.axis.plot(
-                    x_positions,
-                    share_points,
+                    plot_positions,
+                    plot_values,
                     linestyle=":",
                     marker="o",
                     color=finance_color,
@@ -1843,14 +1855,26 @@ class FinancePlotFrame(ttk.Frame):
                     share_prices[idx] if share_presence[idx] else math.nan
                     for idx in range(len(share_prices))
                 ]
+                plot_positions = [
+                    x_positions[idx]
+                    for idx, present in enumerate(share_presence)
+                    if present and math.isfinite(price_points[idx])
+                ]
+                plot_values = [
+                    price_points[idx]
+                    for idx, present in enumerate(share_presence)
+                    if present and math.isfinite(price_points[idx])
+                ]
+                if not plot_positions:
+                    continue
                 share_price_metrics = self._compute_period_metrics(
                     dataset,
                     periods,
                     series=FinanceDataset.FINANCE_LABEL,
                 )
                 line = self.axis.plot(
-                    x_positions,
-                    price_points,
+                    plot_positions,
+                    plot_values,
                     linestyle="-",
                     marker="o",
                     color=finance_color,
@@ -2148,10 +2172,20 @@ class FinancePlotFrame(ttk.Frame):
                     periods,
                     series=FinanceDataset.FINANCE_LABEL,
                 )
-                if any(finance_included):
+                plot_positions = [
+                    x_positions[idx]
+                    for idx, included in enumerate(finance_included)
+                    if included and math.isfinite(finance_points[idx])
+                ]
+                plot_values = [
+                    finance_points[idx]
+                    for idx, included in enumerate(finance_included)
+                    if included and math.isfinite(finance_points[idx])
+                ]
+                if plot_positions:
                     line = self.axis.plot(
-                        x_positions,
-                        finance_points,
+                        plot_positions,
+                        plot_values,
                         linestyle="-",
                         marker="o",
                         color=company_color,
@@ -2208,10 +2242,20 @@ class FinancePlotFrame(ttk.Frame):
                     periods,
                     series=FinanceDataset.INCOME_LABEL,
                 )
-                if any(income_included):
+                plot_positions = [
+                    x_positions[idx]
+                    for idx, included in enumerate(income_included)
+                    if included and math.isfinite(income_points[idx])
+                ]
+                plot_values = [
+                    income_points[idx]
+                    for idx, included in enumerate(income_included)
+                    if included and math.isfinite(income_points[idx])
+                ]
+                if plot_positions:
                     line = self.axis.plot(
-                        x_positions,
-                        income_points,
+                        plot_positions,
+                        plot_values,
                         linestyle="--",
                         marker="o",
                         color=company_color,
