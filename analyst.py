@@ -1296,11 +1296,6 @@ class FinancePlotFrame(ttk.Frame):
         self._percentage_formatter = PercentFormatter(xmax=1.0, decimals=2)
         self._render_empty()
 
-    def _apply_layout_margins(self) -> None:
-        """Reserve extra breathing room around the plotted graph."""
-
-        self.figure.subplots_adjust(left=0.12, right=0.98, top=0.9, bottom=0.24)
-
     @staticmethod
     def _compute_bottoms(values: Sequence[float], pos_totals: List[float], neg_totals: List[float]) -> List[float]:
         bottoms: List[float] = []
@@ -1324,7 +1319,6 @@ class FinancePlotFrame(ttk.Frame):
             self._show_context_menu if self.display_mode == self.MODE_STACKED else None
         )
         self.hover_helper.begin_update(context_callback)
-        self._apply_layout_margins()
         self.canvas.draw()
 
     def _compute_period_metrics(
@@ -2205,12 +2199,13 @@ class FinancePlotFrame(ttk.Frame):
                 self.axis.set_title("Finance vs Income Statement")
 
         if legend_handles:
-            legend_kwargs = {"loc": "upper left"}
-            if mode == self.MODE_STACKED and self.normalization_mode != self.VALUE_MODE_SHARE_COUNT:
-                legend_kwargs["ncol"] = 2
+            legend_kwargs = {
+                "loc": "center left",
+                "bbox_to_anchor": (1.02, 0.5),
+                "borderaxespad": 0.0,
+            }
             self.axis.legend(handles=legend_handles, **legend_kwargs)
 
-        self._apply_layout_margins()
         self.canvas.draw()
 
     def _ensure_context_menu(self) -> tk.Menu:
