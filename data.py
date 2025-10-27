@@ -111,7 +111,7 @@ class ScrapeTask:
     page_index: int
     prompt_text: str
     page_text: str
-    doc_dir: Path
+    scrape_root: Path
 
 
 class CollapsibleFrame(ttk.Frame):
@@ -3263,8 +3263,15 @@ class ReportApp:
         row_index = 0
         header_added = False
         for entry in self.pdf_entries:
-            doc_dir = scrape_root / entry.stem
-            metadata = self._load_doc_metadata(doc_dir)
+            entry_stem = entry.stem
+            metadata_path = self._metadata_file_for_entry(scrape_root, entry_stem)
+            metadata: Dict[str, Any] = {}
+            if metadata_path.exists():
+                metadata = self._load_doc_metadata(metadata_path)
+            else:
+                legacy_dir = self._legacy_doc_dir(scrape_root, entry_stem)
+                if legacy_dir.exists():
+                    metadata = self._load_doc_metadata(legacy_dir)
             if not metadata:
                 continue
             for category in COLUMNS:
@@ -3283,7 +3290,7 @@ class ReportApp:
 
                 txt_name = meta.get("txt")
                 if isinstance(txt_name, str) and txt_name:
-                    candidate = doc_dir / txt_name
+                    candidate = self._resolve_scrape_path(scrape_root, entry_stem, txt_name)
                     if candidate.exists():
                         try:
                             preview_text = candidate.read_text(encoding="utf-8")
@@ -3297,7 +3304,9 @@ class ReportApp:
                 if not rows:
                     csv_name = meta.get("csv")
                     if isinstance(csv_name, str) and csv_name:
-                        candidate_csv = doc_dir / csv_name
+                        candidate_csv = self._resolve_scrape_path(
+                            scrape_root, entry_stem, csv_name
+                        )
                         csv_target_path = candidate_csv
                         if candidate_csv.exists():
                             csv_delimiter = self._detect_csv_delimiter(candidate_csv)
@@ -3366,14 +3375,18 @@ class ReportApp:
                 csv_name = meta.get("csv") if isinstance(meta, dict) else None
                 csv_path: Optional[Path] = None
                 if isinstance(csv_name, str) and csv_name:
-                    candidate_csv = doc_dir / csv_name
+                    candidate_csv = self._resolve_scrape_path(
+                        scrape_root, entry_stem, csv_name
+                    )
                     if candidate_csv.exists():
                         csv_path = candidate_csv
                 if csv_path is not None:
                     ttk.Button(
                         header_frame,
                         text="Reload CSV",
-                        command=lambda d=doc_dir, c=category: self._reload_scraped_csv(d, c),
+                        command=lambda root=scrape_root, meta_path=metadata_path, stem=entry_stem, c=category: self._reload_scraped_csv(
+                            root, meta_path, stem, c
+                        ),
                         width=12,
                     ).grid(row=0, column=4, sticky="e", padx=(0, 4))
                     ttk.Button(
@@ -3388,7 +3401,9 @@ class ReportApp:
                 ttk.Button(
                     header_frame,
                     text="Delete",
-                    command=lambda d=doc_dir, c=category: self._delete_scrape_output(d, c),
+                    command=lambda root=scrape_root, meta_path=metadata_path, stem=entry_stem, c=category: self._delete_scrape_output(
+                        root, meta_path, stem, c
+                    ),
                     width=10,
                 ).grid(row=0, column=delete_column, sticky="e")
                 row_index += 1
@@ -3473,7 +3488,9 @@ class ReportApp:
                         "rows": table_rows,
                         "csv_path": csv_target_path,
                         "delimiter": csv_delimiter,
-                        "doc_dir": doc_dir,
+                        "scrape_root": scrape_root,
+                        "metadata_path": metadata_path,
+                        "entry_stem": entry_stem,
                         "category": category,
                         "button": delete_row_button,
                     }
@@ -3545,8 +3562,15 @@ class ReportApp:
         max_data_columns = 0
 
         for entry in self.pdf_entries:
-            doc_dir = scrape_root / entry.stem
-            metadata = self._load_doc_metadata(doc_dir)
+            entry_stem = entry.stem
+            metadata_path = self._metadata_file_for_entry(scrape_root, entry_stem)
+            metadata: Dict[str, Any] = {}
+            if metadata_path.exists():
+                metadata = self._load_doc_metadata(metadata_path)
+            else:
+                legacy_dir = self._legacy_doc_dir(scrape_root, entry_stem)
+                if legacy_dir.exists():
+                    metadata = self._load_doc_metadata(legacy_dir)
             if not metadata:
                 continue
             entry_has_data = False
@@ -3557,7 +3581,7 @@ class ReportApp:
                 rows: List[List[str]] = []
                 txt_name = meta.get("txt")
                 if isinstance(txt_name, str) and txt_name:
-                    txt_path = doc_dir / txt_name
+                    txt_path = self._resolve_scrape_path(scrape_root, entry_stem, txt_name)
                     if txt_path.exists():
                         try:
                             text = txt_path.read_text(encoding="utf-8")
@@ -3567,7 +3591,7 @@ class ReportApp:
                 if not rows:
                     csv_name = meta.get("csv")
                     if isinstance(csv_name, str) and csv_name:
-                        csv_path = doc_dir / csv_name
+                        csv_path = self._resolve_scrape_path(scrape_root, entry_stem, csv_name)
                         if csv_path.exists():
                             rows = self._read_csv_rows(csv_path)
                 if not rows:
@@ -5521,8 +5545,41 @@ class ReportApp:
         formatted = f"{numeric_value:.6e}"
         return f"{prefix}{formatted}{suffix}"
 
-    def _load_doc_metadata(self, doc_dir: Path) -> Dict[str, Any]:
-        metadata_path = doc_dir / "metadata.json"
+    def _metadata_file_for_entry(self, scrape_root: Path, entry_stem: str) -> Path:
+        return scrape_root / f"{entry_stem}_metadata.json"
+
+    def _legacy_doc_dir(self, scrape_root: Path, entry_stem: str) -> Path:
+        return scrape_root / entry_stem
+
+    def _scrape_candidate_paths(self, scrape_root: Path, entry_stem: str, name: str) -> List[Path]:
+        candidates: List[Path] = []
+        modern = scrape_root / name
+        candidates.append(modern)
+        legacy_dir = self._legacy_doc_dir(scrape_root, entry_stem)
+        legacy = legacy_dir / name
+        if legacy != modern:
+            candidates.append(legacy)
+        return candidates
+
+    def _resolve_scrape_path(
+        self, scrape_root: Path, entry_stem: str, name: str
+    ) -> Path:
+        for candidate in self._scrape_candidate_paths(scrape_root, entry_stem, name):
+            if candidate.exists():
+                return candidate
+        return scrape_root / name
+
+    def _build_scrape_filename(self, pdf_stem: str, category: str) -> str:
+        safe_category = re.sub(r"[^0-9A-Za-z]+", "_", category).strip("_")
+        if not safe_category:
+            safe_category = "data"
+        return f"{pdf_stem}_{safe_category}.csv"
+
+    def _load_doc_metadata(self, target: Path) -> Dict[str, Any]:
+        if target.is_dir():
+            metadata_path = target / "metadata.json"
+        else:
+            metadata_path = target
         if not metadata_path.exists():
             return {}
         try:
@@ -5532,48 +5589,68 @@ class ReportApp:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def _write_doc_metadata(self, doc_dir: Path, data: Dict[str, Any]) -> None:
-        metadata_path = doc_dir / "metadata.json"
+    def _write_doc_metadata(self, target: Path, data: Dict[str, Any]) -> None:
+        if target.is_dir():
+            metadata_path = target / "metadata.json"
+        else:
+            metadata_path = target
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with metadata_path.open("w", encoding="utf-8") as fh:
                 json.dump(data, fh, indent=2)
         except Exception as exc:
             messagebox.showwarning("Save Metadata", f"Could not save scrape metadata: {exc}")
 
-    def _delete_scrape_output(self, doc_dir: Path, category: str) -> None:
-        metadata = self._load_doc_metadata(doc_dir)
+    def _delete_scrape_output(
+        self, scrape_root: Path, metadata_path: Path, entry_stem: str, category: str
+    ) -> None:
+        metadata = self._load_doc_metadata(metadata_path)
+        if not metadata:
+            legacy_dir = self._legacy_doc_dir(scrape_root, entry_stem)
+            if legacy_dir.exists():
+                metadata = self._load_doc_metadata(legacy_dir)
         if not metadata:
             return
         meta = metadata.get(category)
         errors: List[str] = []
+        seen_paths: Set[Path] = set()
         if isinstance(meta, dict):
             for key in ("csv", "txt"):
                 name = meta.get(key)
                 if not isinstance(name, str) or not name:
                     continue
-                path = doc_dir / name
-                try:
-                    path.unlink(missing_ok=True)
-                except TypeError:
+                for path in self._scrape_candidate_paths(scrape_root, entry_stem, name):
+                    if path in seen_paths:
+                        continue
+                    seen_paths.add(path)
                     try:
-                        if path.exists():
-                            path.unlink()
+                        path.unlink(missing_ok=True)
+                    except TypeError:
+                        try:
+                            if path.exists():
+                                path.unlink()
+                        except FileNotFoundError:
+                            pass
+                        except Exception as exc:
+                            errors.append(f"Could not delete {name}: {exc}")
                     except FileNotFoundError:
                         pass
                     except Exception as exc:
                         errors.append(f"Could not delete {name}: {exc}")
-                except FileNotFoundError:
-                    pass
-                except Exception as exc:
-                    errors.append(f"Could not delete {name}: {exc}")
         metadata.pop(category, None)
-        self._write_doc_metadata(doc_dir, metadata)
+        self._write_doc_metadata(metadata_path, metadata)
         self._refresh_scraped_tab()
         if errors:
             messagebox.showwarning("Delete Output", "\n".join(errors))
 
-    def _reload_scraped_csv(self, doc_dir: Path, category: str) -> None:
-        metadata = self._load_doc_metadata(doc_dir)
+    def _reload_scraped_csv(
+        self, scrape_root: Path, metadata_path: Path, entry_stem: str, category: str
+    ) -> None:
+        metadata = self._load_doc_metadata(metadata_path)
+        if not metadata:
+            legacy_dir = self._legacy_doc_dir(scrape_root, entry_stem)
+            if legacy_dir.exists():
+                metadata = self._load_doc_metadata(legacy_dir)
         if not metadata:
             messagebox.showinfo("Reload CSV", "No scrape metadata found for this selection.")
             return
@@ -5585,7 +5662,7 @@ class ReportApp:
         if not isinstance(csv_name, str) or not csv_name:
             messagebox.showinfo("Reload CSV", "No CSV file is associated with this selection.")
             return
-        csv_path = doc_dir / csv_name
+        csv_path = self._resolve_scrape_path(scrape_root, entry_stem, csv_name)
         if not csv_path.exists():
             messagebox.showinfo("Reload CSV", "The recorded CSV file could not be found on disk.")
             self._refresh_scraped_tab()
@@ -5656,10 +5733,17 @@ class ReportApp:
         header: List[str] = info.get("header", [])
         delimiter: str = info.get("delimiter", ",")
         if not self._write_scraped_csv_rows(csv_path, header, data_rows, delimiter=delimiter):
-            doc_dir: Optional[Path] = info.get("doc_dir")
+            scrape_root: Optional[Path] = info.get("scrape_root")
+            metadata_path: Optional[Path] = info.get("metadata_path")
+            entry_stem = info.get("entry_stem")
             category: Optional[str] = info.get("category")
-            if isinstance(doc_dir, Path) and isinstance(category, str):
-                self._reload_scraped_csv(doc_dir, category)
+            if (
+                isinstance(scrape_root, Path)
+                and isinstance(metadata_path, Path)
+                and isinstance(entry_stem, str)
+                and isinstance(category, str)
+            ):
+                self._reload_scraped_csv(scrape_root, metadata_path, entry_stem, category)
             return
 
         info["rows"] = data_rows
@@ -6449,19 +6533,25 @@ class ReportApp:
         errors: List[str] = []
         pending: List[Tuple[PDFEntry, List[Tuple[str, int]]]] = []
         metadata_cache: Dict[Path, Dict[str, Any]] = {}
-        doc_dir_map: Dict[Path, Path] = {}
+        metadata_path_map: Dict[Path, Path] = {}
 
         for entry in self.pdf_entries:
             entry_tasks: List[Tuple[str, int]] = []
-            doc_dir = scrape_root / entry.stem
-            doc_dir.mkdir(parents=True, exist_ok=True)
-            metadata = self._load_doc_metadata(doc_dir)
-            if not isinstance(metadata, dict):
-                metadata = {}
+            entry_stem = entry.stem
+            metadata_path = self._metadata_file_for_entry(scrape_root, entry_stem)
+            if metadata_path.exists():
+                metadata_data = self._load_doc_metadata(metadata_path)
             else:
-                metadata = dict(metadata)
+                legacy_dir = self._legacy_doc_dir(scrape_root, entry_stem)
+                if legacy_dir.exists():
+                    metadata_data = self._load_doc_metadata(legacy_dir)
+                else:
+                    metadata_data = {}
+            if not isinstance(metadata_data, dict):
+                metadata_data = {}
+            metadata = dict(metadata_data)
             metadata_cache[entry.path] = metadata
-            doc_dir_map[entry.path] = doc_dir
+            metadata_path_map[entry.path] = metadata_path
             for category in COLUMNS:
                 page_index = self._get_selected_page_index(entry, category)
                 if page_index is None:
@@ -6473,13 +6563,18 @@ class ReportApp:
                 if isinstance(existing, dict):
                     csv_name = existing.get("csv")
                     if isinstance(csv_name, str) and csv_name:
-                        csv_path = doc_dir / csv_name
+                        csv_path = self._resolve_scrape_path(
+                            scrape_root, entry_stem, csv_name
+                        )
                         if csv_path.exists():
                             file_exists = True
                     else:
                         txt_name = existing.get("txt")
                         if isinstance(txt_name, str) and txt_name:
-                            if (doc_dir / txt_name).exists():
+                            txt_path = self._resolve_scrape_path(
+                                scrape_root, entry_stem, txt_name
+                            )
+                            if txt_path.exists():
                                 file_exists = True
                 if file_exists:
                     continue
@@ -6512,19 +6607,12 @@ class ReportApp:
             except Exception as exc:
                 return False, None, f"{job.entry_name} - {job.category}: {exc}"
 
-            base_name = f"{job.entry_year or 'unknown'}_{job.category}"
-            csv_path = self._ensure_unique_path(job.doc_dir / f"{base_name}.csv")
-
-            rows = self._convert_response_to_rows(response_text)
-            if not rows:
-                rows = [["response"], [response_text]]
-            sanitized_rows = [
-                [self._normalize_scraped_cell(cell) for cell in row]
-                for row in rows
-            ]
+            pdf_stem = Path(job.entry_name).stem
+            csv_name = self._build_scrape_filename(pdf_stem, job.category)
+            csv_path = job.scrape_root / csv_name
 
             try:
-                self._write_csv_rows(sanitized_rows, csv_path)
+                csv_path.write_text(response_text, encoding="utf-8")
             except Exception as exc:
                 return False, None, f"{job.entry_name} - {job.category}: Could not save response ({exc})"
 
@@ -6574,7 +6662,7 @@ class ReportApp:
                             page_index=page_index,
                             prompt_text=prompt_text,
                             page_text=page_text,
-                            doc_dir=doc_dir_map.get(entry.path, scrape_root / entry.stem),
+                            scrape_root=scrape_root,
                         )
                     )
 
@@ -6615,10 +6703,10 @@ class ReportApp:
                 metadata = metadata_cache.get(entry_path, {})
                 if not isinstance(metadata, dict):
                     continue
-                doc_dir = doc_dir_map.get(entry_path)
-                if doc_dir is None:
+                metadata_path = metadata_path_map.get(entry_path)
+                if metadata_path is None:
                     continue
-                self._write_doc_metadata(doc_dir, metadata)
+                self._write_doc_metadata(metadata_path, metadata)
         finally:
             if hasattr(self, "scrape_button"):
                 self.scrape_button.state(["!disabled"])

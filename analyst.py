@@ -531,7 +531,9 @@ class FinancePlotFrame(ttk.Frame):
         self._context_metadata: Optional[Dict[str, Any]] = None
         self.normalization_mode = FinanceDataset.NORMALIZATION_SHARES
         self._dataset_normalization_mode = FinanceDataset.NORMALIZATION_SHARES
-        self._default_y_formatter = ScalarFormatter()
+        self._per_share_formatter = ScalarFormatter()
+        self._reported_formatter = ScalarFormatter(useOffset=False)
+        self._reported_formatter.set_scientific(False)
         self._share_count_formatter = ScalarFormatter(useOffset=False)
         self._share_count_formatter.set_scientific(False)
         self._render_empty()
@@ -996,10 +998,10 @@ class FinancePlotFrame(ttk.Frame):
             self.axis.yaxis.set_major_formatter(self._share_count_formatter)
             self.axis.set_ylabel("Number of Shares")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARES:
-            self.axis.yaxis.set_major_formatter(self._default_y_formatter)
+            self.axis.yaxis.set_major_formatter(self._per_share_formatter)
             self.axis.set_ylabel("Value per Share")
         else:
-            self.axis.yaxis.set_major_formatter(self._default_y_formatter)
+            self.axis.yaxis.set_major_formatter(self._reported_formatter)
             self.axis.set_ylabel("Reported Value")
         if self.datasets:
             companies_list = ", ".join(self.datasets.keys())
