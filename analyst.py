@@ -850,7 +850,7 @@ class FinanceDataset:
                     if per_share == 0:
                         multiples.append(0.0)
                     else:
-                        multiples.append(price / per_share)
+                        multiples.append(per_share / price)
                 segment.values = multiples
         else:
             for segment in self.finance_segments + self.income_segments:
@@ -1366,22 +1366,34 @@ class FinancePlotFrame(ttk.Frame):
                 else math.nan
             )
 
-            if math.isfinite(reported_value) and math.isfinite(share_count_value) and share_count_value != 0:
-                ve_sum = reported_value / share_count_value
+            if (
+                math.isfinite(reported_value)
+                and math.isfinite(share_count_value)
+                and share_count_value != 0
+            ):
+                value_per_share = reported_value / share_count_value
             else:
-                ve_sum = math.nan
+                value_per_share = math.nan
 
-            if math.isfinite(ve_sum) and ve_sum != 0 and math.isfinite(share_price_value):
-                p2ve_value = share_price_value / ve_sum
+            if (
+                math.isfinite(reported_value)
+                and math.isfinite(share_count_value)
+                and share_count_value != 0
+                and math.isfinite(share_price_value)
+                and share_price_value > 0
+            ):
+                value_share_price_ratio = (
+                    reported_value / (share_count_value * share_price_value)
+                )
             else:
-                p2ve_value = math.nan
+                value_share_price_ratio = math.nan
 
             metrics[label_key] = {
                 "date": label,
                 "share_count": share_count_value,
                 "reported_sum": reported_value,
-                "ve_sum": ve_sum,
-                "p2ve": p2ve_value,
+                "value_per_share": value_per_share,
+                "value_share_price_ratio": value_share_price_ratio,
                 "share_price": share_price_value,
             }
 
@@ -2086,13 +2098,13 @@ class FinancePlotFrame(ttk.Frame):
             self.axis.set_ylabel("Share Price")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARES:
             self.axis.yaxis.set_major_formatter(self._per_share_formatter)
-            self.axis.set_ylabel("V (Value per Share)")
+            self.axis.set_ylabel("Value/Share")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
             self.axis.yaxis.set_major_formatter(self._share_price_formatter)
             self.axis.set_ylabel("Share Price Multiple")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD:
             self.axis.yaxis.set_major_formatter(self._share_price_formatter)
-            self.axis.set_ylabel("V/P (Share Price ÷ Value per Share)")
+            self.axis.set_ylabel("Value/(Share*Price)")
         else:
             self.axis.yaxis.set_major_formatter(self._reported_formatter)
             self.axis.set_ylabel("Reported Value")
@@ -2537,8 +2549,8 @@ class BarHoverHelper:
         date_value = metadata.get("date") or metadata.get("period") or "—"
         share_count = metadata.get("share_count")
         reported_sum = metadata.get("reported_sum")
-        ve_sum = metadata.get("ve_sum")
-        p2ve = metadata.get("p2ve")
+        value_per_share = metadata.get("value_per_share")
+        value_share_price_ratio = metadata.get("value_share_price_ratio")
         share_price_value = metadata.get("share_price")
 
         def _format_scientific(raw: Any) -> str:
@@ -2559,9 +2571,9 @@ class BarHoverHelper:
             f"AMOUNT: {formatted_value}",
             f"REPORTED SUM: {_format_scientific(reported_sum)}",
             f"NUMBER OF SHARES: {_format_scientific(share_count)}",
-            f"V SUM: {_format_decimal(ve_sum)}",
+            f"VALUE/SHARE: {_format_decimal(value_per_share)}",
             f"SHARE PRICE: {_format_decimal(share_price_value)}",
-            f"V/P: {_format_decimal(p2ve)}",
+            f"VALUE/(SHARE*PRICE): {_format_decimal(value_share_price_ratio)}",
         ]
 
         return "\n".join(lines)
@@ -2793,7 +2805,7 @@ class FinanceAnalystApp:
         ttk.Label(values_frame, text="Values:").pack(side=tk.LEFT)
         ttk.Radiobutton(
             values_frame,
-            text="V",
+            text="Value/Share",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_SHARES,
             command=self._on_normalization_change,
@@ -2807,7 +2819,7 @@ class FinanceAnalystApp:
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Radiobutton(
             values_frame,
-            text="V/P",
+            text="Value/(Share*Price)",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
             command=self._on_normalization_change,
