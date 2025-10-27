@@ -18,20 +18,20 @@ You are parsing a "Share Equity Statement" to extract only the final number of s
    - Use the latest year and the previous year only.
    - Apply the scale factor.
 
-3. **Output exactly one line of tab-separated values** with these headers and values:
-CATEGORY ITEM <current_year> <previous_year>
-SHARES NUMBER OF SHARES <value_current> <value_previous>
+3. **Output exactly one line of semicolon-separated values** with these headers and values:
+CATEGORY;ITEM;<current_year>;<previous_year>
+SHARES;NUMBER OF SHARES;<value_current>;<value_previous>
 
 4. **Output rules:**
-- Use one tab per separator.
+- Use one semicolon (;) per separator.
 - No explanations or commentary.
 - If a value is missing, leave blank (not 0).
 - Remove commas before applying scale.
 - After scaling, confirm both share values reflect the multiplier (if factor ≠ 1). Leave a cell blank only when the value is absent.
 
 **Example output:**
-CATEGORY ITEM 31.03.2015 31.03.2014
-SHARES NUMBER OF SHARES 135273000 126601000
+CATEGORY;ITEM;31.03.2015;31.03.2014
+SHARES;NUMBER OF SHARES;135273000;126601000
 
 ---
 
