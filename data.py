@@ -900,8 +900,9 @@ class ReportApp:
             if self.folder_path.get():
                 self.load_pdfs()
         else:
-            if self.company_var.get():
-                self._open_company_tab()
+            # Do not automatically load a company when the application launches.
+            # Users should explicitly choose a company and click the load button.
+            return
 
     def apply_patterns(self) -> None:
         if not self.folder_path.get():
@@ -5708,7 +5709,7 @@ class ReportApp:
         if not text.strip():
             return []
 
-        delimiter = "\t" if "\t" in text else ","
+        delimiter = self._infer_delimiter_from_text(text)
         try:
             reader = csv.reader(io.StringIO(text), delimiter=delimiter)
             return [
@@ -5724,7 +5725,14 @@ class ReportApp:
                 sample = fh.read(4096)
         except Exception:
             return ","
-        return "\t" if "\t" in sample else ","
+        return self._infer_delimiter_from_text(sample)
+
+    def _infer_delimiter_from_text(self, text: str) -> str:
+        if "\t" in text:
+            return "\t"
+        if ";" in text:
+            return ";"
+        return ","
 
     def _write_scraped_csv_rows(
         self,
@@ -5839,6 +5847,12 @@ class ReportApp:
                 rows.append(segments)
             if rows:
                 return self._normalize_scraped_rows(rows)
+
+        if any(
+            ";" in line and not line.startswith("#") for line in lines
+        ):
+            rows = [[segment.strip() for segment in line.split(";")] for line in lines]
+            return self._normalize_scraped_rows(rows)
 
         if any(
             "," in line and not line.startswith("#") for line in lines
