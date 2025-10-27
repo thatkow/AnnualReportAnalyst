@@ -837,11 +837,16 @@ class FinancePlotFrame(ttk.Frame):
                 normalization_factor = self._price_factor(company)
                 if normalization_factor != 1.0:
                     finance_totals = [value * normalization_factor for value in finance_totals]
-                finance_points = [
-                    value if finance_presence[idx] else 0.0
+                finance_included = [
+                    finance_presence[idx]
+                    and not math.isclose(value, 0.0, abs_tol=1e-12)
                     for idx, value in enumerate(finance_totals)
                 ]
-                if any(finance_presence):
+                finance_points = [
+                    value if finance_included[idx] else math.nan
+                    for idx, value in enumerate(finance_totals)
+                ]
+                if any(finance_included):
                     line = self.axis.plot(
                         x_positions,
                         finance_points,
@@ -859,11 +864,16 @@ class FinancePlotFrame(ttk.Frame):
                 )
                 if normalization_factor != 1.0:
                     income_totals = [value * normalization_factor for value in income_totals]
-                income_points = [
-                    value if income_presence[idx] else 0.0
+                income_included = [
+                    income_presence[idx]
+                    and not math.isclose(value, 0.0, abs_tol=1e-12)
                     for idx, value in enumerate(income_totals)
                 ]
-                if any(income_presence):
+                income_points = [
+                    value if income_included[idx] else math.nan
+                    for idx, value in enumerate(income_totals)
+                ]
+                if any(income_included):
                     line = self.axis.plot(
                         x_positions,
                         income_points,
