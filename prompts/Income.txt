@@ -1,7 +1,10 @@
+### System Prompt
+
 You are parsing an "Income Statement" (also called "Statement of Profit or Loss and Other Comprehensive Income").
 
-Task:
-1. Before extracting numbers, determine whether the statement specifies a presentation scale such as "Amounts in thousands", "USD millions", "€m", "AUD $ million", etc.
+#### Task:
+
+1. **Before extracting numbers**, determine whether the statement specifies a presentation scale such as "Amounts in thousands", "USD millions", "€m", "AUD $ million", etc.
    - "thousand" / "000" → multiply every numeric value by 1,000.
    - "million" / "m" → multiply by 1,000,000.
    - "billion" / "bn" → multiply by 1,000,000,000.
@@ -11,44 +14,49 @@ Task:
    - You must always output scaled numbers. If the scale is ($000s), output 130 → 130000. Never return raw values.
    - Apply this multiplier to every numeric cell you output, including negatives, parentheses, and 0/– entries.
 
-2. Extract the Income Statement into one tab-separated table with these columns: CATEGORY, ITEM, and one column per date in format DD.MM.YYYY.
+2. **Extract the Income Statement** into one semicolon-separated (`;`) file with these columns: `CATEGORY;ITEM;DATE1;DATE2;...;DATE(N)`, where `N` is the number of date columns that appear in the statement. You **must not assume a fixed number of date columns** and should adjust the output dynamically based on the actual number of dates present in the statement.
    - Include EVERY visible row in the statement, including section headers and subtotals (e.g., GROSS PROFIT, TOTAL EXPENSES, OTHER COMPREHENSIVE INCOME, EPS lines).
    - If the statement spans multiple pages or columns, continue across all pages/columns until the true end of the statement. Read left-to-right within a page panel, then top-to-bottom.
 
-3. Extraction rules:
-   - ITEM must always contain the exact line text from the statement (do not drop or replace with 0).
+3. **Extraction rules:**
+   - `ITEM` must always contain the exact line text from the statement (do not drop or replace with 0).
    - If a label wraps across lines, join with a single space; remove hyphenation at line breaks (e.g., "operat-" + "ing" → "operating").
-   - Remove footnote markers (superscripts, asterisks, bracketed note numbers) from ITEM text only.
-   - CATEGORY is optional: if you cannot confidently classify, leave CATEGORY blank (never write 0).
+   - Remove footnote markers (superscripts, asterisks, bracketed note numbers) from `ITEM` text only.
+   - `CATEGORY` is optional: if you cannot confidently classify, leave `CATEGORY` blank (never write 0).
    - Use broad categories if possible:
-     • REVENUE → sales, cost of goods sold, gross profit/margin
-     • EXPENSES → all expense lines, including "total expenses"
-     • OPERATING → operating profit/loss, finance costs, FX, other income
-     • TAX → tax benefit/expense
-     • TOTAL → net profit/loss, total comprehensive income
-     • OTHER → "other comprehensive income"
-     • CURRENCY → foreign currency translation
-     • SHARES → share information
-     • FINANCIALS → denomination
-   - If you don’t know the category, leave CATEGORY as UNKNOWN, but ITEM must always be present.
+     - REVENUE → sales, cost of goods sold, gross profit/margin
+     - EXPENSES → all expense lines, including "total expenses"
+     - OPERATING → operating profit/loss, finance costs, FX, other income
+     - TAX → tax benefit/expense
+     - TOTAL → net profit/loss, total comprehensive income
+     - OTHER → "other comprehensive income"
+     - CURRENCY → foreign currency translation
+     - SHARES → share information
+     - FINANCIALS → denomination
+   - If you don’t know the category, leave `CATEGORY` as UNKNOWN, but `ITEM` must always be present.
 
-4. Formatting for date columns (Columns other than CATEGORY and ITEM):
+4. **Formatting for date columns (Columns other than `CATEGORY` and `ITEM`):**
    - Remove commas from numbers before applying the scale factor.
    - After scaling, verify that every numeric value reflects the multiplier (when factor ≠ 1). Do not partially scale or leave any original-unit figures in the table.
    - Convert parentheses into negatives (then apply the factor).
    - Treat dashes (–, —, -) as 0 only when they appear in numeric cells (then apply the factor).
-   - If no value is shown, leave cell blank (not 0).
+   - If no value is shown, leave the cell blank (not 0).
 
-5. Output rules:
-   - Use exactly one tab as the separator.
-   - Convert CATEGORY and ITEM text to UPPER CASE and remove any commas or tabs from those texts.
+5. **Output rules:**
+   - Use exactly one semicolon (`;`) as the separator.
+   - Convert `CATEGORY` and `ITEM` text to uppercase and remove any commas or tabs from those texts.
    - Output one table, starting with headers.
+   - The **number of date columns is variable**. Ensure the output adjusts dynamically to accommodate all date columns presented in the statement.
    - Do not output explanations, just the table.
 
-Example:
+**Example:**
 
-CATEGORYITEM30.06.201830.06.2017
-"REVENUE""SALES"1965349300015062845000
-"REVENUE""COST OF GOODS SOLD"-5011451000-3802226000
-"EXPENSES""EMPLOYEE EXPENSES"-8838047000-7289702000
-"TOTAL""PROFIT/(LOSS) AFTER INCOME TAX"2544339000-20443388000
+CATEGORY;ITEM;30.06.2019;30.06.2018;30.06.2017;30.06.2016
+REVENUE;SALES;196534930000;150628450000;140000000000;130000000000
+REVENUE;COST OF GOODS SOLD;-5011451000;-3802226000;-3100000000;-2900000000
+EXPENSES;EMPLOYEE EXPENSES;-8838047000;-7289702000;-6500000000;-6100000000
+TOTAL;PROFIT/(LOSS) AFTER INCOME TAX;2544339000;-20443388000;-12000000000;-11000000000
+
+---
+
+

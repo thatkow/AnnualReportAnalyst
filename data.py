@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 from dataclasses import dataclass, field
@@ -46,7 +46,6 @@ DEFAULT_PATTERNS = {
 }
 YEAR_DEFAULT_PATTERNS = [r"(\d{4})\s+Annual\s+Report"]
 DEFAULT_NOTE_OPTIONS = ["", "asis", "excluded", "negated", "share_count"]
-MAX_COMBINED_DATE_COLUMNS = 2
 DEFAULT_NOTE_BACKGROUND_COLORS = {
     "": "",
     "asis": "",
@@ -80,6 +79,7 @@ class Match:
     page_index: int
     source: str
     pattern: Optional[str] = None
+    matched_text: Optional[str] = None
 
 
 @dataclass
@@ -87,12 +87,14 @@ class PDFEntry:
     path: Path
     doc: fitz.Document
     matches: Dict[str, List[Match]] = field(default_factory=dict)
+    all_matches: Dict[str, List[Match]] = field(default_factory=dict)
     current_index: Dict[str, Optional[int]] = field(default_factory=dict)
     year: str = ""
 
     def __post_init__(self) -> None:
         for column in COLUMNS:
             self.matches.setdefault(column, [])
+            self.all_matches.setdefault(column, list(self.matches[column]))
             self.current_index.setdefault(column, 0 if self.matches[column] else None)
 
     @property
@@ -352,6 +354,7 @@ class ReportApp:
             self.company_var.set(company_name)
         self.api_key_var = tk.StringVar(master=self.root)
         self.thumbnail_width_var = tk.IntVar(master=self.root, value=220)
+        self.review_primary_match_filter_var = tk.BooleanVar(master=self.root, value=False)
         self.pattern_texts: Dict[str, tk.Text] = {}
         self.case_insensitive_vars: Dict[str, tk.BooleanVar] = {}
         self.whitespace_as_space_vars: Dict[str, tk.BooleanVar] = {}
@@ -402,6 +405,17 @@ class ReportApp:
         self.combined_row_sources: Dict[Tuple[str, str, str], List[Path]] = {}
         self.combined_base_column_widths: Dict[str, int] = {}
         self.combined_other_column_width: Optional[int] = None
+        self.combined_header_label_widgets: Dict[
+            Tuple[Path, int], List[Tuple[tk.Widget, str]]
+        ] = {}
+        self.combined_column_label_traces: Dict[Tuple[Path, int], str] = {}
+        try:
+            default_label_font = tkfont.nametofont("TkDefaultFont")
+        except tk.TclError:
+            default_label_font = tkfont.Font(root=self.root)
+        self.combined_header_label_font = default_label_font
+        self.combined_header_label_bold_font = default_label_font.copy()
+        self.combined_header_label_bold_font.configure(weight="bold")
         # Default to iterating blank notes so reviewers immediately focus on
         # records that still need attention when the combined table loads.
         self.combined_show_blank_notes_var = tk.BooleanVar(master=self.root, value=True)
@@ -415,6 +429,7 @@ class ReportApp:
         self.combined_preview_target: Optional[
             Tuple[PDFEntry, int, Tuple[str, str, str]]
         ] = None
+        self.scraped_table_sources: Dict[ttk.Treeview, Dict[str, Any]] = {}
         self.combined_split_pane: Optional[ttk.Panedwindow] = None
         self.combined_preview_detail_var = tk.StringVar(
             master=self.root, value="Select a row to view the PDF page."
@@ -514,6 +529,12 @@ class ReportApp:
         self.thumbnail_scale.set(self.thumbnail_width_var.get())
         self.thumbnail_scale.pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
         ttk.Label(size_frame, textvariable=self.thumbnail_width_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            size_frame,
+            text="Filter others by first match",
+            variable=self.review_primary_match_filter_var,
+            command=self._on_review_primary_match_filter_toggle,
+        ).pack(side=tk.LEFT, padx=(12, 0))
         grid_container = ttk.Frame(review_container)
         grid_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
         self.canvas = tk.Canvas(grid_container)
@@ -623,11 +644,22 @@ class ReportApp:
     def _on_canvas_configure(self, event: tk.Event) -> None:  # type: ignore[override]
         self.canvas.itemconfigure(self.canvas_window, width=event.width)
 
+    def _mousewheel_sequences(self) -> Tuple[str, ...]:
+        return (
+            "<MouseWheel>",
+            "<Button-4>",
+            "<Button-5>",
+            "<Shift-Button-4>",
+            "<Shift-Button-5>",
+        )
+
     def _bind_mousewheel(self, _: tk.Event) -> None:  # type: ignore[override]
-        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        for sequence in self._mousewheel_sequences():
+            self.canvas.bind_all(sequence, self._on_mousewheel)
 
     def _unbind_mousewheel(self, _: tk.Event) -> None:  # type: ignore[override]
-        self.canvas.unbind_all("<MouseWheel>")
+        for sequence in self._mousewheel_sequences():
+            self.canvas.unbind_all(sequence)
 
     def _on_mousewheel(self, event: tk.Event) -> None:  # type: ignore[override]
         if event.num == 4 or event.delta > 0:
@@ -650,6 +682,104 @@ class ReportApp:
         width = self.thumbnail_width_var.get()
         for row in self.category_rows.values():
             row.set_thumbnail_width(width)
+
+    def _on_review_primary_match_filter_toggle(self) -> None:
+        self._apply_review_primary_match_filter()
+
+    def _maybe_reapply_primary_match_filter(self, entry: PDFEntry) -> None:
+        if not self.review_primary_match_filter_var.get():
+            return
+        if not self.pdf_entries:
+            return
+        if self.pdf_entries[0] is not entry:
+            return
+        self._apply_review_primary_match_filter()
+
+    def _normalize_match_text(self, text: str) -> str:
+        normalized = re.sub(r"\s+", " ", text).strip().casefold()
+        return normalized
+
+    def _find_all_match_by_page(self, entry: PDFEntry, category: str, page_index: int) -> Optional[Match]:
+        matches = entry.all_matches.get(category, [])
+        for match in matches:
+            if match.page_index == page_index:
+                return match
+        return None
+
+    def _add_manual_match(self, entry: PDFEntry, category: str, page_index: int) -> Match:
+        matches = entry.matches.setdefault(category, [])
+        all_matches = entry.all_matches.setdefault(category, [])
+        for match in all_matches:
+            if match.page_index == page_index and match.source == "manual":
+                if match not in matches:
+                    matches.append(match)
+                return match
+        match = Match(page_index=page_index, source="manual")
+        all_matches.append(match)
+        matches.append(match)
+        return match
+
+    def _apply_review_primary_match_filter(self) -> None:
+        if not self.pdf_entries:
+            return
+
+        selected_pages: Dict[Tuple[Path, str], Optional[int]] = {}
+        for entry in self.pdf_entries:
+            for column in COLUMNS:
+                selected_pages[(entry.path, column)] = self._get_selected_page_index(entry, column)
+
+        filter_enabled = self.review_primary_match_filter_var.get()
+        normalized_primary: Dict[str, Optional[str]] = {column: None for column in COLUMNS}
+        if filter_enabled:
+            primary_entry = self.pdf_entries[0]
+            for column in COLUMNS:
+                page_index = selected_pages.get((primary_entry.path, column))
+                if page_index is None:
+                    continue
+                match = self._find_all_match_by_page(primary_entry, column, page_index)
+                if match and match.matched_text:
+                    normalized = self._normalize_match_text(match.matched_text)
+                    if normalized:
+                        normalized_primary[column] = normalized
+
+        for idx, entry in enumerate(self.pdf_entries):
+            for column in COLUMNS:
+                base_matches = list(entry.all_matches.get(column, []))
+                if filter_enabled and idx != 0:
+                    target_text = normalized_primary.get(column)
+                    if target_text:
+                        filtered = [
+                            match
+                            for match in base_matches
+                            if match.source == "manual"
+                            or (
+                                match.matched_text
+                                and self._normalize_match_text(match.matched_text) == target_text
+                            )
+                        ]
+                    else:
+                        filtered = base_matches
+                else:
+                    filtered = base_matches
+                entry.matches[column] = filtered
+
+        for entry in self.pdf_entries:
+            for column in COLUMNS:
+                matches = entry.matches.get(column, [])
+                selected_page = selected_pages.get((entry.path, column))
+                if matches:
+                    if selected_page is not None:
+                        for idx, match in enumerate(matches):
+                            if match.page_index == selected_page:
+                                entry.current_index[column] = idx
+                                break
+                        else:
+                            entry.current_index[column] = 0
+                    else:
+                        entry.current_index[column] = 0
+                else:
+                    entry.current_index[column] = None
+                self._refresh_category_row(entry, column, rebuild=True)
 
     def _refresh_company_options(self) -> None:
         if self.embedded or not hasattr(self, "company_combo"):
@@ -1651,8 +1781,17 @@ class ReportApp:
                 page_text = page.get_text("text")
                 for column, patterns in pattern_map.items():
                     for pattern in patterns:
-                        if pattern.search(page_text):
-                            matches[column].append(Match(page_index=page_index, source="regex", pattern=pattern.pattern))
+                        match_obj = pattern.search(page_text)
+                        if match_obj:
+                            matched_text = match_obj.group(0).strip()
+                            matches[column].append(
+                                Match(
+                                    page_index=page_index,
+                                    source="regex",
+                                    pattern=pattern.pattern,
+                                    matched_text=matched_text,
+                                )
+                            )
                             break
                 if not year_value:
                     for pattern in year_patterns:
@@ -1673,6 +1812,7 @@ class ReportApp:
             self.pdf_entry_by_path[entry.path] = entry
 
         self._rebuild_grid()
+        self._apply_review_primary_match_filter()
         self._refresh_scraped_tab()
         self._reset_review_scroll()
 
@@ -1743,14 +1883,14 @@ class ReportApp:
                 preview_window.destroy()
             return
 
-        copied_files = 0
+        moved_files = 0
         for pdf_path in recent_pdfs:
             try:
                 destination = self._ensure_unique_path(raw_dir / pdf_path.name)
-                shutil.copy2(pdf_path, destination)
-                copied_files += 1
+                shutil.move(str(pdf_path), str(destination))
+                moved_files += 1
             except Exception as exc:
-                messagebox.showwarning("Copy PDF", f"Could not copy '{pdf_path.name}': {exc}")
+                messagebox.showwarning("Move PDF", f"Could not move '{pdf_path.name}': {exc}")
 
         self._refresh_company_options()
         if hasattr(self, "company_combo"):
@@ -1764,8 +1904,8 @@ class ReportApp:
         self._open_company_tab()
         if preview_window is not None and preview_window.winfo_exists():
             preview_window.destroy()
-        if copied_files:
-            messagebox.showinfo("Create Company", f"Copied {copied_files} PDF(s) into '{safe_name}/raw'.")
+        if moved_files:
+            messagebox.showinfo("Create Company", f"Moved {moved_files} PDF(s) into '{safe_name}/raw'.")
 
     def _open_in_file_manager(self, path: Path) -> None:
         try:
@@ -2573,8 +2713,8 @@ class ReportApp:
                     found = True
                     break
             if not found:
-                entry.matches[category].append(Match(page_index=page_int, source="manual"))
-                entry.current_index[category] = len(entry.matches[category]) - 1
+                match = self._add_manual_match(entry, category, page_int)
+                entry.current_index[category] = entry.matches[category].index(match)
         if not entry.year and isinstance(saved, dict):
             stored_year = saved.get("year")
             if isinstance(stored_year, str):
@@ -2654,6 +2794,7 @@ class ReportApp:
         self._refresh_category_row(entry, category, rebuild=False)
         page_index = matches[index].page_index
         self._update_assigned_entry(entry, category, page_index, persist=False)
+        self._maybe_reapply_primary_match_filter(entry)
 
     def _rescan_entries(
         self,
@@ -2695,9 +2836,16 @@ class ReportApp:
                 for column in columns:
                     compiled_patterns = pattern_map.get(column, [])
                     for pattern in compiled_patterns:
-                        if pattern.search(page_text):
+                        match_obj = pattern.search(page_text)
+                        if match_obj:
+                            matched_text = match_obj.group(0).strip()
                             new_matches[column].append(
-                                Match(page_index=page_index, source="regex", pattern=pattern.pattern)
+                                Match(
+                                    page_index=page_index,
+                                    source="regex",
+                                    pattern=pattern.pattern,
+                                    matched_text=matched_text,
+                                )
                             )
                             break
 
@@ -2709,6 +2857,7 @@ class ReportApp:
                     if manual_match.page_index not in manual_pages:
                         matches.append(manual_match)
                 entry.matches[column] = matches
+                entry.all_matches[column] = list(matches)
 
                 if matches:
                     target_page = previous_pages[column]
@@ -2737,6 +2886,9 @@ class ReportApp:
                     if year_var is not None and year_var.get() != entry.year:
                         year_var.set(entry.year)
 
+        if self.review_primary_match_filter_var.get():
+            self._apply_review_primary_match_filter()
+
     def _render_page(self, doc: fitz.Document, page_index: int, target_width: int) -> Optional[ImageTk.PhotoImage]:
         try:
             page = doc.load_page(page_index)
@@ -2744,11 +2896,13 @@ class ReportApp:
             pix = page.get_pixmap(matrix=zoom_matrix)
             mode = "RGBA" if pix.alpha else "RGB"
             image = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+            if image.mode == "RGBA":
+                image = image.convert("RGB")
             if target_width > 0 and image.width != target_width:
                 ratio = target_width / image.width
                 new_size = (int(image.width * ratio), int(image.height * ratio))
                 image = image.resize(new_size, Image.LANCZOS)
-            return ImageTk.PhotoImage(image)
+            return ImageTk.PhotoImage(image, master=self.root)
         except Exception as exc:  # pragma: no cover - guard for rendering issues
             messagebox.showwarning("Render Error", f"Could not render page {page_index + 1}: {exc}")
             return None
@@ -2774,6 +2928,7 @@ class ReportApp:
         page_index = self._get_selected_page_index(entry, category)
         if page_index is not None:
             self._update_assigned_entry(entry, category, page_index, persist=False)
+        self._maybe_reapply_primary_match_filter(entry)
 
     def manual_select(self, entry: PDFEntry, category: str) -> None:
         pdf_path = entry.path
@@ -2892,7 +3047,16 @@ class ReportApp:
         dialog = tk.Toplevel(self.root)
         dialog.title(f"{entry.path.name} - Page {page_index + 1}")
         dialog.transient(self.root)
-        dialog.grab_set()
+
+        def _attempt_grab() -> None:
+            if not dialog.winfo_exists():
+                return
+            try:
+                dialog.grab_set()
+            except tk.TclError:
+                dialog.after(50, _attempt_grab)
+
+        dialog.after(0, _attempt_grab)
         dialog.focus_set()
 
         # Ensure the zoom dialog opens maximized so reviewers can inspect the page comfortably.
@@ -2995,12 +3159,14 @@ class ReportApp:
                 entry.current_index[category] = idx
                 self._refresh_category_row(entry, category, rebuild=False)
                 self._update_assigned_entry(entry, category, page_index, persist=False)
+                self._maybe_reapply_primary_match_filter(entry)
                 return
 
-        matches.append(Match(page_index=page_index, source="manual"))
-        entry.current_index[category] = len(matches) - 1
+        match = self._add_manual_match(entry, category, page_index)
+        entry.current_index[category] = entry.matches[category].index(match)
         self._refresh_category_row(entry, category, rebuild=True)
         self._update_assigned_entry(entry, category, page_index, persist=False)
+        self._maybe_reapply_primary_match_filter(entry)
 
     def _get_selected_page_index(self, entry: PDFEntry, category: str) -> Optional[int]:
         matches = entry.matches.get(category, [])
@@ -3041,7 +3207,7 @@ class ReportApp:
         if not messagebox.askyesno(
             "Confirm Commit",
             f"Commit the current assignments for {company}?",
-            parent=self,
+            parent=self.root,
         ):
             return
         if self.assigned_pages_path is None:
@@ -3070,6 +3236,7 @@ class ReportApp:
         for child in self.scraped_inner.winfo_children():
             child.destroy()
         self.scraped_images.clear()
+        self.scraped_table_sources = {}
         self._clear_combined_tab()
         if hasattr(self, "scrape_progress"):
             self.scrape_progress["value"] = 0
@@ -3080,8 +3247,18 @@ class ReportApp:
         if not scrape_root.exists():
             return
 
-        self.scraped_inner.columnconfigure(0, weight=1)
-        self.scraped_inner.columnconfigure(1, weight=2)
+        self.scraped_inner.columnconfigure(0, weight=1, uniform="scraped_split")
+        self.scraped_inner.columnconfigure(1, weight=2, uniform="scraped_split")
+        if hasattr(self, "scraped_canvas"):
+            self.scraped_canvas.update_idletasks()
+            available_width = self.scraped_canvas.winfo_width()
+        else:
+            available_width = 0
+        if available_width <= 0:
+            available_width = self.root.winfo_width()
+        if available_width <= 0:
+            available_width = 900
+        pdf_target_width = max(200, available_width // 3)
         row_index = 0
         header_added = False
         for entry in self.pdf_entries:
@@ -3100,6 +3277,8 @@ class ReportApp:
                 preview_path: Optional[Path] = None
                 preview_text: Optional[str] = None
                 rows: List[List[str]] = []
+                csv_target_path: Optional[Path] = None
+                csv_delimiter = ","
 
                 txt_name = meta.get("txt")
                 if isinstance(txt_name, str) and txt_name:
@@ -3118,7 +3297,9 @@ class ReportApp:
                     csv_name = meta.get("csv")
                     if isinstance(csv_name, str) and csv_name:
                         candidate_csv = doc_dir / csv_name
+                        csv_target_path = candidate_csv
                         if candidate_csv.exists():
+                            csv_delimiter = self._detect_csv_delimiter(candidate_csv)
                             rows = self._read_csv_rows(candidate_csv)
                             if rows:
                                 preview_mode = "csv"
@@ -3213,24 +3394,27 @@ class ReportApp:
 
                 image_frame = ttk.Frame(self.scraped_inner, padding=8)
                 image_frame.grid(row=row_index, column=0, sticky="nsew", padx=4)
+                image_frame.columnconfigure(0, weight=1)
+                image_frame.rowconfigure(0, weight=1)
                 table_frame = ttk.Frame(self.scraped_inner, padding=8)
                 table_frame.grid(row=row_index, column=1, sticky="nsew", padx=4)
                 self.scraped_inner.rowconfigure(row_index, weight=1)
 
-                photo = self._render_page(entry.doc, int(page_index), 350)
+                photo = self._render_page(entry.doc, int(page_index), pdf_target_width)
                 if photo is not None:
                     self.scraped_images.append(photo)
                     image_label = ttk.Label(image_frame, image=photo, cursor="hand2")
-                    image_label.pack(expand=True, fill=tk.BOTH)
+                    image_label.grid(row=0, column=0, sticky="nsew")
                     image_label.bind(
                         "<Button-1>",
                         lambda _e, e=entry, p=int(page_index): self.open_thumbnail_zoom(e, p),
                     )
                 else:
-                    ttk.Label(image_frame, text="Preview unavailable").pack(expand=True, fill=tk.BOTH)
+                    ttk.Label(image_frame, text="Preview unavailable").grid(row=0, column=0, sticky="nsew")
 
                 table_frame.columnconfigure(0, weight=1)
-                table_frame.rowconfigure(0, weight=1)
+                table_frame.columnconfigure(1, weight=0)
+                table_frame.rowconfigure(1, weight=1)
 
                 if not rows:
                     ttk.Label(table_frame, text="No data available").grid(
@@ -3242,28 +3426,56 @@ class ReportApp:
                     if not any(heading.strip() for heading in headings):
                         headings = [f"Column {idx + 1}" for idx in range(len(headings))]
                     columns = [f"col_{idx}" for idx in range(len(headings))]
+                    controls_frame = ttk.Frame(table_frame)
+                    controls_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+                    controls_frame.columnconfigure(0, weight=1)
                     tree = ttk.Treeview(
                         table_frame,
                         columns=columns,
                         show="headings",
-                        height=min(15, max(3, len(data_rows))),
+                        height=max(3, len(data_rows)),
+                        selectmode="extended",
                     )
                     y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
                     x_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=tree.xview)
                     tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
-                    tree.grid(row=0, column=0, sticky="nsew")
-                    y_scroll.grid(row=0, column=1, sticky="ns")
-                    x_scroll.grid(row=1, column=0, sticky="ew")
+                    tree.grid(row=1, column=0, sticky="nsew")
+                    y_scroll.grid(row=1, column=1, sticky="ns")
+                    x_scroll.grid(row=2, column=0, sticky="ew")
                     for col, heading in zip(columns, headings):
                         tree.heading(col, text=heading)
                         tree.column(col, anchor="center", stretch=True, width=120)
+                    table_rows: List[List[str]] = []
                     if data_rows:
                         for data in data_rows:
                             values = list(data)
                             if len(values) < len(columns):
                                 values.extend([""] * (len(columns) - len(values)))
+                            elif len(values) > len(columns):
+                                values = values[: len(columns)]
+                            table_rows.append(values.copy())
                             display_values = [self._format_table_value(value) for value in values]
                             tree.insert("", tk.END, values=display_values)
+
+                    delete_row_button = ttk.Button(
+                        controls_frame,
+                        text="Delete Row",
+                        command=lambda t=tree: self._delete_scraped_row(t),
+                        width=12,
+                    )
+                    delete_row_button.grid(row=0, column=1, sticky="e")
+                    if csv_target_path is None or not table_rows:
+                        delete_row_button.state(["disabled"])
+
+                    self.scraped_table_sources[tree] = {
+                        "header": list(headings),
+                        "rows": table_rows,
+                        "csv_path": csv_target_path,
+                        "delimiter": csv_delimiter,
+                        "doc_dir": doc_dir,
+                        "category": category,
+                        "button": delete_row_button,
+                    }
 
                 row_index += 1
 
@@ -3299,6 +3511,7 @@ class ReportApp:
         self.combined_split_pane = None
         self.combined_save_button = None
         self.combined_preview_detail_var.set("Select a row to view the PDF page.")
+        self.combined_header_label_widgets.clear()
 
     def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
         if not hasattr(self, "combined_header_frame"):
@@ -3374,9 +3587,6 @@ class ReportApp:
                     else:
                         data_indices.append(idx)
                         display_headers.append(heading.strip() or f"Column {idx + 1}")
-                if len(display_headers) > MAX_COMBINED_DATE_COLUMNS:
-                    display_headers = display_headers[:MAX_COMBINED_DATE_COLUMNS]
-                    data_indices = data_indices[:MAX_COMBINED_DATE_COLUMNS]
                 if category_index is None or item_index is None:
                     continue
                 data_rows = rows[1:] if len(rows) > 1 else []
@@ -3429,7 +3639,7 @@ class ReportApp:
             return
 
         self.combined_pdf_order = [entry.path for entry in pdf_entries_with_data]
-        self.combined_max_data_columns = min(max_data_columns, MAX_COMBINED_DATE_COLUMNS)
+        self.combined_max_data_columns = max_data_columns
         logger.info(
             "Combined PDF order: %s with max data columns=%d",
             [path.name for path in self.combined_pdf_order],
@@ -3446,12 +3656,17 @@ class ReportApp:
                     default_text = f"Value {idx + 1}"
                 var = self.combined_column_label_vars.get(key)
                 if var is None:
-                    self.combined_column_label_vars[key] = tk.StringVar(master=self.root, value=default_text)
+                    var = tk.StringVar(master=self.root, value=default_text)
+                    self.combined_column_label_vars[key] = var
                 elif not var.get().strip():
                     var.set(default_text)
+                if var is not None and key not in self.combined_column_label_traces:
+                    self._register_combined_label_trace(key, var)
         for stale_key in list(self.combined_column_label_vars.keys()):
             if stale_key not in desired_keys:
+                self._remove_combined_label_trace(stale_key)
                 self.combined_column_label_vars.pop(stale_key, None)
+                self.combined_header_label_widgets.pop(stale_key, None)
 
         displayed_categories: List[str] = []
         for category in COLUMNS:
@@ -3558,6 +3773,7 @@ class ReportApp:
                     current_row += 1
                     key = (pdf_path, idx)
                     var = self.combined_column_label_vars.get(key)
+                    self.combined_header_label_widgets[key] = []
                     row_container = ttk.Frame(self.combined_header_frame)
                     row_container.grid(row=current_row, column=0, padx=4, pady=4, sticky="nsew")
                     ttk.Label(
@@ -3573,16 +3789,67 @@ class ReportApp:
                     for column_index, category in enumerate(displayed_categories, start=1):
                         headers = type_header_map.get(category, {}).get(pdf_path, {}).get("headers", [])
                         header_text = headers[idx] if idx < len(headers) else ""
-                        ttk.Label(
+                        label_widget = ttk.Label(
                             self.combined_header_frame,
                             text=header_text,
-                        ).grid(row=current_row, column=column_index, padx=4, pady=4, sticky="w")
+                        )
+                        label_widget.grid(
+                            row=current_row, column=column_index, padx=4, pady=4, sticky="w"
+                        )
+                        self.combined_header_label_widgets[key].append(
+                            (label_widget, header_text.strip())
+                        )
+                    self._update_combined_header_label_styles(key)
 
         if hasattr(self, "combine_confirm_button"):
             self.combine_confirm_button.state(["!disabled"])
 
         if auto_update and self.combined_pdf_order and self.combined_csv_sources and self.combined_result_tree is None:
             self._confirm_combined_table(auto=True)
+
+    def _register_combined_label_trace(
+        self, key: Tuple[Path, int], var: tk.StringVar
+    ) -> None:
+        self._remove_combined_label_trace(key)
+
+        def _on_change(*_args: Any, target_key: Tuple[Path, int] = key) -> None:
+            self._update_combined_header_label_styles(target_key)
+
+        trace_id = var.trace_add("write", _on_change)
+        self.combined_column_label_traces[key] = trace_id
+
+    def _remove_combined_label_trace(self, key: Tuple[Path, int]) -> None:
+        trace_id = self.combined_column_label_traces.pop(key, None)
+        if not trace_id:
+            return
+        var = self.combined_column_label_vars.get(key)
+        if var is None:
+            return
+        try:
+            var.trace_remove("write", trace_id)
+        except tk.TclError:
+            pass
+
+    def _update_combined_header_label_styles(self, key: Tuple[Path, int]) -> None:
+        label_entries = self.combined_header_label_widgets.get(key)
+        if not label_entries:
+            return
+        var = self.combined_column_label_vars.get(key)
+        assigned_value = ""
+        if var is not None:
+            assigned_value = str(var.get() or "").strip()
+        for widget, source_value in label_entries:
+            normalized_source = source_value.strip()
+            if assigned_value != normalized_source:
+                try:
+                    widget.configure(font=self.combined_header_label_bold_font)
+                except tk.TclError:
+                    continue
+            else:
+                try:
+                    widget.configure(font=self.combined_header_label_font)
+                except tk.TclError:
+                    continue
 
     def _filter_combined_records(self, records: List[Dict[str, str]]) -> List[Dict[str, str]]:
         if not records:
@@ -3765,6 +4032,86 @@ class ReportApp:
             )
 
         records.sort(key=_sort_key)
+
+    def _parse_combined_period_label(self, label: str) -> Optional[date]:
+        text = str(label).strip()
+        if not text:
+            return None
+        formats = [
+            "%d.%m.%Y",
+            "%Y-%m-%d",
+            "%m/%d/%Y",
+            "%d/%m/%Y",
+            "%Y/%m/%d",
+            "%Y.%m.%d",
+            "%b %d %Y",
+            "%B %d %Y",
+            "%b %Y",
+            "%B %Y",
+            "%Y",
+        ]
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+            if fmt in {"%b %Y", "%B %Y"}:
+                return date(parsed.year, parsed.month, 1)
+            if fmt == "%Y":
+                return date(parsed.year, 1, 1)
+            return parsed.date()
+        forward_quarter = re.match(r"(?i)^Q([1-4])\s*(\d{4})$", text)
+        if forward_quarter:
+            quarter = int(forward_quarter.group(1))
+            year = int(forward_quarter.group(2))
+            month = (quarter - 1) * 3 + 1
+            return date(year, month, 1)
+        reverse_quarter = re.match(r"(?i)^(\d{4})\s*Q([1-4])$", text)
+        if reverse_quarter:
+            year = int(reverse_quarter.group(1))
+            quarter = int(reverse_quarter.group(2))
+            month = (quarter - 1) * 3 + 1
+            return date(year, month, 1)
+        fiscal_match = re.match(r"(?i)^FY\s*(\d{4})$", text)
+        if fiscal_match:
+            year = int(fiscal_match.group(1))
+            return date(year, 1, 1)
+        return None
+
+    def _sort_combined_period_columns(
+        self,
+        columns: List[str],
+        column_name_map: Dict[str, Tuple[Path, str]],
+    ) -> List[str]:
+        if not columns:
+            return columns
+        base_columns_order = [
+            column for column in columns if column in {"Type", "Category", "Item", "Note"}
+        ]
+        data_columns = [
+            column for column in columns if column not in {"Type", "Category", "Item", "Note"}
+        ]
+        if not data_columns:
+            return base_columns_order
+        pdf_priority = {path: index for index, path in enumerate(self.combined_pdf_order)}
+        decorated: List[Tuple[int, Optional[date], int, int, str]] = []
+        for index, column_name in enumerate(data_columns):
+            mapping = column_name_map.get(column_name)
+            label_value = mapping[1] if mapping else column_name
+            parsed_date = self._parse_combined_period_label(label_value)
+            pdf_index = pdf_priority.get(mapping[0], len(pdf_priority)) if mapping else len(pdf_priority)
+            sort_group = 0 if parsed_date is not None else 1
+            decorated.append((sort_group, parsed_date, pdf_index, index, column_name))
+        decorated.sort(
+            key=lambda item: (
+                item[0],
+                item[1] or date.max,
+                item[2],
+                item[3],
+            )
+        )
+        sorted_data_columns = [item[4] for item in decorated]
+        return base_columns_order + sorted_data_columns
 
     def _apply_reference_sort_to_combined(self) -> None:
         if not self.combined_all_records:
@@ -4678,6 +5025,8 @@ class ReportApp:
             logger.info("Combined labels for %s -> %s", path.name, labels)
             column_labels_by_pdf[path] = labels
 
+        ordered_columns = self._sort_combined_period_columns(ordered_columns, column_name_map)
+
         logger.info("Combined ordered columns: %s", ordered_columns)
         self.combined_labels_by_pdf = {path: labels[:] for path, labels in column_labels_by_pdf.items()}
         self.combined_column_name_map = column_name_map
@@ -5262,6 +5611,65 @@ class ReportApp:
         except Exception as exc:
             messagebox.showwarning("Open CSV", f"Could not open CSV file: {exc}")
 
+    def _delete_scraped_row(self, tree: ttk.Treeview) -> None:
+        info = self.scraped_table_sources.get(tree)
+        if not info:
+            return
+
+        selection = tree.selection()
+        if not selection:
+            messagebox.showinfo("Delete Row", "Select a row to delete from the table.")
+            return
+
+        csv_path: Optional[Path] = info.get("csv_path")
+        if csv_path is None:
+            messagebox.showinfo(
+                "Delete Row",
+                "This table is not associated with a CSV file that can be updated.",
+            )
+            return
+
+        data_rows: List[List[str]] = info.get("rows", [])
+        if not data_rows:
+            messagebox.showinfo("Delete Row", "There are no rows available to delete.")
+            return
+
+        # Map current tree items to the backing data row positions.
+        index_map = {item: idx for idx, item in enumerate(tree.get_children())}
+        delete_indices = sorted(
+            {index_map[item] for item in selection if item in index_map}, reverse=True
+        )
+        if not delete_indices:
+            messagebox.showinfo("Delete Row", "Select a row to delete from the table.")
+            return
+
+        for item in selection:
+            tree.delete(item)
+
+        for idx in delete_indices:
+            if 0 <= idx < len(data_rows):
+                data_rows.pop(idx)
+
+        tree.configure(height=min(15, max(3, len(data_rows))))
+
+        header: List[str] = info.get("header", [])
+        delimiter: str = info.get("delimiter", ",")
+        if not self._write_scraped_csv_rows(csv_path, header, data_rows, delimiter=delimiter):
+            doc_dir: Optional[Path] = info.get("doc_dir")
+            category: Optional[str] = info.get("category")
+            if isinstance(doc_dir, Path) and isinstance(category, str):
+                self._reload_scraped_csv(doc_dir, category)
+            return
+
+        info["rows"] = data_rows
+        button: Optional[ttk.Button] = info.get("button")
+        if isinstance(button, ttk.Button) and data_rows:
+            button.state(["!disabled"])
+        elif isinstance(button, ttk.Button) and not data_rows:
+            button.state(["disabled"])
+
+        self._refresh_combined_tab(auto_update=True)
+
     def _delete_all_scraped(self) -> None:
         company = self.company_var.get()
         if not company:
@@ -5309,6 +5717,48 @@ class ReportApp:
             ]
         except Exception:
             return []
+
+    def _detect_csv_delimiter(self, csv_path: Path) -> str:
+        try:
+            with csv_path.open("r", encoding="utf-8", newline="") as fh:
+                sample = fh.read(4096)
+        except Exception:
+            return ","
+        return "\t" if "\t" in sample else ","
+
+    def _write_scraped_csv_rows(
+        self,
+        csv_path: Path,
+        header: List[str],
+        rows: List[List[str]],
+        *,
+        delimiter: str = ",",
+    ) -> bool:
+        if not header:
+            messagebox.showwarning(
+                "Delete Row", "The table could not be saved because it does not include headers."
+            )
+            return False
+
+        normalized_rows: List[List[str]] = []
+        header_length = len(header)
+        for row in rows:
+            values = list(row)
+            if len(values) < header_length:
+                values.extend([""] * (header_length - len(values)))
+            elif len(values) > header_length:
+                values = values[:header_length]
+            normalized_rows.append(values)
+
+        try:
+            with csv_path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh, delimiter=delimiter)
+                writer.writerow(header)
+                writer.writerows(normalized_rows)
+        except Exception as exc:
+            messagebox.showwarning("Delete Row", f"Could not save updated CSV: {exc}")
+            return False
+        return True
 
     def _get_prompt_text(self, company: str, category: str) -> Optional[str]:
         candidate_paths: List[Path] = []

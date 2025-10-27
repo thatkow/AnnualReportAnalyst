@@ -24,8 +24,6 @@ import sys
 import webbrowser
 from datetime import datetime
 
-import requests
-
 import matplotlib
 
 try:
@@ -67,6 +65,7 @@ class RowSegment:
     periods: List[str]
     values: List[float]
     sources: Dict[str, "SegmentSource"] = field(default_factory=dict)
+    raw_values: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -163,6 +162,9 @@ class FinanceDataset:
     FINANCE_LABEL = "Finance"
     INCOME_LABEL = "Income Statement"
 
+    NORMALIZATION_SHARES = "shares"
+    NORMALIZATION_REPORTED = "reported"
+
     _TYPE_TO_LABEL = {
         "financial": FINANCE_LABEL,
         "finance": FINANCE_LABEL,
@@ -177,6 +179,8 @@ class FinanceDataset:
         self.finance_segments: List[RowSegment] = []
         self.income_segments: List[RowSegment] = []
         self._color_cache: Dict[str, str] = {}
+        self.share_counts: List[float] = []
+        self._normalization_mode = self.NORMALIZATION_REPORTED
         self._load()
         self._load_metadata()
 
@@ -352,13 +356,28 @@ class FinanceDataset:
             for segment in self.finance_segments + self.income_segments:
                 segment.values = [segment.values[idx] for idx in sort_indices]
                 segment.periods = [self.periods[idx] for idx in sort_indices]
+                segment.raw_values = list(segment.values)
 
+            self.share_counts = list(share_counts)
+            self.set_normalization_mode(self.NORMALIZATION_SHARES)
+
+    def set_normalization_mode(self, mode: str) -> None:
+        if mode not in {self.NORMALIZATION_SHARES, self.NORMALIZATION_REPORTED}:
+            raise ValueError(f"Unsupported normalization mode: {mode}")
+        if mode == self._normalization_mode and self.share_counts:
+            return
+        if mode == self.NORMALIZATION_SHARES:
+            if not self.share_counts:
+                raise ValueError("combined.csv is missing a share_count row")
             for segment in self.finance_segments + self.income_segments:
                 segment.values = [
-                    value / share_counts[idx]
-                    for idx, value in enumerate(segment.values)
+                    value / self.share_counts[idx]
+                    for idx, value in enumerate(segment.raw_values)
                 ]
-                segment.periods = list(self.periods)
+        else:
+            for segment in self.finance_segments + self.income_segments:
+                segment.values = list(segment.raw_values)
+        self._normalization_mode = mode
 
     def _load_metadata(self) -> None:
         metadata_path = self.path.with_name("combined_metadata.json")
@@ -454,6 +473,25 @@ class FinanceDataset:
 
         return totals, has_data
 
+    def share_counts_for(self, periods: Sequence[str]) -> Tuple[List[float], List[bool]]:
+        if not self.share_counts:
+            return [math.nan] * len(periods), [False] * len(periods)
+
+        period_index = {label: idx for idx, label in enumerate(self.periods)}
+        values: List[float] = []
+        present: List[bool] = []
+
+        for label in periods:
+            idx = period_index.get(label)
+            if idx is None or idx >= len(self.share_counts):
+                values.append(math.nan)
+                present.append(False)
+                continue
+            values.append(self.share_counts[idx])
+            present.append(True)
+
+        return values, present
+
     def has_data(self) -> bool:
         return bool(self.finance_segments or self.income_segments)
 
@@ -471,6 +509,7 @@ class FinancePlotFrame(ttk.Frame):
     _PLOT_WIDTH = 0.82
     MODE_STACKED = "stacked"
     MODE_LINE = "line"
+    VALUE_MODE_SHARE_COUNT = "share_count"
 
     def __init__(self, parent: tk.Widget) -> None:
         super().__init__(parent)
@@ -489,8 +528,8 @@ class FinancePlotFrame(ttk.Frame):
         self._palette = list(colormaps["tab10"].colors)
         self._context_menu: Optional[tk.Menu] = None
         self._context_metadata: Optional[Dict[str, Any]] = None
-        self._normalize_with_price = False
-        self._price_map: Dict[str, float] = {}
+        self.normalization_mode = FinanceDataset.NORMALIZATION_SHARES
+        self._dataset_normalization_mode = FinanceDataset.NORMALIZATION_SHARES
         self._render_empty()
 
     @staticmethod
@@ -530,25 +569,38 @@ class FinancePlotFrame(ttk.Frame):
         else:
             self._render_empty()
 
-    def set_price_normalization(
-        self, enabled: bool, price_map: Optional[Dict[str, float]] = None
-    ) -> None:
-        self._normalize_with_price = enabled
-        self._price_map = dict(price_map or {})
+    def set_normalization_mode(self, mode: str) -> None:
+        valid_modes = {
+            FinanceDataset.NORMALIZATION_SHARES,
+            FinanceDataset.NORMALIZATION_REPORTED,
+            self.VALUE_MODE_SHARE_COUNT,
+        }
+        if mode not in valid_modes:
+            return
+
+        if mode == self.VALUE_MODE_SHARE_COUNT:
+            if self.normalization_mode == mode:
+                return
+            self.normalization_mode = mode
+            if self.datasets:
+                self._render()
+            else:
+                self._render_empty()
+            return
+
+        if self._dataset_normalization_mode != mode:
+            for dataset in self.datasets.values():
+                dataset.set_normalization_mode(mode)
+            self._dataset_normalization_mode = mode
+
+        if self.normalization_mode == mode:
+            return
+
+        self.normalization_mode = mode
         if self.datasets:
             self._render()
         else:
             self._render_empty()
-
-    def _price_factor(self, company: str) -> float:
-        if not self._normalize_with_price:
-            return 1.0
-        price = self._price_map.get(company)
-        if price is None:
-            return 1.0
-        if price == 0:
-            return 1.0
-        return 1.0 / price
 
     def _next_color_pair(self) -> Tuple[str, str]:
         index = len(self._company_colors)
@@ -606,7 +658,6 @@ class FinancePlotFrame(ttk.Frame):
         self.datasets.clear()
         self.periods = None
         self._periods_by_key.clear()
-        self._price_map = {}
         self._render_empty()
 
     def add_company(self, company: str, dataset: FinanceDataset) -> bool:
@@ -617,6 +668,7 @@ class FinancePlotFrame(ttk.Frame):
         if is_new_company and company not in self._company_colors:
             self._company_colors[company] = self._next_color_pair()
 
+        dataset.set_normalization_mode(self._dataset_normalization_mode)
         self.datasets[company] = dataset
         # Preserve insertion order by moving refreshed companies to the end.
         self.datasets.move_to_end(company)
@@ -638,12 +690,45 @@ class FinancePlotFrame(ttk.Frame):
         self.axis.clear()
         hover_helper = self.hover_helper
         mode = self.display_mode
-        context_callback = self._show_context_menu if mode == self.MODE_STACKED else None
-        hover_helper.begin_update(context_callback)
 
         legend_handles: List[Any] = []
 
-        if mode == self.MODE_STACKED:
+        if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
+            hover_helper.begin_update(None)
+            x_positions = period_indices
+            for company, dataset in self.datasets.items():
+                finance_color, _ = self._company_colors.setdefault(
+                    company, self._next_color_pair()
+                )
+                share_values, share_presence = dataset.share_counts_for(periods)
+                if not any(share_presence):
+                    continue
+                share_points = [
+                    share_values[idx] if share_presence[idx] else math.nan
+                    for idx in range(len(share_values))
+                ]
+                line = self.axis.plot(
+                    x_positions,
+                    share_points,
+                    linestyle=":",
+                    marker="o",
+                    color=finance_color,
+                    markerfacecolor=finance_color,
+                    markeredgecolor=finance_color,
+                    label=f"{company} Number of shares",
+                )
+                legend_handles.append(line[0])
+
+            if period_indices:
+                self.axis.set_xticks(period_indices)
+                self.axis.set_xticklabels(periods, rotation=45, ha="right")
+                self.axis.set_xlim(-0.5, len(period_indices) - 0.5)
+            else:
+                self.axis.set_xlim(-0.6, 0.6)
+                self.axis.set_xticks([])
+
+        elif mode == self.MODE_STACKED:
+            hover_helper.begin_update(self._show_context_menu)
             group_width = self._PLOT_WIDTH
             bar_width = group_width / max(2 * num_companies, 1)
             start_offset = -group_width / 2
@@ -653,7 +738,6 @@ class FinancePlotFrame(ttk.Frame):
                     company, self._next_color_pair()
                 )
                 company_color = finance_color
-                normalization_factor = self._price_factor(company)
                 base_offset = start_offset + (2 * company_index) * bar_width
                 finance_positions = [
                     index + base_offset + 0.5 * bar_width for index in period_indices
@@ -675,8 +759,6 @@ class FinancePlotFrame(ttk.Frame):
                         else 0.0
                         for label in periods
                     ]
-                    if normalization_factor != 1.0:
-                        segment_values = [value * normalization_factor for value in segment_values]
                     for idx, value in enumerate(segment_values):
                         if value != 0:
                             finance_nonzero[idx] = True
@@ -711,7 +793,7 @@ class FinancePlotFrame(ttk.Frame):
                             bottom=bottoms,
                             color=dataset.color_for_key(segment.key),
                             edgecolor=finance_color,
-                            linewidth=0.8,
+                            linewidth=2.4,
                         )
                         hover_helper.add_segment(
                             rectangles,
@@ -734,8 +816,6 @@ class FinancePlotFrame(ttk.Frame):
                         else 0.0
                         for label in periods
                     ]
-                    if normalization_factor != 1.0:
-                        segment_values = [value * normalization_factor for value in segment_values]
                     for idx, value in enumerate(segment_values):
                         if value != 0:
                             income_nonzero[idx] = True
@@ -770,7 +850,7 @@ class FinancePlotFrame(ttk.Frame):
                             bottom=bottoms,
                             color=dataset.color_for_key(segment.key),
                             edgecolor=income_color,
-                            linewidth=0.8,
+                            linewidth=2.4,
                         )
                         hover_helper.add_segment(
                             rectangles,
@@ -840,6 +920,7 @@ class FinancePlotFrame(ttk.Frame):
                 self.axis.set_xticks([])
 
         else:
+            hover_helper.begin_update(None)
             x_positions = period_indices
             for company, dataset in self.datasets.items():
                 finance_color, income_color = self._company_colors.setdefault(
@@ -850,9 +931,6 @@ class FinancePlotFrame(ttk.Frame):
                 finance_totals, finance_presence = dataset.aggregate_totals(
                     periods, series=FinanceDataset.FINANCE_LABEL
                 )
-                normalization_factor = self._price_factor(company)
-                if normalization_factor != 1.0:
-                    finance_totals = [value * normalization_factor for value in finance_totals]
                 finance_included = [
                     finance_presence[idx]
                     and not math.isclose(value, 0.0, abs_tol=1e-12)
@@ -878,8 +956,6 @@ class FinancePlotFrame(ttk.Frame):
                 income_totals, income_presence = dataset.aggregate_totals(
                     periods, series=FinanceDataset.INCOME_LABEL
                 )
-                if normalization_factor != 1.0:
-                    income_totals = [value * normalization_factor for value in income_totals]
                 income_included = [
                     income_presence[idx]
                     and not math.isclose(value, 0.0, abs_tol=1e-12)
@@ -912,19 +988,27 @@ class FinancePlotFrame(ttk.Frame):
                 self.axis.set_xticks([])
 
         self.axis.axhline(0, color="#333333", linewidth=0.8)
-        if self._normalize_with_price:
-            self.axis.set_ylabel("Value per Share (Price-Normalized)")
-        else:
+        if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
+            self.axis.set_ylabel("Number of Shares")
+        elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARES:
             self.axis.set_ylabel("Value per Share")
+        else:
+            self.axis.set_ylabel("Reported Value")
         if self.datasets:
             companies_list = ", ".join(self.datasets.keys())
-            self.axis.set_title(f"Finance vs Income Statement — {companies_list}")
+            if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
+                self.axis.set_title(f"Number of Shares — {companies_list}")
+            else:
+                self.axis.set_title(f"Finance vs Income Statement — {companies_list}")
         else:
-            self.axis.set_title("Finance vs Income Statement")
+            if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
+                self.axis.set_title("Number of Shares")
+            else:
+                self.axis.set_title("Finance vs Income Statement")
 
         if legend_handles:
             legend_kwargs = {"loc": "upper left"}
-            if mode == self.MODE_STACKED:
+            if mode == self.MODE_STACKED and self.normalization_mode != self.VALUE_MODE_SHARE_COUNT:
                 legend_kwargs["ncol"] = 2
             self.axis.legend(handles=legend_handles, **legend_kwargs)
 
@@ -1037,8 +1121,11 @@ class BarHoverHelper:
             self._annotation.arrow_patch.set_zorder(1000)
         self._annotation.set_visible(False)
         self._canvas: Optional[FigureCanvasTkAgg] = None
+        self._tk_widget: Optional[tk.Widget] = None
         self._connection_id: Optional[int] = None
         self._button_connection_id: Optional[int] = None
+        self._motion_binding_id: Optional[str] = None
+        self._leave_binding_id: Optional[str] = None
         self._active_rectangle: Optional[Rectangle] = None
         self._context_callback: Optional[Callable[[Dict[str, Any], Any], None]] = None
 
@@ -1047,11 +1134,22 @@ class BarHoverHelper:
             self._canvas.mpl_disconnect(self._connection_id)
         if self._button_connection_id is not None and self._canvas is not None:
             self._canvas.mpl_disconnect(self._button_connection_id)
+        if self._tk_widget is not None:
+            if self._motion_binding_id is not None:
+                self._tk_widget.unbind("<Motion>", self._motion_binding_id)
+            if self._leave_binding_id is not None:
+                self._tk_widget.unbind("<Leave>", self._leave_binding_id)
+        self._motion_binding_id = None
+        self._leave_binding_id = None
         self._canvas = canvas
+        self._tk_widget = canvas.get_tk_widget()
         self.reset()
         self._connection_id = canvas.mpl_connect("motion_notify_event", self._on_motion)
         self._button_connection_id = None
         self._context_callback = None
+        if self._tk_widget is not None:
+            self._motion_binding_id = self._tk_widget.bind("<Motion>", self._on_tk_motion, add="+")
+            self._leave_binding_id = self._tk_widget.bind("<Leave>", self._on_tk_leave, add="+")
 
     def _set_context_callback(
         self, callback: Optional[Callable[[Dict[str, Any], Any], None]]
@@ -1080,6 +1178,38 @@ class BarHoverHelper:
         self._rectangles.clear()
         self._active_rectangle = None
         self._annotation.set_visible(False)
+
+    def _on_tk_motion(self, tk_event: tk.Event) -> None:  # type: ignore[name-defined]
+        if self._canvas is None:
+            return
+        widget = self._tk_widget if self._tk_widget is not None else getattr(tk_event, "widget", None)
+        if widget is None:
+            return
+        width = widget.winfo_width()
+        height = widget.winfo_height()
+        if height <= 0 or width <= 0:
+            return
+        canvas_backend = getattr(self._canvas.figure, "canvas", None)
+        if canvas_backend is None:
+            return
+        backend_width, backend_height = canvas_backend.get_width_height()
+        if backend_width <= 0 or backend_height <= 0:
+            backend_width, backend_height = width, height
+        scale_x = backend_width / width if width else 1.0
+        scale_y = backend_height / height if height else 1.0
+        tk_canvas = getattr(canvas_backend, "_tkcanvas", None)
+        if tk_canvas is not None:
+            canvas_x = tk_canvas.canvasx(tk_event.x)
+            canvas_y = tk_canvas.canvasy(tk_event.y)
+        else:
+            canvas_x = tk_event.x
+            canvas_y = tk_event.y
+        display_x = canvas_x * scale_x
+        display_y = (backend_height - canvas_y) * scale_y
+        self._handle_motion_at(display_x, display_y)
+
+    def _on_tk_leave(self, _event: tk.Event) -> None:  # type: ignore[name-defined]
+        self._hide_annotation()
 
     def add_segment(
         self,
@@ -1170,19 +1300,28 @@ class BarHoverHelper:
         self._annotation.set_ha(ha)
         self._annotation.set_va(va)
 
-    def _on_motion(self, event) -> None:
+    def _hide_annotation(self) -> None:
+        if not self._annotation.get_visible():
+            return
+        self._annotation.set_visible(False)
+        self._active_rectangle = None
+        if self._canvas is not None:
+            self._canvas.draw_idle()
+
+    def _handle_motion_at(self, display_x: float, display_y: float) -> None:
         if self._canvas is None:
             return
-        if event.inaxes != self.axis:
-            if self._annotation.get_visible():
-                self._annotation.set_visible(False)
-                self._canvas.draw_idle()
-            self._active_rectangle = None
+        if math.isnan(display_x) or math.isnan(display_y):
+            self._hide_annotation()
+            return
+        if not self.axis.bbox.contains(display_x, display_y):
+            self._hide_annotation()
             return
 
         for rect, metadata in self._rectangles:
-            contains, _ = rect.contains(event)
-            if not contains:
+            if not rect.get_visible():
+                continue
+            if not rect.contains_point((display_x, display_y)):
                 continue
             if self._active_rectangle is not rect or not self._annotation.get_visible():
                 self._annotation.set_text(self._format_text(metadata))
@@ -1198,10 +1337,18 @@ class BarHoverHelper:
             self._canvas.draw_idle()
             return
 
-        if self._annotation.get_visible():
-            self._annotation.set_visible(False)
-            self._canvas.draw_idle()
-        self._active_rectangle = None
+        self._hide_annotation()
+
+    def _on_motion(self, event) -> None:
+        if self._canvas is None:
+            return
+        if event.inaxes not in (None, self.axis):
+            self._hide_annotation()
+            return
+        if event.x is None or event.y is None:
+            self._hide_annotation()
+            return
+        self._handle_motion_at(event.x, event.y)
 
     def _metadata_for_event(self, event) -> Optional[Dict[str, Any]]:
         if event.inaxes != self.axis:
@@ -1235,9 +1382,9 @@ class FinanceAnalystApp:
 
         self.company_var = tk.StringVar()
         self.mode_var = tk.StringVar(value=FinancePlotFrame.MODE_STACKED)
-        self.normalize_var = tk.BooleanVar(value=False)
-        self._price_cache: Dict[str, float] = {}
-        self._active_prices: Dict[str, float] = {}
+        self.normalization_var = tk.StringVar(
+            value=FinanceDataset.NORMALIZATION_SHARES
+        )
 
         self._build_ui()
         self._refresh_company_list()
@@ -1279,136 +1426,44 @@ class FinanceAnalystApp:
             value=FinancePlotFrame.MODE_LINE,
             command=self._on_mode_change,
         ).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Checkbutton(
-            mode_frame,
-            text="Normalize against stock price",
-            variable=self.normalize_var,
-            command=self._on_normalize_toggle,
-        ).pack(side=tk.LEFT, padx=(18, 0))
+
+        values_frame = ttk.Frame(outer)
+        values_frame.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(values_frame, text="Values:").pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            values_frame,
+            text="Normalize over number of shares",
+            variable=self.normalization_var,
+            value=FinanceDataset.NORMALIZATION_SHARES,
+            command=self._on_normalization_change,
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Radiobutton(
+            values_frame,
+            text="As reported",
+            variable=self.normalization_var,
+            value=FinanceDataset.NORMALIZATION_REPORTED,
+            command=self._on_normalization_change,
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Radiobutton(
+            values_frame,
+            text="Number of shares",
+            variable=self.normalization_var,
+            value=FinancePlotFrame.VALUE_MODE_SHARE_COUNT,
+            command=self._on_normalization_change,
+        ).pack(side=tk.LEFT, padx=(6, 0))
 
         self.plot_frame = FinancePlotFrame(outer)
         self.plot_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.price_frame = ttk.Frame(outer)
-        self.price_label = ttk.Label(self.price_frame, text="", anchor="w")
-        self.price_label.pack(fill=tk.X)
-
     def _on_mode_change(self) -> None:
         mode = self.mode_var.get()
         self.plot_frame.set_display_mode(mode)
-        if self.normalize_var.get():
-            # Changing modes may redraw the plot; ensure price state is applied.
-            self._update_prices()
+        self.plot_frame.set_normalization_mode(self.normalization_var.get())
 
-    def _on_normalize_toggle(self) -> None:
-        if self.normalize_var.get():
-            self._update_prices()
-        else:
-            self._active_prices = {}
-            self.plot_frame.set_price_normalization(False, {})
-            self._update_price_display()
+    def _on_normalization_change(self) -> None:
+        mode = self.normalization_var.get()
+        self.plot_frame.set_normalization_mode(mode)
 
-    def _ensure_price_frame_visible(self) -> None:
-        if not self.price_frame.winfo_ismapped():
-            self.price_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(8, 0))
-
-    def _hide_price_frame(self) -> None:
-        if self.price_frame.winfo_ismapped():
-            self.price_frame.pack_forget()
-
-    def _update_price_display(self) -> None:
-        if self.normalize_var.get() and self._active_prices:
-            self._ensure_price_frame_visible()
-            parts = [
-                f"{company}: ${price:,.2f}" for company, price in self._active_prices.items()
-            ]
-            display_text = "Stock prices: " + " | ".join(parts)
-            self.price_label.configure(text=display_text)
-        elif self.normalize_var.get():
-            self._ensure_price_frame_visible()
-            self.price_label.configure(text="Stock prices: awaiting data...")
-        else:
-            self.price_label.configure(text="")
-            self._hide_price_frame()
-
-    def _fetch_stock_price(self, symbol: str) -> float:
-        if symbol in self._price_cache:
-            return self._price_cache[symbol]
-
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        params = {"range": "1d", "interval": "1d"}
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            payload = response.json()
-        except requests.RequestException as exc:
-            raise ValueError(f"Could not download price for {symbol}: {exc}") from exc
-        except ValueError as exc:
-            raise ValueError(
-                f"Received an invalid response while downloading price for {symbol}"
-            ) from exc
-
-        chart_data = payload.get("chart")
-        if not isinstance(chart_data, dict):
-            raise ValueError(f"No quote data returned for {symbol}")
-        if chart_data.get("error"):
-            raise ValueError(f"Quote service returned an error for {symbol}")
-        results = chart_data.get("result")
-        if not isinstance(results, list) or not results:
-            raise ValueError(f"No quote data returned for {symbol}")
-        first_entry = results[0]
-        if not isinstance(first_entry, dict):
-            raise ValueError(f"Quote for {symbol} was malformed")
-        meta = first_entry.get("meta")
-        if not isinstance(meta, dict):
-            raise ValueError(f"Quote for {symbol} was missing metadata")
-        price_value = meta.get("regularMarketPrice")
-        if price_value in (None, 0):
-            price_value = meta.get("previousClose")
-        try:
-            numeric_price = float(price_value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Quote for {symbol} returned an invalid price value") from exc
-        if numeric_price <= 0:
-            raise ValueError(f"Quote for {symbol} returned a non-positive price")
-
-        self._price_cache[symbol] = numeric_price
-        return numeric_price
-
-    def _update_prices(self) -> bool:
-        if not self.normalize_var.get():
-            self._active_prices = {}
-            self.plot_frame.set_price_normalization(False, {})
-            self._update_price_display()
-            return True
-
-        companies = list(self.plot_frame.datasets.keys())
-        if not companies:
-            self._active_prices = {}
-            self.plot_frame.set_price_normalization(False, {})
-            self._update_price_display()
-            return True
-
-        price_map: Dict[str, float] = {}
-        for company in companies:
-            try:
-                price = self._price_cache[company]
-            except KeyError:
-                try:
-                    price = self._fetch_stock_price(company)
-                except ValueError as exc:
-                    messagebox.showerror("Stock Price", str(exc))
-                    self.normalize_var.set(False)
-                    self._active_prices = {}
-                    self.plot_frame.set_price_normalization(False, {})
-                    self._update_price_display()
-                    return False
-            price_map[company] = price
-
-        self._active_prices = price_map
-        self.plot_frame.set_price_normalization(True, price_map)
-        self._update_price_display()
-        return True
 
     def _maximize_window(self) -> None:
         try:
@@ -1466,8 +1521,7 @@ class FinanceAnalystApp:
             return
         if not added:
             messagebox.showinfo("Load Company", f"{company} data refreshed on the chart.")
-        if self.normalize_var.get():
-            self._update_prices()
+        self.plot_frame.set_normalization_mode(self.normalization_var.get())
 
 
 def main() -> None:
