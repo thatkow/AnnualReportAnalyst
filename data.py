@@ -80,6 +80,7 @@ class Match:
     page_index: int
     source: str
     pattern: Optional[str] = None
+    matched_text: Optional[str] = None
 
 
 @dataclass
@@ -87,12 +88,14 @@ class PDFEntry:
     path: Path
     doc: fitz.Document
     matches: Dict[str, List[Match]] = field(default_factory=dict)
+    all_matches: Dict[str, List[Match]] = field(default_factory=dict)
     current_index: Dict[str, Optional[int]] = field(default_factory=dict)
     year: str = ""
 
     def __post_init__(self) -> None:
         for column in COLUMNS:
             self.matches.setdefault(column, [])
+            self.all_matches.setdefault(column, list(self.matches[column]))
             self.current_index.setdefault(column, 0 if self.matches[column] else None)
 
     @property
@@ -352,6 +355,7 @@ class ReportApp:
             self.company_var.set(company_name)
         self.api_key_var = tk.StringVar(master=self.root)
         self.thumbnail_width_var = tk.IntVar(master=self.root, value=220)
+        self.review_primary_match_filter_var = tk.BooleanVar(master=self.root, value=False)
         self.pattern_texts: Dict[str, tk.Text] = {}
         self.case_insensitive_vars: Dict[str, tk.BooleanVar] = {}
         self.whitespace_as_space_vars: Dict[str, tk.BooleanVar] = {}
@@ -514,6 +518,12 @@ class ReportApp:
         self.thumbnail_scale.set(self.thumbnail_width_var.get())
         self.thumbnail_scale.pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
         ttk.Label(size_frame, textvariable=self.thumbnail_width_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            size_frame,
+            text="Filter others by first match",
+            variable=self.review_primary_match_filter_var,
+            command=self._on_review_primary_match_filter_toggle,
+        ).pack(side=tk.LEFT, padx=(12, 0))
         grid_container = ttk.Frame(review_container)
         grid_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
         self.canvas = tk.Canvas(grid_container)
@@ -661,6 +671,104 @@ class ReportApp:
         width = self.thumbnail_width_var.get()
         for row in self.category_rows.values():
             row.set_thumbnail_width(width)
+
+    def _on_review_primary_match_filter_toggle(self) -> None:
+        self._apply_review_primary_match_filter()
+
+    def _maybe_reapply_primary_match_filter(self, entry: PDFEntry) -> None:
+        if not self.review_primary_match_filter_var.get():
+            return
+        if not self.pdf_entries:
+            return
+        if self.pdf_entries[0] is not entry:
+            return
+        self._apply_review_primary_match_filter()
+
+    def _normalize_match_text(self, text: str) -> str:
+        normalized = re.sub(r"\s+", " ", text).strip().casefold()
+        return normalized
+
+    def _find_all_match_by_page(self, entry: PDFEntry, category: str, page_index: int) -> Optional[Match]:
+        matches = entry.all_matches.get(category, [])
+        for match in matches:
+            if match.page_index == page_index:
+                return match
+        return None
+
+    def _add_manual_match(self, entry: PDFEntry, category: str, page_index: int) -> Match:
+        matches = entry.matches.setdefault(category, [])
+        all_matches = entry.all_matches.setdefault(category, [])
+        for match in all_matches:
+            if match.page_index == page_index and match.source == "manual":
+                if match not in matches:
+                    matches.append(match)
+                return match
+        match = Match(page_index=page_index, source="manual")
+        all_matches.append(match)
+        matches.append(match)
+        return match
+
+    def _apply_review_primary_match_filter(self) -> None:
+        if not self.pdf_entries:
+            return
+
+        selected_pages: Dict[Tuple[Path, str], Optional[int]] = {}
+        for entry in self.pdf_entries:
+            for column in COLUMNS:
+                selected_pages[(entry.path, column)] = self._get_selected_page_index(entry, column)
+
+        filter_enabled = self.review_primary_match_filter_var.get()
+        normalized_primary: Dict[str, Optional[str]] = {column: None for column in COLUMNS}
+        if filter_enabled:
+            primary_entry = self.pdf_entries[0]
+            for column in COLUMNS:
+                page_index = selected_pages.get((primary_entry.path, column))
+                if page_index is None:
+                    continue
+                match = self._find_all_match_by_page(primary_entry, column, page_index)
+                if match and match.matched_text:
+                    normalized = self._normalize_match_text(match.matched_text)
+                    if normalized:
+                        normalized_primary[column] = normalized
+
+        for idx, entry in enumerate(self.pdf_entries):
+            for column in COLUMNS:
+                base_matches = list(entry.all_matches.get(column, []))
+                if filter_enabled and idx != 0:
+                    target_text = normalized_primary.get(column)
+                    if target_text:
+                        filtered = [
+                            match
+                            for match in base_matches
+                            if match.source == "manual"
+                            or (
+                                match.matched_text
+                                and self._normalize_match_text(match.matched_text) == target_text
+                            )
+                        ]
+                    else:
+                        filtered = base_matches
+                else:
+                    filtered = base_matches
+                entry.matches[column] = filtered
+
+        for entry in self.pdf_entries:
+            for column in COLUMNS:
+                matches = entry.matches.get(column, [])
+                selected_page = selected_pages.get((entry.path, column))
+                if matches:
+                    if selected_page is not None:
+                        for idx, match in enumerate(matches):
+                            if match.page_index == selected_page:
+                                entry.current_index[column] = idx
+                                break
+                        else:
+                            entry.current_index[column] = 0
+                    else:
+                        entry.current_index[column] = 0
+                else:
+                    entry.current_index[column] = None
+                self._refresh_category_row(entry, column, rebuild=True)
 
     def _refresh_company_options(self) -> None:
         if self.embedded or not hasattr(self, "company_combo"):
@@ -1662,8 +1770,17 @@ class ReportApp:
                 page_text = page.get_text("text")
                 for column, patterns in pattern_map.items():
                     for pattern in patterns:
-                        if pattern.search(page_text):
-                            matches[column].append(Match(page_index=page_index, source="regex", pattern=pattern.pattern))
+                        match_obj = pattern.search(page_text)
+                        if match_obj:
+                            matched_text = match_obj.group(0).strip()
+                            matches[column].append(
+                                Match(
+                                    page_index=page_index,
+                                    source="regex",
+                                    pattern=pattern.pattern,
+                                    matched_text=matched_text,
+                                )
+                            )
                             break
                 if not year_value:
                     for pattern in year_patterns:
@@ -1684,6 +1801,7 @@ class ReportApp:
             self.pdf_entry_by_path[entry.path] = entry
 
         self._rebuild_grid()
+        self._apply_review_primary_match_filter()
         self._refresh_scraped_tab()
         self._reset_review_scroll()
 
@@ -2584,8 +2702,8 @@ class ReportApp:
                     found = True
                     break
             if not found:
-                entry.matches[category].append(Match(page_index=page_int, source="manual"))
-                entry.current_index[category] = len(entry.matches[category]) - 1
+                match = self._add_manual_match(entry, category, page_int)
+                entry.current_index[category] = entry.matches[category].index(match)
         if not entry.year and isinstance(saved, dict):
             stored_year = saved.get("year")
             if isinstance(stored_year, str):
@@ -2665,6 +2783,7 @@ class ReportApp:
         self._refresh_category_row(entry, category, rebuild=False)
         page_index = matches[index].page_index
         self._update_assigned_entry(entry, category, page_index, persist=False)
+        self._maybe_reapply_primary_match_filter(entry)
 
     def _rescan_entries(
         self,
@@ -2706,9 +2825,16 @@ class ReportApp:
                 for column in columns:
                     compiled_patterns = pattern_map.get(column, [])
                     for pattern in compiled_patterns:
-                        if pattern.search(page_text):
+                        match_obj = pattern.search(page_text)
+                        if match_obj:
+                            matched_text = match_obj.group(0).strip()
                             new_matches[column].append(
-                                Match(page_index=page_index, source="regex", pattern=pattern.pattern)
+                                Match(
+                                    page_index=page_index,
+                                    source="regex",
+                                    pattern=pattern.pattern,
+                                    matched_text=matched_text,
+                                )
                             )
                             break
 
@@ -2720,6 +2846,7 @@ class ReportApp:
                     if manual_match.page_index not in manual_pages:
                         matches.append(manual_match)
                 entry.matches[column] = matches
+                entry.all_matches[column] = list(matches)
 
                 if matches:
                     target_page = previous_pages[column]
@@ -2747,6 +2874,9 @@ class ReportApp:
                     year_var = self.year_vars.get(entry.path)
                     if year_var is not None and year_var.get() != entry.year:
                         year_var.set(entry.year)
+
+        if self.review_primary_match_filter_var.get():
+            self._apply_review_primary_match_filter()
 
     def _render_page(self, doc: fitz.Document, page_index: int, target_width: int) -> Optional[ImageTk.PhotoImage]:
         try:
@@ -2787,6 +2917,7 @@ class ReportApp:
         page_index = self._get_selected_page_index(entry, category)
         if page_index is not None:
             self._update_assigned_entry(entry, category, page_index, persist=False)
+        self._maybe_reapply_primary_match_filter(entry)
 
     def manual_select(self, entry: PDFEntry, category: str) -> None:
         pdf_path = entry.path
@@ -3008,12 +3139,14 @@ class ReportApp:
                 entry.current_index[category] = idx
                 self._refresh_category_row(entry, category, rebuild=False)
                 self._update_assigned_entry(entry, category, page_index, persist=False)
+                self._maybe_reapply_primary_match_filter(entry)
                 return
 
-        matches.append(Match(page_index=page_index, source="manual"))
-        entry.current_index[category] = len(matches) - 1
+        match = self._add_manual_match(entry, category, page_index)
+        entry.current_index[category] = entry.matches[category].index(match)
         self._refresh_category_row(entry, category, rebuild=True)
         self._update_assigned_entry(entry, category, page_index, persist=False)
+        self._maybe_reapply_primary_match_filter(entry)
 
     def _get_selected_page_index(self, entry: PDFEntry, category: str) -> Optional[int]:
         matches = entry.matches.get(category, [])
