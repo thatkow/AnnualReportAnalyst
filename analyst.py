@@ -1681,11 +1681,19 @@ class FinancePlotFrame(ttk.Frame):
                 finance_active_indices = [
                     idx for idx, flag in enumerate(finance_nonzero) if flag
                 ]
+                finance_totals_all = [0.0] * len(periods)
+                if finance_segment_values:
+                    for _, segment_values in finance_segment_values:
+                        for idx, value in enumerate(segment_values):
+                            finance_totals_all[idx] += value
                 finance_positions_active = [
                     finance_positions[idx] for idx in finance_active_indices
                 ]
                 finance_periods_active = [
                     periods[idx] for idx in finance_active_indices
+                ]
+                finance_totals_active = [
+                    finance_totals_all[idx] for idx in finance_active_indices
                 ]
                 finance_pos_totals = [0.0] * len(finance_active_indices)
                 finance_neg_totals = [0.0] * len(finance_active_indices)
@@ -1716,6 +1724,7 @@ class FinancePlotFrame(ttk.Frame):
                             company,
                             values=filtered_values,
                             series_label=FinanceDataset.FINANCE_LABEL,
+                            totals=finance_totals_active,
                         )
 
                 income_segment_values: List[Tuple[RowSegment, List[float]]] = []
@@ -1739,11 +1748,19 @@ class FinancePlotFrame(ttk.Frame):
                 income_active_indices = [
                     idx for idx, flag in enumerate(income_nonzero) if flag
                 ]
+                income_totals_all = [0.0] * len(periods)
+                if income_segment_values:
+                    for _, segment_values in income_segment_values:
+                        for idx, value in enumerate(segment_values):
+                            income_totals_all[idx] += value
                 income_positions_active = [
                     income_positions[idx] for idx in income_active_indices
                 ]
                 income_periods_active = [
                     periods[idx] for idx in income_active_indices
+                ]
+                income_totals_active = [
+                    income_totals_all[idx] for idx in income_active_indices
                 ]
                 income_pos_totals = [0.0] * len(income_active_indices)
                 income_neg_totals = [0.0] * len(income_active_indices)
@@ -1774,6 +1791,7 @@ class FinancePlotFrame(ttk.Frame):
                             company,
                             values=filtered_values,
                             series_label=FinanceDataset.INCOME_LABEL,
+                            totals=income_totals_active,
                         )
 
                 if finance_active_indices:
@@ -1918,7 +1936,7 @@ class FinancePlotFrame(ttk.Frame):
             self.axis.set_ylabel("Share Price Multiple")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD:
             self.axis.yaxis.set_major_formatter(self._share_price_formatter)
-            self.axis.set_ylabel("Share Price Multiple (Period)")
+            self.axis.set_ylabel("P2V/E (Share Price ÷ Value per Share)")
         else:
             self.axis.yaxis.set_major_formatter(self._reported_formatter)
             self.axis.set_ylabel("Reported Value")
@@ -2312,6 +2330,7 @@ class BarHoverHelper:
         *,
         values: Optional[Sequence[float]] = None,
         series_label: Optional[str] = None,
+        totals: Optional[Sequence[float]] = None,
     ) -> None:
         for index, rect in enumerate(bar_container.patches):
             value_list = values if values is not None else segment.values
@@ -2333,6 +2352,8 @@ class BarHoverHelper:
                 if source:
                     metadata["pdf_path"] = str(source.pdf_path)
                     metadata["pdf_page"] = source.page
+            if totals is not None and index < len(totals):
+                metadata["sum_value"] = totals[index]
             self._rectangles.append((rect, metadata))
 
     def add_point_target(self, x: float, y: float, metadata: Dict[str, Any]) -> None:
@@ -2349,6 +2370,11 @@ class BarHoverHelper:
             formatted_value = f"{value:,.2f}"
         else:
             formatted_value = "—"
+        sum_value = metadata.get("sum_value")
+        if isinstance(sum_value, (int, float)) and math.isfinite(sum_value):
+            formatted_sum = f"{sum_value:,.2f}"
+        else:
+            formatted_sum = "—"
         type_value = metadata.get("type_value") or metadata.get("type_label") or "—"
         category = metadata.get("category") or "—"
         item = metadata.get("item") or "—"
@@ -2356,7 +2382,8 @@ class BarHoverHelper:
             f"TYPE: {type_value}\n"
             f"CATEGORY: {category}\n"
             f"ITEM: {item}\n"
-            f"AMOUNT: {formatted_value}"
+            f"AMOUNT: {formatted_value}\n"
+            f"SUM: {formatted_sum}"
         )
 
     def _position_annotation(self, x: float, y: float, value: float) -> None:
@@ -2600,7 +2627,7 @@ class FinanceAnalystApp:
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Radiobutton(
             values_frame,
-            text="Normalize with share price at time",
+            text="P2V/E",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
             command=self._on_normalization_change,
