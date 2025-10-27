@@ -533,7 +533,8 @@ class FinancePlotFrame(ttk.Frame):
         self._dataset_normalization_mode = FinanceDataset.NORMALIZATION_SHARES
         self._per_share_formatter = ScalarFormatter()
         self._reported_formatter = ScalarFormatter(useOffset=False)
-        self._reported_formatter.set_scientific(False)
+        self._reported_formatter.set_scientific(True)
+        self._reported_formatter.set_powerlimits((0, 0))
         self._share_count_formatter = ScalarFormatter(useOffset=False)
         self._share_count_formatter.set_scientific(False)
         self._render_empty()
