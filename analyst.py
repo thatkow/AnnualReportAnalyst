@@ -42,7 +42,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib import colors, colormaps
 from matplotlib.patches import Patch, Rectangle
-from matplotlib.ticker import PercentFormatter, ScalarFormatter
+from matplotlib.ticker import ScalarFormatter
 
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -1388,7 +1388,9 @@ class FinancePlotFrame(ttk.Frame):
         self._share_price_formatter = ScalarFormatter(useOffset=False)
         self._share_price_formatter.set_scientific(True)
         self._share_price_formatter.set_powerlimits((0, 0))
-        self._percentage_formatter = PercentFormatter(xmax=1.0, decimals=2)
+        self._share_price_ratio_formatter = ScalarFormatter(useOffset=False)
+        self._share_price_ratio_formatter.set_scientific(True)
+        self._share_price_ratio_formatter.set_powerlimits((0, 0))
         self._render_empty()
 
     @staticmethod
@@ -2317,8 +2319,8 @@ class FinancePlotFrame(ttk.Frame):
             self.axis.yaxis.set_major_formatter(self._share_price_formatter)
             self.axis.set_ylabel("Share Price Multiple")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD:
-            self.axis.yaxis.set_major_formatter(self._percentage_formatter)
-            self.axis.set_ylabel("Value/(Share*Price) (%)")
+            self.axis.yaxis.set_major_formatter(self._share_price_ratio_formatter)
+            self.axis.set_ylabel("Value/(Share*Price)")
         else:
             self.axis.yaxis.set_major_formatter(self._reported_formatter)
             self.axis.set_ylabel("Reported Value")
@@ -2781,9 +2783,9 @@ class BarHoverHelper:
                 return f"{raw:,.2f}"
             return "—"
 
-        def _format_percent(raw: Any) -> str:
+        def _format_ratio(raw: Any) -> str:
             if isinstance(raw, (int, float)) and math.isfinite(raw):
-                return f"{raw * 100:,.2f}%"
+                return f"{raw:,.6f}"
             return "—"
 
         lines = [
@@ -2796,7 +2798,7 @@ class BarHoverHelper:
             f"NUMBER OF SHARES: {_format_scientific(share_count)}",
             f"VALUE/SHARE: {_format_decimal(value_per_share)}",
             f"SHARE PRICE: {_format_decimal(share_price_value)}",
-            f"VALUE/(SHARE*PRICE): {_format_percent(value_share_price_ratio)}",
+            f"VALUE/(SHARE*PRICE): {_format_ratio(value_share_price_ratio)}",
         ]
 
         return "\n".join(lines)
@@ -3035,7 +3037,7 @@ class FinanceAnalystApp:
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Radiobutton(
             values_frame,
-            text="Value/(Share*Price) %",
+            text="Value/(Share*Price)",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
             command=self._on_normalization_change,
