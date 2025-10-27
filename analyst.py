@@ -795,7 +795,13 @@ class FinanceDataset:
         elif mode == self.NORMALIZATION_SHARE_PRICE:
             if not self.share_counts:
                 raise ValueError("combined.csv is missing a share_count row")
-            latest_price = self.latest_share_price()
+            price_map = self._get_period_share_price_map()
+            latest_price: Optional[float] = None
+            for label in reversed(self.periods):
+                price = price_map.get(str(label))
+                if price is not None and math.isfinite(price) and price > 0:
+                    latest_price = float(price)
+                    break
             if latest_price is None:
                 raise ValueError(
                     f"Share price data is not available for {self.company_root.name or 'the selected company'}."
@@ -972,6 +978,37 @@ class FinanceDataset:
                 continue
             values.append(self.share_counts[idx])
             present.append(True)
+
+        return values, present
+
+    def share_prices_for(self, periods: Sequence[str]) -> Tuple[List[float], List[bool]]:
+        price_map = self._get_period_share_price_map()
+        period_index = {label: idx for idx, label in enumerate(self.periods)}
+        values: List[float] = []
+        present: List[bool] = []
+
+        for label in periods:
+            lookup_label = str(label)
+            price = price_map.get(lookup_label)
+            if price is None:
+                idx = period_index.get(label)
+                if idx is None:
+                    idx = period_index.get(lookup_label)
+                if idx is not None and idx < len(self.share_prices):
+                    fallback_price = self.share_prices[idx]
+                    if fallback_price and math.isfinite(fallback_price) and fallback_price > 0:
+                        price = float(fallback_price)
+            if price is not None and math.isfinite(price) and price > 0:
+                values.append(float(price))
+                present.append(True)
+            else:
+                values.append(math.nan)
+                present.append(False)
+
+        if not any(present):
+            raise ValueError(
+                f"Share price data is not available for {self.company_root.name or 'the selected company'}."
+            )
 
         return values, present
 
@@ -1158,6 +1195,7 @@ class FinancePlotFrame(ttk.Frame):
     MODE_STACKED = "stacked"
     MODE_LINE = "line"
     VALUE_MODE_SHARE_COUNT = "share_count"
+    VALUE_MODE_SHARE_PRICE = "share_price_values"
 
     def __init__(self, parent: tk.Widget) -> None:
         super().__init__(parent)
@@ -1235,6 +1273,7 @@ class FinancePlotFrame(ttk.Frame):
             FinanceDataset.NORMALIZATION_SHARE_PRICE,
             FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
             self.VALUE_MODE_SHARE_COUNT,
+            self.VALUE_MODE_SHARE_PRICE,
         }
         if mode not in valid_modes:
             return False
@@ -1242,6 +1281,26 @@ class FinancePlotFrame(ttk.Frame):
         if mode == self.VALUE_MODE_SHARE_COUNT:
             if self.normalization_mode == mode:
                 return True
+            self.normalization_mode = mode
+            if self.datasets:
+                self._render()
+            else:
+                self._render_empty()
+            return True
+
+        if mode == self.VALUE_MODE_SHARE_PRICE:
+            if self.normalization_mode == mode:
+                return True
+            periods = self.visible_periods()
+            if not periods:
+                periods = self.all_periods()
+            if periods and self.datasets:
+                for dataset in self.datasets.values():
+                    try:
+                        dataset.share_prices_for(periods)
+                    except ValueError as exc:
+                        messagebox.showwarning("Share Price", str(exc))
+                        return False
             self.normalization_mode = mode
             if self.datasets:
                 self._render()
@@ -1526,6 +1585,62 @@ class FinancePlotFrame(ttk.Frame):
                 self.axis.set_xlim(-0.6, 0.6)
                 self.axis.set_xticks([])
 
+        elif self.normalization_mode == self.VALUE_MODE_SHARE_PRICE:
+            hover_helper.begin_update(None)
+            x_positions = period_indices
+            for company, dataset in self.datasets.items():
+                finance_color, _ = self._company_colors.setdefault(
+                    company, self._next_color_pair()
+                )
+                try:
+                    share_prices, share_presence = dataset.share_prices_for(periods)
+                except ValueError:
+                    continue
+                if not any(share_presence):
+                    continue
+                price_points = [
+                    share_prices[idx] if share_presence[idx] else math.nan
+                    for idx in range(len(share_prices))
+                ]
+                scatter = self.axis.scatter(
+                    x_positions,
+                    price_points,
+                    color=finance_color,
+                    marker="o",
+                    s=48,
+                    label=f"{company} Share Price",
+                )
+                legend_handles.append(scatter)
+                for idx, present in enumerate(share_presence):
+                    if not present:
+                        continue
+                    value = price_points[idx]
+                    if not math.isfinite(value):
+                        continue
+                    period_label = periods[idx] if idx < len(periods) else str(idx)
+                    metadata = {
+                        "key": f"{company}_share_price",
+                        "type_label": "Share Price",
+                        "type_value": "Share Price",
+                        "category": company,
+                        "item": dataset.share_price_symbol or "Share Price",
+                        "period": period_label,
+                        "value": value,
+                        "company": company,
+                        "series": self.VALUE_MODE_SHARE_PRICE,
+                    }
+                    hover_helper.add_point_target(
+                        float(x_positions[idx]), float(value), metadata
+                    )
+
+            if period_indices:
+                self.axis.set_xticks(period_indices)
+                self.axis.set_xticklabels(periods, rotation=45, ha="right")
+                self.axis.set_xlim(-0.5, len(period_indices) - 0.5)
+            else:
+                self.axis.set_xlim(-0.6, 0.6)
+                self.axis.set_xticks([])
+
         elif mode == self.MODE_STACKED:
             hover_helper.begin_update(self._show_context_menu)
             group_width = self._PLOT_WIDTH
@@ -1792,6 +1907,9 @@ class FinancePlotFrame(ttk.Frame):
         if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
             self.axis.yaxis.set_major_formatter(self._share_count_formatter)
             self.axis.set_ylabel("Number of Shares")
+        elif self.normalization_mode == self.VALUE_MODE_SHARE_PRICE:
+            self.axis.yaxis.set_major_formatter(self._share_price_formatter)
+            self.axis.set_ylabel("Share Price")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARES:
             self.axis.yaxis.set_major_formatter(self._per_share_formatter)
             self.axis.set_ylabel("Value per Share")
@@ -1808,11 +1926,15 @@ class FinancePlotFrame(ttk.Frame):
             companies_list = ", ".join(self.datasets.keys())
             if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
                 self.axis.set_title(f"Number of Shares — {companies_list}")
+            elif self.normalization_mode == self.VALUE_MODE_SHARE_PRICE:
+                self.axis.set_title(f"Share Price — {companies_list}")
             else:
                 self.axis.set_title(f"Finance vs Income Statement — {companies_list}")
         else:
             if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
                 self.axis.set_title("Number of Shares")
+            elif self.normalization_mode == self.VALUE_MODE_SHARE_PRICE:
+                self.axis.set_title("Share Price")
             else:
                 self.axis.set_title("Finance vs Income Statement")
 
@@ -2407,6 +2529,8 @@ class FinanceAnalystApp:
             value=FinanceDataset.NORMALIZATION_SHARES
         )
         self.period_vars: Dict[str, tk.BooleanVar] = {}
+        self.period_all_var = tk.BooleanVar(value=True)
+        self._updating_period_checks = False
 
         self._build_ui()
         self._refresh_company_list()
@@ -2483,6 +2607,13 @@ class FinanceAnalystApp:
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Radiobutton(
             values_frame,
+            text="Share price",
+            variable=self.normalization_var,
+            value=FinancePlotFrame.VALUE_MODE_SHARE_PRICE,
+            command=self._on_normalization_change,
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Radiobutton(
+            values_frame,
             text="As reported",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_REPORTED,
@@ -2499,6 +2630,13 @@ class FinanceAnalystApp:
         self.periods_frame = ttk.Frame(outer)
         self.periods_frame.pack(fill=tk.X, pady=(0, 12))
         ttk.Label(self.periods_frame, text="Dates:").pack(side=tk.LEFT)
+        self.period_all_check = ttk.Checkbutton(
+            self.periods_frame,
+            text="All dates",
+            variable=self.period_all_var,
+            command=self._toggle_all_periods,
+        )
+        self.period_all_check.pack(side=tk.LEFT, padx=(6, 6))
         self.period_checks_frame = ttk.Frame(self.periods_frame)
         self.period_checks_frame.pack(side=tk.LEFT, padx=(6, 0))
 
@@ -2518,7 +2656,10 @@ class FinanceAnalystApp:
             self.normalization_var.set(self.plot_frame.normalization_mode)
 
     def _on_period_toggle(self) -> None:
+        if self._updating_period_checks:
+            return
         self._apply_period_filters()
+        self._update_period_all_state()
 
     def _apply_period_filters(self) -> None:
         active_periods = [
@@ -2528,6 +2669,32 @@ class FinanceAnalystApp:
             self.plot_frame.set_visible_periods([])
             return
         self.plot_frame.set_visible_periods(active_periods)
+
+    def _toggle_all_periods(self) -> None:
+        if self._updating_period_checks:
+            return
+        desired = self.period_all_var.get()
+        self._updating_period_checks = True
+        for var in self.period_vars.values():
+            var.set(desired)
+        self._updating_period_checks = False
+        self._apply_period_filters()
+        self._update_period_all_state()
+
+    def _update_period_all_state(self) -> None:
+        if not hasattr(self, "period_all_check"):
+            return
+        if not self.period_vars:
+            self._updating_period_checks = True
+            self.period_all_var.set(False)
+            self._updating_period_checks = False
+            self.period_all_check.state(["disabled"])
+            return
+        self.period_all_check.state(["!disabled"])
+        all_selected = all(var.get() for var in self.period_vars.values())
+        self._updating_period_checks = True
+        self.period_all_var.set(all_selected)
+        self._updating_period_checks = False
 
     def _refresh_period_controls(self) -> None:
         periods = self.plot_frame.all_periods()
@@ -2548,6 +2715,7 @@ class FinanceAnalystApp:
             check.pack(side=tk.LEFT, padx=(0, 6))
             self.period_vars[label] = var
 
+        self._update_period_all_state()
         self._apply_period_filters()
 
 
