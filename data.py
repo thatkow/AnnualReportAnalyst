@@ -594,6 +594,12 @@ class ReportApp:
             labels_controls,
             text="Review scraped headers, adjust the final column labels, and click Parse to build the combined table.",
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.combine_reload_button = ttk.Button(
+            labels_controls,
+            text="Reload",
+            command=self._on_reload_combined_clicked,
+        )
+        self.combine_reload_button.pack(side=tk.RIGHT, padx=(0, 8))
         self.combine_confirm_button = ttk.Button(
             labels_controls,
             text="Parse",
@@ -4648,6 +4654,13 @@ class ReportApp:
                 self.notebook.select(self.combined_frame)
             except tk.TclError:
                 pass
+
+    def _on_reload_combined_clicked(self) -> None:
+        self._refresh_combined_tab(auto_update=True)
+        try:
+            self.notebook.select(self.combined_labels_tab)
+        except tk.TclError:
+            pass
 
     def _update_combined_save_button_state(self) -> None:
         button = self.combined_save_button

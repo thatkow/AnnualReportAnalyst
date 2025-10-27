@@ -10,6 +10,7 @@ see how individual entries contribute to each reporting period.
 
 from __future__ import annotations
 
+import calendar
 import csv
 import math
 import re
@@ -51,7 +52,110 @@ NOTE_ASIS = "asis"
 NOTE_NEGATED = "negated"
 NOTE_EXCLUDED = "excluded"
 NOTE_SHARE_COUNT = "share_count"
-VALID_NOTES = {NOTE_ASIS, NOTE_NEGATED, NOTE_EXCLUDED, NOTE_SHARE_COUNT}
+NOTE_SHARE_PRICE = "share_price"
+VALID_NOTES = {
+    NOTE_ASIS,
+    NOTE_NEGATED,
+    NOTE_EXCLUDED,
+    NOTE_SHARE_COUNT,
+    NOTE_SHARE_PRICE,
+}
+
+
+_PERIOD_DATE_FORMATS = (
+    "%d.%m.%Y",
+    "%d/%m/%Y",
+    "%d-%m-%Y",
+    "%Y-%m-%d",
+    "%Y.%m.%d",
+    "%Y/%m/%d",
+    "%d %b %Y",
+    "%d %B %Y",
+    "%b %Y",
+    "%B %Y",
+    "%Y",
+)
+
+
+def _normalize_two_digit_year(year_text: str) -> Optional[int]:
+    try:
+        value = int(year_text)
+    except ValueError:
+        return None
+    if 0 <= value <= 99:
+        return 2000 + value if value < 50 else 1900 + value
+    return value if value >= 1900 else None
+
+
+def _parse_period_label(label: str) -> Optional[datetime]:
+    """Best-effort parsing for period labels into comparable datetimes."""
+
+    text = label.strip()
+    if not text:
+        return None
+
+    normalized = (
+        text.replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+    )
+    candidates = {normalized, normalized.replace("  ", " ")}
+    simplified = normalized.replace(".", "/")
+    candidates.update({simplified, simplified.replace("/", "-"), normalized.replace("/", "-")})
+
+    upper_text = normalized.upper()
+    if upper_text.startswith("FY"):
+        candidates.add(normalized[2:].strip())
+    candidates.add(re.sub(r"\bFY\b", "", normalized, flags=re.IGNORECASE).strip())
+
+    for candidate in list(candidates):
+        collapsed = re.sub(r"\s+", " ", candidate).strip()
+        if collapsed:
+            candidates.add(collapsed)
+
+    for candidate in candidates:
+        for date_format in _PERIOD_DATE_FORMATS:
+            try:
+                parsed = datetime.strptime(candidate, date_format)
+            except ValueError:
+                continue
+            else:
+                return parsed
+
+    year_match = re.search(r"(?<!\d)(\d{4})(?!\d)", normalized)
+    year_value: Optional[int] = None
+    if year_match:
+        year_value = int(year_match.group(1))
+    else:
+        short_match = re.search(r"(?<!\d)(\d{2})(?!\d)", normalized)
+        if short_match:
+            year_value = _normalize_two_digit_year(short_match.group(1))
+
+    if year_value is None:
+        return None
+
+    month = 1
+    quarter_match = re.search(r"Q([1-4])", normalized, flags=re.IGNORECASE)
+    if quarter_match:
+        quarter = int(quarter_match.group(1))
+        month = min(quarter * 3, 12)
+    else:
+        half_match = re.search(r"H([12])", normalized, flags=re.IGNORECASE)
+        if half_match:
+            half = int(half_match.group(1))
+            month = 6 if half == 1 else 12
+        elif re.search(r"FY", normalized, flags=re.IGNORECASE):
+            month = 12
+
+    day = min(28, calendar.monthrange(year_value, month)[1])
+    return datetime(year_value, month, day)
+
+
+def _period_sort_key(label: str) -> Tuple[int, Any]:
+    parsed = _parse_period_label(label)
+    if parsed is not None:
+        return (0, parsed)
+    return (1, label.strip().lower())
 
 
 @dataclass
@@ -165,6 +269,7 @@ class FinanceDataset:
 
     NORMALIZATION_SHARES = "shares"
     NORMALIZATION_REPORTED = "reported"
+    NORMALIZATION_SHARE_PRICE = "share_price"
 
     _TYPE_TO_LABEL = {
         "financial": FINANCE_LABEL,
@@ -181,6 +286,7 @@ class FinanceDataset:
         self.income_segments: List[RowSegment] = []
         self._color_cache: Dict[str, str] = {}
         self.share_counts: List[float] = []
+        self.share_prices: List[float] = []
         self._normalization_mode = self.NORMALIZATION_REPORTED
         self._load()
         self._load_metadata()
@@ -241,6 +347,7 @@ class FinanceDataset:
             self.finance_segments = []
             self.income_segments = []
             share_counts: Optional[List[float]] = None
+            share_prices: Optional[List[float]] = None
 
             for row_number, row in enumerate(reader, start=1):
                 if note_index >= len(row):
@@ -266,6 +373,12 @@ class FinanceDataset:
                     if share_counts is not None:
                         raise ValueError("Multiple share_count rows found in combined.csv")
                     share_counts = values
+                    continue
+
+                if note_key == NOTE_SHARE_PRICE:
+                    if share_prices is not None:
+                        raise ValueError("Multiple share_price rows found in combined.csv")
+                    share_prices = values
                     continue
 
                 if not any(value != 0 for value in values):
@@ -336,45 +449,71 @@ class FinanceDataset:
                         f"share_count value for period '{self.periods[index]}' is zero"
                     )
 
-            sort_indices = list(range(len(self.periods)))
-            try:
-                parsed_periods = [
-                    datetime.strptime(self.periods[idx].strip(), "%d.%m.%Y")
-                    for idx in sort_indices
-                ]
-            except ValueError:
-                parsed_periods = []
+            if share_prices is not None and len(share_prices) != len(self.periods):
+                raise ValueError("share_price row does not match the number of periods")
 
-            if parsed_periods:
-                sort_indices = [
-                    index
-                    for _, index in sorted(
-                        zip(parsed_periods, sort_indices), key=lambda pair: pair[0]
-                    )
-                ]
+            sort_indices = sorted(
+                range(len(self.periods)), key=lambda idx: _period_sort_key(self.periods[idx])
+            )
+            if sort_indices != list(range(len(self.periods))):
                 self.periods = [self.periods[idx] for idx in sort_indices]
                 share_counts = [share_counts[idx] for idx in sort_indices]
+                if share_prices is not None:
+                    share_prices = [share_prices[idx] for idx in sort_indices]
             for segment in self.finance_segments + self.income_segments:
                 segment.values = [segment.values[idx] for idx in sort_indices]
                 segment.periods = [self.periods[idx] for idx in sort_indices]
                 segment.raw_values = list(segment.values)
 
             self.share_counts = list(share_counts)
+            self.share_prices = list(share_prices) if share_prices is not None else []
             self.set_normalization_mode(self.NORMALIZATION_SHARES)
 
     def set_normalization_mode(self, mode: str) -> None:
-        if mode not in {self.NORMALIZATION_SHARES, self.NORMALIZATION_REPORTED}:
+        valid_modes = {
+            self.NORMALIZATION_SHARES,
+            self.NORMALIZATION_REPORTED,
+            self.NORMALIZATION_SHARE_PRICE,
+        }
+        if mode not in valid_modes:
             raise ValueError(f"Unsupported normalization mode: {mode}")
-        if mode == self._normalization_mode and self.share_counts:
+
+        if mode == self._normalization_mode:
             return
+
         if mode == self.NORMALIZATION_SHARES:
             if not self.share_counts:
                 raise ValueError("combined.csv is missing a share_count row")
             for segment in self.finance_segments + self.income_segments:
-                segment.values = [
-                    value / self.share_counts[idx]
-                    for idx, value in enumerate(segment.raw_values)
-                ]
+                per_share: List[float] = []
+                for idx, value in enumerate(segment.raw_values):
+                    count = self.share_counts[idx] if idx < len(self.share_counts) else 0.0
+                    if count == 0:
+                        per_share.append(0.0)
+                    else:
+                        per_share.append(value / count)
+                segment.values = per_share
+        elif mode == self.NORMALIZATION_SHARE_PRICE:
+            if not self.share_counts:
+                raise ValueError("combined.csv is missing a share_count row")
+            latest_price = self.latest_share_price()
+            if latest_price is None:
+                raise ValueError(
+                    f"Share price data is not available for {self.company_root.name or 'the selected company'}."
+                )
+            for segment in self.finance_segments + self.income_segments:
+                multiples: List[float] = []
+                for idx, value in enumerate(segment.raw_values):
+                    count = self.share_counts[idx] if idx < len(self.share_counts) else 0.0
+                    if count == 0:
+                        multiples.append(0.0)
+                        continue
+                    per_share = value / count
+                    if per_share == 0:
+                        multiples.append(0.0)
+                    else:
+                        multiples.append(latest_price / per_share)
+                segment.values = multiples
         else:
             for segment in self.finance_segments + self.income_segments:
                 segment.values = list(segment.raw_values)
@@ -493,6 +632,12 @@ class FinanceDataset:
 
         return values, present
 
+    def latest_share_price(self) -> Optional[float]:
+        for value in reversed(self.share_prices):
+            if math.isfinite(value) and value > 0:
+                return value
+        return None
+
     def has_data(self) -> bool:
         return bool(self.finance_segments or self.income_segments)
 
@@ -525,6 +670,7 @@ class FinancePlotFrame(ttk.Frame):
         self.datasets: "OrderedDict[str, FinanceDataset]" = OrderedDict()
         self.periods: Optional[List[str]] = None
         self._periods_by_key: "OrderedDict[Tuple[str, str, str], List[str]]" = OrderedDict()
+        self._visible_periods: Optional[List[str]] = None
         self._company_colors: Dict[str, Tuple[str, str]] = {}
         self._palette = list(colormaps["tab10"].colors)
         self._context_menu: Optional[tk.Menu] = None
@@ -536,7 +682,11 @@ class FinancePlotFrame(ttk.Frame):
         self._reported_formatter.set_scientific(True)
         self._reported_formatter.set_powerlimits((0, 0))
         self._share_count_formatter = ScalarFormatter(useOffset=False)
-        self._share_count_formatter.set_scientific(False)
+        self._share_count_formatter.set_scientific(True)
+        self._share_count_formatter.set_powerlimits((0, 0))
+        self._share_price_formatter = ScalarFormatter(useOffset=False)
+        self._share_price_formatter.set_scientific(True)
+        self._share_price_formatter.set_powerlimits((0, 0))
         self._render_empty()
 
     @staticmethod
@@ -576,38 +726,53 @@ class FinancePlotFrame(ttk.Frame):
         else:
             self._render_empty()
 
-    def set_normalization_mode(self, mode: str) -> None:
+    def set_normalization_mode(self, mode: str) -> bool:
         valid_modes = {
             FinanceDataset.NORMALIZATION_SHARES,
             FinanceDataset.NORMALIZATION_REPORTED,
+            FinanceDataset.NORMALIZATION_SHARE_PRICE,
             self.VALUE_MODE_SHARE_COUNT,
         }
         if mode not in valid_modes:
-            return
+            return False
 
         if mode == self.VALUE_MODE_SHARE_COUNT:
             if self.normalization_mode == mode:
-                return
+                return True
             self.normalization_mode = mode
             if self.datasets:
                 self._render()
             else:
                 self._render_empty()
-            return
+            return True
 
         if self._dataset_normalization_mode != mode:
+            previous_mode = self._dataset_normalization_mode
+            updated: List[FinanceDataset] = []
             for dataset in self.datasets.values():
-                dataset.set_normalization_mode(mode)
+                try:
+                    dataset.set_normalization_mode(mode)
+                except ValueError as exc:
+                    messagebox.showwarning("Normalize Values", str(exc))
+                    for updated_dataset in updated:
+                        try:
+                            updated_dataset.set_normalization_mode(previous_mode)
+                        except ValueError:
+                            pass
+                    return False
+                else:
+                    updated.append(dataset)
             self._dataset_normalization_mode = mode
 
         if self.normalization_mode == mode:
-            return
+            return True
 
         self.normalization_mode = mode
         if self.datasets:
             self._render()
         else:
             self._render_empty()
+        return True
 
     def _next_color_pair(self) -> Tuple[str, str]:
         index = len(self._company_colors)
@@ -621,14 +786,7 @@ class FinancePlotFrame(ttk.Frame):
 
     @staticmethod
     def _sort_periods(periods: Sequence[str]) -> List[str]:
-        def sort_key(label: str) -> Tuple[int, Any]:
-            try:
-                parsed = datetime.strptime(label.strip(), "%d.%m.%Y")
-                return (0, parsed)
-            except ValueError:
-                return (1, label)
-
-        return sorted(periods, key=sort_key)
+        return sorted(periods, key=_period_sort_key)
 
     @staticmethod
     def _merge_periods(existing: Sequence[str], new_periods: Sequence[str]) -> List[str]:
@@ -665,29 +823,90 @@ class FinancePlotFrame(ttk.Frame):
         self.datasets.clear()
         self.periods = None
         self._periods_by_key.clear()
+        self._visible_periods = None
         self._render_empty()
 
-    def add_company(self, company: str, dataset: FinanceDataset) -> bool:
+    def add_company(self, company: str, dataset: FinanceDataset) -> Tuple[bool, Optional[str]]:
+        previous_periods = set(self.periods or [])
         self._register_periods(dataset)
+        previous_visible = (
+            list(self._visible_periods) if self._visible_periods is not None else None
+        )
         self.periods = self._rebuild_period_sequence()
+        new_periods = [label for label in self.periods if label not in previous_periods]
+        if previous_visible is None:
+            self._visible_periods = list(self.periods)
+        else:
+            visible_set = set(previous_visible)
+            updated_visible = [label for label in self.periods if label in visible_set]
+            updated_visible.extend(
+                [label for label in new_periods if label not in visible_set]
+            )
+            self._visible_periods = updated_visible
 
         is_new_company = company not in self.datasets
         if is_new_company and company not in self._company_colors:
             self._company_colors[company] = self._next_color_pair()
 
-        dataset.set_normalization_mode(self._dataset_normalization_mode)
+        normalization_warning: Optional[str] = None
+        try:
+            dataset.set_normalization_mode(self._dataset_normalization_mode)
+        except ValueError as exc:
+            if self._dataset_normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
+                normalization_warning = str(exc)
+                fallback_mode = FinanceDataset.NORMALIZATION_SHARES
+                dataset.set_normalization_mode(fallback_mode)
+                for existing in self.datasets.values():
+                    existing.set_normalization_mode(fallback_mode)
+                self._dataset_normalization_mode = fallback_mode
+                if self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
+                    self.normalization_mode = fallback_mode
+            else:
+                raise
+
         self.datasets[company] = dataset
         # Preserve insertion order by moving refreshed companies to the end.
         self.datasets.move_to_end(company)
         self._render()
-        return is_new_company
+        return is_new_company, normalization_warning
+
+    def all_periods(self) -> List[str]:
+        return list(self.periods or [])
+
+    def visible_periods(self) -> List[str]:
+        if self._visible_periods is not None:
+            return list(self._visible_periods)
+        return list(self.periods or [])
+
+    def set_visible_periods(self, periods: Sequence[str]) -> None:
+        if not self.periods:
+            self._visible_periods = []
+            self._render_empty()
+            return
+
+        allowed = {label for label in periods}
+        new_visible = [label for label in self.periods if label in allowed]
+        if not allowed:
+            new_visible = []
+
+        if self._visible_periods == new_visible:
+            return
+
+        self._visible_periods = new_visible
+        if self.datasets:
+            self._render()
+        else:
+            self._render_empty()
 
     def _render(self) -> None:
         if not self.datasets:
             self._render_empty()
             return
 
-        periods = self.periods or []
+        if self._visible_periods is not None:
+            periods = list(self._visible_periods)
+        else:
+            periods = self.periods or []
         period_indices = list(range(len(periods)))
         num_companies = len(self.datasets)
         if num_companies == 0:
@@ -1001,6 +1220,9 @@ class FinancePlotFrame(ttk.Frame):
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARES:
             self.axis.yaxis.set_major_formatter(self._per_share_formatter)
             self.axis.set_ylabel("Value per Share")
+        elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
+            self.axis.yaxis.set_major_formatter(self._share_price_formatter)
+            self.axis.set_ylabel("Share Price Multiple")
         else:
             self.axis.yaxis.set_major_formatter(self._reported_formatter)
             self.axis.set_ylabel("Reported Value")
@@ -1256,21 +1478,19 @@ class BarHoverHelper:
             self._canvas.draw_idle()
 
     def _format_text(self, metadata: Dict[str, Any]) -> str:
-        value = metadata.get("value", 0.0)
-        formatted_value = f"{value:,.2f}"
+        value = metadata.get("value")
+        if isinstance(value, (int, float)) and math.isfinite(value):
+            formatted_value = f"{value:,.2f}"
+        else:
+            formatted_value = "—"
         type_value = metadata.get("type_value") or metadata.get("type_label") or "—"
         category = metadata.get("category") or "—"
         item = metadata.get("item") or "—"
-        key = metadata.get("key") or "—"
-        period = metadata.get("period") or "Period"
-        company = metadata.get("company") or "—"
         return (
-            f"Company: {company}\n"
-            f"Key: {key}\n"
-            f"Type: {type_value}\n"
-            f"Category: {category}\n"
-            f"Item: {item}\n"
-            f"{period}: {formatted_value}"
+            f"TYPE: {type_value}\n"
+            f"CATEGORY: {category}\n"
+            f"ITEM: {item}\n"
+            f"AMOUNT: {formatted_value}"
         )
 
     def _position_annotation(self, x: float, y: float, value: float) -> None:
@@ -1395,6 +1615,7 @@ class FinanceAnalystApp:
         self.normalization_var = tk.StringVar(
             value=FinanceDataset.NORMALIZATION_SHARES
         )
+        self.period_vars: Dict[str, tk.BooleanVar] = {}
 
         self._build_ui()
         self._refresh_company_list()
@@ -1449,6 +1670,13 @@ class FinanceAnalystApp:
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Radiobutton(
             values_frame,
+            text="Normalize over latest share price",
+            variable=self.normalization_var,
+            value=FinanceDataset.NORMALIZATION_SHARE_PRICE,
+            command=self._on_normalization_change,
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Radiobutton(
+            values_frame,
             text="As reported",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_REPORTED,
@@ -1462,17 +1690,59 @@ class FinanceAnalystApp:
             command=self._on_normalization_change,
         ).pack(side=tk.LEFT, padx=(6, 0))
 
+        self.periods_frame = ttk.Frame(outer)
+        self.periods_frame.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(self.periods_frame, text="Dates:").pack(side=tk.LEFT)
+        self.period_checks_frame = ttk.Frame(self.periods_frame)
+        self.period_checks_frame.pack(side=tk.LEFT, padx=(6, 0))
+
         self.plot_frame = FinancePlotFrame(outer)
         self.plot_frame.pack(fill=tk.BOTH, expand=True)
 
     def _on_mode_change(self) -> None:
         mode = self.mode_var.get()
         self.plot_frame.set_display_mode(mode)
-        self.plot_frame.set_normalization_mode(self.normalization_var.get())
+        success = self.plot_frame.set_normalization_mode(self.normalization_var.get())
+        if not success:
+            self.normalization_var.set(self.plot_frame.normalization_mode)
 
     def _on_normalization_change(self) -> None:
         mode = self.normalization_var.get()
-        self.plot_frame.set_normalization_mode(mode)
+        if not self.plot_frame.set_normalization_mode(mode):
+            self.normalization_var.set(self.plot_frame.normalization_mode)
+
+    def _on_period_toggle(self) -> None:
+        self._apply_period_filters()
+
+    def _apply_period_filters(self) -> None:
+        active_periods = [
+            label for label, var in self.period_vars.items() if var.get()
+        ]
+        if not active_periods and self.plot_frame.all_periods():
+            self.plot_frame.set_visible_periods([])
+            return
+        self.plot_frame.set_visible_periods(active_periods)
+
+    def _refresh_period_controls(self) -> None:
+        periods = self.plot_frame.all_periods()
+        existing_state = {label: var.get() for label, var in self.period_vars.items()}
+
+        for child in self.period_checks_frame.winfo_children():
+            child.destroy()
+        self.period_vars.clear()
+
+        for label in periods:
+            var = tk.BooleanVar(value=existing_state.get(label, True))
+            check = ttk.Checkbutton(
+                self.period_checks_frame,
+                text=label,
+                variable=var,
+                command=self._on_period_toggle,
+            )
+            check.pack(side=tk.LEFT, padx=(0, 6))
+            self.period_vars[label] = var
+
+        self._apply_period_filters()
 
 
     def _maximize_window(self) -> None:
@@ -1525,13 +1795,19 @@ class FinanceAnalystApp:
             )
             return
         try:
-            added = self.plot_frame.add_company(company, dataset)
+            added, normalization_warning = self.plot_frame.add_company(company, dataset)
         except ValueError as exc:
             messagebox.showerror("Load Company", str(exc))
             return
         if not added:
             messagebox.showinfo("Load Company", f"{company} data refreshed on the chart.")
-        self.plot_frame.set_normalization_mode(self.normalization_var.get())
+        if normalization_warning:
+            messagebox.showwarning("Normalize Values", normalization_warning)
+            self.normalization_var.set(self.plot_frame.normalization_mode)
+        success = self.plot_frame.set_normalization_mode(self.normalization_var.get())
+        if not success:
+            self.normalization_var.set(self.plot_frame.normalization_mode)
+        self._refresh_period_controls()
 
 
 def main() -> None:
