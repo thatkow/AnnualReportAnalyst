@@ -220,7 +220,8 @@ class PdfPageViewer(tk.Toplevel):
         self._page_number = page_number
         self._build_widgets()
         self._render_page()
-        self.bind("<Escape>", lambda _event: self.destroy())
+        self._enter_fullscreen_on_preferred_monitor()
+        self.bind("<Escape>", self._close_from_escape)
 
     def _build_widgets(self) -> None:
         self.configure(bg="#2b2b2b")
@@ -259,6 +260,87 @@ class PdfPageViewer(tk.Toplevel):
         self._canvas.delete("all")
         self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
         self._canvas.configure(scrollregion=(0, 0, pix.width, pix.height))
+
+    def _enter_fullscreen_on_preferred_monitor(self) -> None:
+        """Expand the viewer to fullscreen, preferring a secondary monitor when present."""
+
+        target_geometry: Optional[str] = None
+        monitor_count = 1
+        try:
+            monitor_count = int(self.tk.call("winfo", "monitorcount", self))
+        except tk.TclError:
+            monitor_count = 1
+
+        if monitor_count > 1:
+            monitors: List[Dict[str, Any]] = []
+            try:
+                monitors_raw = self.tk.splitlist(self.tk.call("winfo", "monitors", self))
+            except tk.TclError:
+                monitors_raw = []
+
+            for raw_monitor in monitors_raw:
+                parts = list(self.tk.splitlist(raw_monitor))
+                if len(parts) < 4:
+                    continue
+                try:
+                    x = int(parts[0])
+                    y = int(parts[1])
+                    width = int(parts[2])
+                    height = int(parts[3])
+                except (TypeError, ValueError):
+                    continue
+
+                primary = False
+                for extra in parts[4:]:
+                    text = str(extra).strip().lower()
+                    if text in {"1", "0", "true", "false"}:
+                        primary = text in {"1", "true"}
+                        break
+
+                monitors.append({
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
+                    "primary": primary,
+                })
+
+            non_primary = [monitor for monitor in monitors if not monitor.get("primary")]
+            target_monitor: Optional[Dict[str, Any]]
+            if non_primary:
+                target_monitor = non_primary[0]
+            elif monitors:
+                target_monitor = monitors[0]
+            else:
+                target_monitor = None
+
+            if target_monitor:
+                target_geometry = (
+                    f"{int(target_monitor['width'])}x{int(target_monitor['height'])}+"
+                    f"{int(target_monitor['x'])}+{int(target_monitor['y'])}"
+                )
+
+        if not target_geometry:
+            width = self.winfo_screenwidth()
+            height = self.winfo_screenheight()
+            target_geometry = f"{width}x{height}+0+0"
+
+        self.geometry(target_geometry)
+        self.update_idletasks()
+        try:
+            self.attributes("-fullscreen", True)
+        except tk.TclError:
+            try:
+                self.state("zoomed")
+            except tk.TclError:
+                pass
+
+    def _close_from_escape(self, _event: Any) -> None:
+        try:
+            self.attributes("-fullscreen", False)
+        except tk.TclError:
+            pass
+        self.destroy()
 
 
 class FinanceDataset:
