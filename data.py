@@ -3899,6 +3899,12 @@ class ReportApp:
         """Return the rows currently backing the Combined table."""
 
         tree = self.combined_result_tree
+        if tree is None or not tree.winfo_exists():
+            logger.debug(
+                "Combined result tree unavailable; returning %d cached records",
+                len(self.combined_all_records),
+            )
+            return list(self.combined_all_records)
         if tree is not None and tree.winfo_exists():
             columns: List[str] = []
             if self.combined_ordered_columns:
@@ -3931,7 +3937,20 @@ class ReportApp:
                     # operate on the latest data even when the Combined tab
                     # was populated outside the standard combine workflow.
                     self.combined_all_records = [dict(record) for record in records]
+                    logger.debug(
+                        "Harvested %d combined table records using columns: %s",
+                        len(records),
+                        columns,
+                    )
                     return records
+            logger.debug(
+                "Combined result tree missing column metadata; returning %d cached records",
+                len(self.combined_all_records),
+            )
+        logger.debug(
+            "Combined result tree yielded no rows; returning %d cached records",
+            len(self.combined_all_records),
+        )
         return list(self.combined_all_records)
 
     def _normalize_type_item_category_key(
