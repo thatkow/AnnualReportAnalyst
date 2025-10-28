@@ -3895,6 +3895,28 @@ class ReportApp:
         # workflow.
         return records
 
+    def _get_combined_table_records(self) -> List[Dict[str, str]]:
+        """Return the rows currently backing the Combined table."""
+
+        tree = self.combined_result_tree
+        columns = self.combined_ordered_columns
+        if tree is not None and tree.winfo_exists() and columns:
+            records: List[Dict[str, str]] = []
+            for item_id in tree.get_children(""):
+                values = list(tree.item(item_id, "values"))
+                record: Dict[str, str] = {}
+                for index, column_name in enumerate(columns):
+                    value = values[index] if index < len(values) else ""
+                    record[column_name] = str(value)
+                records.append(record)
+            if records and not self.combined_all_records:
+                # Ensure downstream routines relying on the cached data have
+                # access to the current table state even if it was loaded
+                # outside the standard combine workflow.
+                self.combined_all_records = [dict(record) for record in records]
+            return records
+        return list(self.combined_all_records)
+
     def _normalize_type_item_category_key(
         self, type_value: str, item_value: str, category_value: str
     ) -> Tuple[str, str, str]:
@@ -4187,7 +4209,8 @@ class ReportApp:
             self._update_combined_tree_display()
 
     def _generate_type_category_sort_order_csv(self) -> None:
-        if not self.combined_all_records:
+        combined_records = self._get_combined_table_records()
+        if not combined_records:
             messagebox.showinfo(
                 "Type/Category Sort Order",
                 "Load a combined table before generating the Type/Category sort order.",
@@ -4196,7 +4219,7 @@ class ReportApp:
 
         seen_keys: Set[Tuple[str, str]] = set()
         unique_records: List[Tuple[str, str]] = []
-        for record in self.combined_all_records:
+        for record in combined_records:
             type_value = str(record.get("Type", "") or "").strip()
             category_value = str(record.get("Category", "") or "").strip()
             if not type_value or not category_value:
@@ -4284,14 +4307,15 @@ class ReportApp:
         self._open_in_file_manager(path)
 
     def _append_combined_order_csv(self) -> None:
-        if not self.combined_all_records:
+        combined_records = self._get_combined_table_records()
+        if not combined_records:
             messagebox.showinfo(
                 "Combined Order CSV",
                 "Build the combined table before appending Combined Order entries.",
             )
             return
 
-        current_records = self._filter_combined_records(self.combined_all_records)
+        current_records = self._filter_combined_records(combined_records)
         unique_records: List[Tuple[str, str]] = []
         seen_keys: Set[Tuple[str, str]] = set()
         for record in current_records:
@@ -4353,7 +4377,8 @@ class ReportApp:
             logger.info("No new Combined Order Type/Category combinations to append.")
 
         if appended:
-            self._sort_combined_records(self.combined_all_records)
+            if self.combined_all_records:
+                self._sort_combined_records(self.combined_all_records)
             if self.combined_ordered_columns:
                 self._update_combined_tree_display()
             message = f"Appended {appended} new combination(s) to {path.name}."
@@ -4367,14 +4392,15 @@ class ReportApp:
         self._open_in_file_manager(path)
 
     def _append_type_item_category_csv(self) -> None:
-        if not self.combined_all_records:
+        combined_records = self._get_combined_table_records()
+        if not combined_records:
             messagebox.showinfo(
                 "Type/Item/Category CSV",
                 "Build the combined table before appending Type/Item/Category entries.",
             )
             return
 
-        current_records = self._filter_combined_records(self.combined_all_records)
+        current_records = self._filter_combined_records(combined_records)
         unique_records: List[Tuple[str, str, str]] = []
         seen_keys: Set[Tuple[str, str, str]] = set()
         for record in current_records:
