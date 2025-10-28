@@ -371,6 +371,7 @@ class ReportApp:
         self.pattern_config_path = self.app_root / "pattern_config.json"
         self.type_item_category_path = self.app_root / "type_item_category.csv"
         self.type_category_sort_order_path = self.app_root / "type_category_sort_order.csv"
+        self.combined_order_path = self.app_root / "combined_order.csv"
         self.global_note_assignments_path = self.app_root / "type_category_item_assignments.csv"
         self.config_data: Dict[str, Any] = {}
         self.last_company_preference: str = ""
@@ -994,6 +995,10 @@ class ReportApp:
         configuration_menu.add_command(
             label="Configure Category Colors",
             command=lambda: self._configure_value_colors("Category"),
+        )
+        configuration_menu.add_command(
+            label="Append Combined Order CSV",
+            command=self._append_combined_order_csv,
         )
         configuration_menu.add_command(
             label="Generate Type/Category Sort Order CSV",
@@ -3905,8 +3910,9 @@ class ReportApp:
             str(category_value or "").strip().casefold(),
         )
 
-    def _load_type_category_entries(self) -> List[Tuple[str, str]]:
-        path = getattr(self, "type_category_sort_order_path", None)
+    def _load_type_category_entries_from_path(
+        self, path: Optional[Path]
+    ) -> List[Tuple[str, str]]:
         if path is None:
             return []
         entries: List[Tuple[str, str]] = []
@@ -3949,8 +3955,27 @@ class ReportApp:
             logger.warning("Could not read %s: %s", path, exc)
         return entries
 
+    def _load_type_category_entries(self) -> List[Tuple[str, str]]:
+        return self._load_type_category_entries_from_path(
+            getattr(self, "type_category_sort_order_path", None)
+        )
+
     def _load_type_category_order_map(self) -> Dict[Tuple[str, str], int]:
         entries = self._load_type_category_entries()
+        order: Dict[Tuple[str, str], int] = {}
+        for index, (type_value, category_value) in enumerate(entries):
+            key = self._normalize_type_category_key(type_value, category_value)
+            if key not in order:
+                order[key] = index
+        return order
+
+    def _load_combined_order_entries(self) -> List[Tuple[str, str]]:
+        return self._load_type_category_entries_from_path(
+            getattr(self, "combined_order_path", None)
+        )
+
+    def _load_combined_order_map(self) -> Dict[Tuple[str, str], int]:
+        entries = self._load_combined_order_entries()
         order: Dict[Tuple[str, str], int] = {}
         for index, (type_value, category_value) in enumerate(entries):
             key = self._normalize_type_category_key(type_value, category_value)
@@ -4022,6 +4047,7 @@ class ReportApp:
     def _sort_combined_records(self, records: List[Dict[str, str]]) -> None:
         if not records:
             return
+        combined_order_map = self._load_combined_order_map()
         type_category_order_map = self._load_type_category_order_map()
         type_item_order_map = self._load_type_item_category_order_map()
         type_priority = {name: index for index, name in enumerate(COLUMNS)}
@@ -4037,6 +4063,7 @@ class ReportApp:
             normalized_category = self._normalize_type_category_key(
                 type_value, category_value
             )
+            combined_index = combined_order_map.get(normalized_category)
             category_index = type_category_order_map.get(normalized_category)
             item_index = type_item_order_map.get(normalized_full)
             fallback_strings = (
@@ -4044,18 +4071,26 @@ class ReportApp:
                 item_value.casefold(),
                 type_value.casefold(),
             )
-            if category_index is not None:
+            if combined_index is not None:
                 return (
                     0,
+                    combined_index,
+                    0 if item_index is not None else 1,
+                    item_index if item_index is not None else 0,
+                    fallback_strings,
+                )
+            if category_index is not None:
+                return (
+                    1,
                     category_index,
                     0 if item_index is not None else 1,
                     item_index if item_index is not None else 0,
                     fallback_strings,
                 )
             if item_index is not None:
-                return (1, item_index, fallback_strings)
+                return (2, item_index, fallback_strings)
             return (
-                2,
+                3,
                 type_priority.get(type_value, max_type_priority),
                 category_value.casefold(),
                 item_value.casefold(),
@@ -4248,6 +4283,89 @@ class ReportApp:
         )
         self._open_in_file_manager(path)
 
+    def _append_combined_order_csv(self) -> None:
+        if not self.combined_all_records:
+            messagebox.showinfo(
+                "Combined Order CSV",
+                "Build the combined table before appending Combined Order entries.",
+            )
+            return
+
+        current_records = self._filter_combined_records(self.combined_all_records)
+        unique_records: List[Tuple[str, str]] = []
+        seen_keys: Set[Tuple[str, str]] = set()
+        for record in current_records:
+            type_value = str(record.get("Type", "") or "").strip()
+            category_value = str(record.get("Category", "") or "").strip()
+            if not (type_value and category_value):
+                continue
+            normalized = self._normalize_type_category_key(type_value, category_value)
+            if normalized in seen_keys:
+                continue
+            seen_keys.add(normalized)
+            unique_records.append((type_value, category_value))
+
+        if not unique_records:
+            messagebox.showinfo(
+                "Combined Order CSV",
+                "No complete Type/Category values were found in the current combined table.",
+            )
+            return
+
+        existing_entries = self._load_combined_order_entries()
+        existing_keys = {
+            self._normalize_type_category_key(type_value, category_value)
+            for type_value, category_value in existing_entries
+        }
+        new_entries = [
+            entry
+            for entry in unique_records
+            if self._normalize_type_category_key(*entry) not in existing_keys
+        ]
+
+        path = self.combined_order_path
+        appended = 0
+        if new_entries:
+            try:
+                write_header = not path.exists() or path.stat().st_size == 0
+            except OSError:
+                write_header = True
+            try:
+                with path.open("a", encoding="utf-8", newline="") as fh:
+                    writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
+                    if write_header:
+                        writer.writerow(["Type", "Category"])
+                    for type_value, category_value in new_entries:
+                        writer.writerow([type_value, category_value])
+                        appended += 1
+            except Exception as exc:
+                messagebox.showerror(
+                    "Combined Order CSV",
+                    f"Could not append new entries: {exc}",
+                )
+                return
+            logger.info(
+                "Appended %d Type/Category combination(s) to %s",
+                appended,
+                path,
+            )
+        else:
+            logger.info("No new Combined Order Type/Category combinations to append.")
+
+        if appended:
+            self._sort_combined_records(self.combined_all_records)
+            if self.combined_ordered_columns:
+                self._update_combined_tree_display()
+            message = f"Appended {appended} new combination(s) to {path.name}."
+        else:
+            message = "No new Type/Category combinations were found."
+
+        messagebox.showinfo(
+            "Combined Order CSV",
+            message + " Opening the file for review.",
+        )
+        self._open_in_file_manager(path)
+
     def _append_type_item_category_csv(self) -> None:
         if not self.combined_all_records:
             messagebox.showinfo(
@@ -4426,6 +4544,12 @@ class ReportApp:
             text="Load Assignments",
             command=self._prompt_import_note_assignments,
         ).grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+        ttk.Button(
+            controls_frame,
+            text="Re-sort by Combined Order",
+            command=self._apply_reference_sort_to_combined,
+        ).grid(row=0, column=2, sticky="e", padx=(8, 0))
 
         tree_container = ttk.Frame(table_container)
         tree_container.grid(row=1, column=0, sticky="nsew")
