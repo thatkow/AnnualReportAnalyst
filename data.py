@@ -3899,22 +3899,39 @@ class ReportApp:
         """Return the rows currently backing the Combined table."""
 
         tree = self.combined_result_tree
-        columns = self.combined_ordered_columns
-        if tree is not None and tree.winfo_exists() and columns:
-            records: List[Dict[str, str]] = []
-            for item_id in tree.get_children(""):
-                values = list(tree.item(item_id, "values"))
-                record: Dict[str, str] = {}
-                for index, column_name in enumerate(columns):
-                    value = values[index] if index < len(values) else ""
-                    record[column_name] = str(value)
-                records.append(record)
-            if records and not self.combined_all_records:
-                # Ensure downstream routines relying on the cached data have
-                # access to the current table state even if it was loaded
-                # outside the standard combine workflow.
-                self.combined_all_records = [dict(record) for record in records]
-            return records
+        if tree is not None and tree.winfo_exists():
+            columns: List[str] = []
+            if self.combined_ordered_columns:
+                columns = list(self.combined_ordered_columns)
+            else:
+                try:
+                    raw_columns = tree["columns"]
+                except (KeyError, tk.TclError):
+                    raw_columns = ()
+                if isinstance(raw_columns, (list, tuple)):
+                    columns = list(raw_columns)
+                elif isinstance(raw_columns, str):
+                    columns = [raw_columns]
+            if columns:
+                records: List[Dict[str, str]] = []
+                for item_id in tree.get_children(""):
+                    raw_values = tree.item(item_id, "values")
+                    if isinstance(raw_values, (list, tuple)):
+                        values = list(raw_values)
+                    else:
+                        values = [raw_values]
+                    record: Dict[str, str] = {}
+                    for index, column_name in enumerate(columns):
+                        value = values[index] if index < len(values) else ""
+                        record[column_name] = str(value)
+                    records.append(record)
+                if records:
+                    # Always keep the cached records synchronized with the
+                    # currently displayed table so downstream workflows can
+                    # operate on the latest data even when the Combined tab
+                    # was populated outside the standard combine workflow.
+                    self.combined_all_records = [dict(record) for record in records]
+                    return records
         return list(self.combined_all_records)
 
     def _normalize_type_item_category_key(
