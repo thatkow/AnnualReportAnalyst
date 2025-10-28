@@ -3981,6 +3981,125 @@ class ReportApp:
         )
         return list(self.combined_all_records)
 
+    def _build_combined_record_map(
+        self,
+    ) -> Dict[Tuple[str, str, str], Dict[Tuple[Path, int], str]]:
+        record_map: Dict[Tuple[str, str, str], Dict[Tuple[Path, int], str]] = {}
+        if not self.combined_pdf_order or not self.combined_csv_sources:
+            return record_map
+        for path in self.combined_pdf_order:
+            for category in COLUMNS:
+                source = self.combined_csv_sources.get((path, category))
+                if not source:
+                    continue
+                rows: List[List[str]] = source.get("rows", [])
+                if not rows:
+                    continue
+                data_indices: List[int] = source.get("data_indices", [])
+                category_index = source.get("category_index")
+                item_index = source.get("item_index")
+                if not isinstance(category_index, int) or not isinstance(item_index, int):
+                    continue
+                for row in rows:
+                    if category_index >= len(row) or item_index >= len(row):
+                        continue
+                    category_value = row[category_index]
+                    item_value = row[item_index]
+                    key = (category, category_value, item_value)
+                    value_map = record_map.setdefault(key, {})
+                    for position in range(self.combined_max_data_columns):
+                        value = ""
+                        if position < len(data_indices):
+                            data_index = data_indices[position]
+                            if data_index < len(row):
+                                value = row[data_index]
+                        value_map[(path, position)] = value
+        return record_map
+
+    def _collect_combined_type_category_pairs(self) -> Tuple[List[Tuple[str, str]], bool]:
+        data_found = False
+        pairs: List[Tuple[str, str]] = []
+        seen_keys: Set[Tuple[str, str]] = set()
+        record_map = self._build_combined_record_map()
+        if record_map:
+            data_found = True
+            for category in COLUMNS:
+                category_keys = [key for key in record_map if key[0] == category]
+                category_keys.sort(key=lambda item: (str(item[1]), str(item[2])))
+                for type_value, category_value, _ in category_keys:
+                    type_text = str(type_value or "").strip()
+                    category_text = str(category_value or "").strip()
+                    if not type_text or not category_text:
+                        continue
+                    normalized = self._normalize_type_category_key(type_text, category_text)
+                    if normalized in seen_keys:
+                        continue
+                    seen_keys.add(normalized)
+                    pairs.append((type_text, category_text))
+        else:
+            fallback_records = self._get_combined_table_records()
+            if fallback_records:
+                data_found = True
+            for record in fallback_records:
+                type_text = str(record.get("Type", "") or "").strip()
+                category_text = str(record.get("Category", "") or "").strip()
+                if not type_text or not category_text:
+                    continue
+                normalized = self._normalize_type_category_key(type_text, category_text)
+                if normalized in seen_keys:
+                    continue
+                seen_keys.add(normalized)
+                pairs.append((type_text, category_text))
+        return pairs, data_found
+
+    def _collect_combined_type_item_category_keys(
+        self,
+    ) -> Tuple[List[Tuple[str, str, str]], bool]:
+        data_found = False
+        keys: List[Tuple[str, str, str]] = []
+        seen_keys: Set[Tuple[str, str, str]] = set()
+        record_map = self._build_combined_record_map()
+        if record_map:
+            data_found = True
+            for category in COLUMNS:
+                category_keys = [key for key in record_map if key[0] == category]
+                category_keys.sort(key=lambda item: (str(item[1]), str(item[2])))
+                for type_value, category_value, item_value in category_keys:
+                    type_text = str(type_value or "").strip()
+                    category_text = str(category_value or "").strip()
+                    item_text = str(item_value or "").strip()
+                    if not (type_text and category_text and item_text):
+                        continue
+                    normalized = self._normalize_type_item_category_key(
+                        type_text,
+                        item_text,
+                        category_text,
+                    )
+                    if normalized in seen_keys:
+                        continue
+                    seen_keys.add(normalized)
+                    keys.append((type_text, item_text, category_text))
+        else:
+            fallback_records = self._get_combined_table_records()
+            if fallback_records:
+                data_found = True
+            for record in fallback_records:
+                type_text = str(record.get("Type", "") or "").strip()
+                category_text = str(record.get("Category", "") or "").strip()
+                item_text = str(record.get("Item", "") or "").strip()
+                if not (type_text and category_text and item_text):
+                    continue
+                normalized = self._normalize_type_item_category_key(
+                    type_text,
+                    item_text,
+                    category_text,
+                )
+                if normalized in seen_keys:
+                    continue
+                seen_keys.add(normalized)
+                keys.append((type_text, item_text, category_text))
+        return keys, data_found
+
     def _normalize_type_item_category_key(
         self, type_value: str, item_value: str, category_value: str
     ) -> Tuple[str, str, str]:
@@ -4273,26 +4392,13 @@ class ReportApp:
             self._update_combined_tree_display()
 
     def _generate_type_category_sort_order_csv(self) -> None:
-        combined_records = self._get_combined_table_records()
-        if not combined_records:
+        unique_records, data_found = self._collect_combined_type_category_pairs()
+        if not unique_records and not data_found:
             messagebox.showinfo(
                 "Type/Category Sort Order",
                 "Load a combined table before generating the Type/Category sort order.",
             )
             return
-
-        seen_keys: Set[Tuple[str, str]] = set()
-        unique_records: List[Tuple[str, str]] = []
-        for record in combined_records:
-            type_value = str(record.get("Type", "") or "").strip()
-            category_value = str(record.get("Category", "") or "").strip()
-            if not type_value or not category_value:
-                continue
-            normalized = self._normalize_type_category_key(type_value, category_value)
-            if normalized in seen_keys:
-                continue
-            seen_keys.add(normalized)
-            unique_records.append((type_value, category_value))
 
         if not unique_records:
             messagebox.showinfo(
@@ -4371,27 +4477,13 @@ class ReportApp:
         self._open_in_file_manager(path)
 
     def _append_combined_order_csv(self) -> None:
-        combined_records = self._get_combined_table_records()
-        if not combined_records:
+        unique_records, data_found = self._collect_combined_type_category_pairs()
+        if not unique_records and not data_found:
             messagebox.showinfo(
                 "Combined Order CSV",
                 "Build the combined table before appending Combined Order entries.",
             )
             return
-
-        current_records = self._filter_combined_records(combined_records)
-        unique_records: List[Tuple[str, str]] = []
-        seen_keys: Set[Tuple[str, str]] = set()
-        for record in current_records:
-            type_value = str(record.get("Type", "") or "").strip()
-            category_value = str(record.get("Category", "") or "").strip()
-            if not (type_value and category_value):
-                continue
-            normalized = self._normalize_type_category_key(type_value, category_value)
-            if normalized in seen_keys:
-                continue
-            seen_keys.add(normalized)
-            unique_records.append((type_value, category_value))
 
         if not unique_records:
             messagebox.showinfo(
@@ -4456,32 +4548,15 @@ class ReportApp:
         self._open_in_file_manager(path)
 
     def _append_type_item_category_csv(self) -> None:
-        combined_records = self._get_combined_table_records()
-        if not combined_records:
+        unique_keys, data_found = self._collect_combined_type_item_category_keys()
+        if not unique_keys and not data_found:
             messagebox.showinfo(
                 "Type/Item/Category CSV",
                 "Build the combined table before appending Type/Item/Category entries.",
             )
             return
 
-        current_records = self._filter_combined_records(combined_records)
-        unique_records: List[Tuple[str, str, str]] = []
-        seen_keys: Set[Tuple[str, str, str]] = set()
-        for record in current_records:
-            type_value = str(record.get("Type", "") or "").strip()
-            category_value = str(record.get("Category", "") or "").strip()
-            item_value = str(record.get("Item", "") or "").strip()
-            if not (type_value and category_value and item_value):
-                continue
-            normalized = self._normalize_type_item_category_key(
-                type_value, item_value, category_value
-            )
-            if normalized in seen_keys:
-                continue
-            seen_keys.add(normalized)
-            unique_records.append((type_value, item_value, category_value))
-
-        if not unique_records:
+        if not unique_keys:
             messagebox.showinfo(
                 "Type/Item/Category CSV",
                 "No complete Type/Item/Category values were found in the current combined table.",
@@ -4495,7 +4570,7 @@ class ReportApp:
         }
         new_entries = [
             entry
-            for entry in unique_records
+            for entry in unique_keys
             if self._normalize_type_item_category_key(*entry) not in existing_keys
         ]
 
@@ -5283,35 +5358,7 @@ class ReportApp:
         self.combined_labels_by_pdf = {path: labels[:] for path, labels in column_labels_by_pdf.items()}
         self.combined_column_name_map = column_name_map
 
-        record_map: Dict[Tuple[str, str, str], Dict[Tuple[Path, int], str]] = {}
-
-        for path in self.combined_pdf_order:
-            for category in COLUMNS:
-                source = self.combined_csv_sources.get((path, category))
-                if not source:
-                    continue
-                rows: List[List[str]] = source.get("rows", [])
-                if not rows:
-                    continue
-                data_indices: List[int] = source.get("data_indices", [])
-                category_index = source.get("category_index")
-                item_index = source.get("item_index")
-                if not isinstance(category_index, int) or not isinstance(item_index, int):
-                    continue
-                for row in rows:
-                    if category_index >= len(row) or item_index >= len(row):
-                        continue
-                    category_value = row[category_index]
-                    item_value = row[item_index]
-                    key = (category, category_value, item_value)
-                    value_map = record_map.setdefault(key, {})
-                    for position in range(self.combined_max_data_columns):
-                        value = ""
-                        if position < len(data_indices):
-                            data_index = data_indices[position]
-                            if data_index < len(row):
-                                value = row[data_index]
-                        value_map[(path, position)] = value
+        record_map = self._build_combined_record_map()
 
         combined_records: List[Dict[str, str]] = []
         self.combined_row_sources = {}
