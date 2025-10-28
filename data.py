@@ -3895,10 +3895,38 @@ class ReportApp:
         # workflow.
         return records
 
+    def _locate_live_combined_tree(self) -> Optional[ttk.Treeview]:
+        container = getattr(self, "combined_result_frame", None)
+        if container is None:
+            return None
+        pending = list(container.winfo_children())
+        while pending:
+            child = pending.pop()
+            try:
+                if not child.winfo_exists():
+                    continue
+            except tk.TclError:
+                continue
+            if isinstance(child, ttk.Treeview):
+                return child
+            try:
+                pending.extend(child.winfo_children())
+            except tk.TclError:
+                continue
+        return None
+
     def _get_combined_table_records(self) -> List[Dict[str, str]]:
         """Return the rows currently backing the Combined table."""
 
         tree = self.combined_result_tree
+        if tree is None or not tree.winfo_exists():
+            fallback_tree = self._locate_live_combined_tree()
+            if fallback_tree is not None:
+                self.combined_result_tree = fallback_tree
+                tree = fallback_tree
+                logger.debug(
+                    "Combined result tree recovered via fallback lookup; harvesting rows",
+                )
         if tree is None or not tree.winfo_exists():
             logger.debug(
                 "Combined result tree unavailable; returning %d cached records",
