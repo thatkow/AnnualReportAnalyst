@@ -16,7 +16,7 @@ from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 try:
     import fitz  # type: ignore[import-untyped]
@@ -142,11 +142,13 @@ class CollapsibleFrame(ttk.Frame):
 
 
 SHIFT_MASK = 0x0001
+CONTROL_MASK = 0x0004
 
 
 class MatchThumbnail:
     SELECTED_COLOR = "#1E90FF"
     UNSELECTED_COLOR = "#c3c3c3"
+    HIGHLIGHTED_COLOR = "#FFD666"
 
     def __init__(self, row: "CategoryRow", match_index: int, match: Match) -> None:
         self.row = row
@@ -183,14 +185,29 @@ class MatchThumbnail:
         elif self.match.pattern:
             info_parts.append(self.match.pattern)
         self.info_label.configure(text=" | ".join(info_parts))
-        self.set_selected(self.match_index == self.entry.current_index.get(self.row.category))
+        self.update_state()
 
     def destroy(self) -> None:
         self.container.destroy()
 
-    def set_selected(self, selected: bool) -> None:
-        color = self.SELECTED_COLOR if selected else self.UNSELECTED_COLOR
-        thickness = 3 if selected else 1
+    def update_state(self) -> None:
+        current_index = self.entry.current_index.get(self.row.category)
+        highlighted = self.app.is_match_highlighted(
+            self.entry, self.row.category, self.match_index
+        )
+        selected = current_index == self.match_index
+        self._apply_state(selected, highlighted)
+
+    def _apply_state(self, selected: bool, highlighted: bool) -> None:
+        if selected:
+            color = self.SELECTED_COLOR
+            thickness = 3
+        elif highlighted:
+            color = self.HIGHLIGHTED_COLOR
+            thickness = 3
+        else:
+            color = self.UNSELECTED_COLOR
+            thickness = 1
         self.container.configure(highlightbackground=color, highlightcolor=color, highlightthickness=thickness)
 
     def _ensure_context_menu(self) -> tk.Menu:
@@ -206,9 +223,23 @@ class MatchThumbnail:
 
     def _on_click(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
         state = getattr(event, "state", 0)
-        if state & SHIFT_MASK:
+        control_pressed = bool(state & CONTROL_MASK)
+        shift_pressed = bool(state & SHIFT_MASK)
+        if control_pressed:
+            was_highlighted = self.app.is_match_highlighted(
+                self.entry, self.row.category, self.match_index
+            )
+            if was_highlighted:
+                self.app._remove_review_highlight(self.entry, self.row.category, self.match_index)
             self.app.open_thumbnail_zoom(self.entry, self.match.page_index)
+            if was_highlighted:
+                self.app._refresh_category_row(self.entry, self.row.category, rebuild=False)
             return "break"
+        if shift_pressed:
+            self.app._add_review_highlight(self.entry, self.row.category, self.match_index)
+            self.app.select_match_index(self.entry, self.row.category, self.match_index)
+            return "break"
+        self.app._set_review_highlights(self.entry, self.row.category, [self.match_index])
         self.app.select_match_index(self.entry, self.row.category, self.match_index)
         return None
 
@@ -266,6 +297,7 @@ class CategoryRow:
             self.empty_label.destroy()
             self.empty_label = None
         matches = self.entry.matches.get(self.category, [])
+        self.app._prune_review_highlights(self.entry, self.category, len(matches))
         if not matches:
             self.empty_label = ttk.Label(self.inner, text="No matches found", foreground="#666666")
             self.empty_label.pack(side=tk.LEFT, padx=8, pady=16)
@@ -277,9 +309,8 @@ class CategoryRow:
         self.frame.after_idle(self._update_scrollbar_visibility)
 
     def update_selection(self) -> None:
-        current_index = self.entry.current_index.get(self.category)
         for thumb in self.thumbnails:
-            thumb.set_selected(current_index == thumb.match_index)
+            thumb.update_state()
 
     def set_thumbnail_width(self, width: int) -> None:
         if width == self.target_width:
@@ -360,6 +391,7 @@ class ReportApp:
         self.whitespace_as_space_vars: Dict[str, tk.BooleanVar] = {}
         self.pdf_entries: List[PDFEntry] = []
         self.pdf_entry_by_path: Dict[Path, PDFEntry] = {}
+        self.review_highlighted_matches: Dict[Tuple[Path, str], Set[int]] = {}
         self.category_rows: Dict[tuple[Path, str], CategoryRow] = {}
         self.year_vars: Dict[Path, tk.StringVar] = {}
         self.year_pattern_text: Optional[tk.Text] = None
@@ -2718,11 +2750,14 @@ class ReportApp:
             for idx, match in enumerate(entry.matches[category]):
                 if match.page_index == page_int:
                     entry.current_index[category] = idx
+                    self._set_review_highlights(entry, category, [idx])
                     found = True
                     break
             if not found:
                 match = self._add_manual_match(entry, category, page_int)
-                entry.current_index[category] = entry.matches[category].index(match)
+                assigned_index = entry.matches[category].index(match)
+                entry.current_index[category] = assigned_index
+                self._set_review_highlights(entry, category, [assigned_index])
         if not entry.year and isinstance(saved, dict):
             stored_year = saved.get("year")
             if isinstance(stored_year, str):
@@ -2736,6 +2771,7 @@ class ReportApp:
                 pass
         self.pdf_entries.clear()
         self.pdf_entry_by_path.clear()
+        self.review_highlighted_matches.clear()
         self.category_rows.clear()
         self.year_vars.clear()
         for child in self.inner_frame.winfo_children():
@@ -2792,6 +2828,49 @@ class ReportApp:
             row.refresh()
         else:
             row.update_selection()
+
+    def _review_highlight_key(self, entry: PDFEntry, category: str) -> Tuple[Path, str]:
+        return (entry.path, category)
+
+    def _prune_review_highlights(self, entry: PDFEntry, category: str, match_count: int) -> None:
+        key = self._review_highlight_key(entry, category)
+        highlights = self.review_highlighted_matches.get(key)
+        if not highlights:
+            return
+        filtered = {idx for idx in highlights if 0 <= idx < match_count}
+        if filtered:
+            self.review_highlighted_matches[key] = filtered
+        else:
+            self.review_highlighted_matches.pop(key, None)
+
+    def _set_review_highlights(
+        self, entry: PDFEntry, category: str, indexes: Iterable[int]
+    ) -> None:
+        key = self._review_highlight_key(entry, category)
+        normalized = {int(idx) for idx in indexes}
+        if normalized:
+            self.review_highlighted_matches[key] = normalized
+        else:
+            self.review_highlighted_matches.pop(key, None)
+
+    def _add_review_highlight(self, entry: PDFEntry, category: str, index: int) -> None:
+        key = self._review_highlight_key(entry, category)
+        highlights = self.review_highlighted_matches.setdefault(key, set())
+        highlights.add(int(index))
+
+    def _remove_review_highlight(self, entry: PDFEntry, category: str, index: int) -> None:
+        key = self._review_highlight_key(entry, category)
+        highlights = self.review_highlighted_matches.get(key)
+        if not highlights:
+            return
+        highlights.discard(int(index))
+        if not highlights:
+            self.review_highlighted_matches.pop(key, None)
+
+    def is_match_highlighted(self, entry: PDFEntry, category: str, index: int) -> bool:
+        key = self._review_highlight_key(entry, category)
+        highlights = self.review_highlighted_matches.get(key)
+        return bool(highlights and int(index) in highlights)
 
     def select_match_index(self, entry: PDFEntry, category: str, index: int) -> None:
         matches = entry.matches.get(category, [])
@@ -2878,8 +2957,14 @@ class ReportApp:
                             entry.current_index[column] = 0
                     else:
                         entry.current_index[column] = 0
+                    assigned_index = entry.current_index[column]
+                    if assigned_index is not None:
+                        self._set_review_highlights(entry, column, [assigned_index])
+                    else:
+                        self._set_review_highlights(entry, column, [])
                 else:
                     entry.current_index[column] = None
+                    self._set_review_highlights(entry, column, [])
 
                 self._refresh_category_row(entry, column, rebuild=True)
 
@@ -2932,6 +3017,11 @@ class ReportApp:
                 messagebox.showinfo("Start of Matches", "Reached the first matched page.")
                 return
             entry.current_index[category] = current_index - 1
+        new_index = entry.current_index.get(category)
+        if new_index is not None:
+            self._set_review_highlights(entry, category, [new_index])
+        else:
+            self._set_review_highlights(entry, category, [])
         self._refresh_category_row(entry, category, rebuild=False)
         page_index = self._get_selected_page_index(entry, category)
         if page_index is not None:
@@ -3165,13 +3255,16 @@ class ReportApp:
         for idx, match in enumerate(matches):
             if match.page_index == page_index:
                 entry.current_index[category] = idx
+                self._set_review_highlights(entry, category, [idx])
                 self._refresh_category_row(entry, category, rebuild=False)
                 self._update_assigned_entry(entry, category, page_index, persist=False)
                 self._maybe_reapply_primary_match_filter(entry)
                 return
 
         match = self._add_manual_match(entry, category, page_index)
-        entry.current_index[category] = entry.matches[category].index(match)
+        assigned_index = entry.matches[category].index(match)
+        entry.current_index[category] = assigned_index
+        self._set_review_highlights(entry, category, [assigned_index])
         self._refresh_category_row(entry, category, rebuild=True)
         self._update_assigned_entry(entry, category, page_index, persist=False)
         self._maybe_reapply_primary_match_filter(entry)
@@ -3565,10 +3658,10 @@ class ReportApp:
 
         type_header_map: Dict[str, Dict[Path, Dict[str, Any]]] = {}
         type_heading_labels: Dict[str, Tuple[str, str]] = {}
-        pdf_entries_with_data: List[PDFEntry] = []
+        pdf_entries_with_data: List[Tuple[PDFEntry, int, int]] = []
         max_data_columns = 0
 
-        for entry in self.pdf_entries:
+        for entry_position, entry in enumerate(self.pdf_entries):
             entry_stem = entry.stem
             metadata_path = self._metadata_file_for_entry(scrape_root, entry_stem)
             metadata: Dict[str, Any] = {}
@@ -3581,10 +3674,23 @@ class ReportApp:
             if not metadata:
                 continue
             entry_has_data = False
+            min_page_index: Optional[int] = None
             for category in COLUMNS:
                 meta = metadata.get(category)
                 if not isinstance(meta, dict):
                     continue
+                page_value = meta.get("page_index")
+                page_index: Optional[int]
+                try:
+                    page_index = int(page_value)
+                except (TypeError, ValueError):
+                    try:
+                        page_index = int(float(page_value))
+                    except (TypeError, ValueError):
+                        page_index = None
+                if page_index is not None:
+                    if min_page_index is None or page_index < min_page_index:
+                        min_page_index = page_index
                 rows: List[List[str]] = []
                 txt_name = meta.get("txt")
                 if isinstance(txt_name, str) and txt_name:
@@ -3661,7 +3767,8 @@ class ReportApp:
                 max_data_columns = max(max_data_columns, len(display_headers))
                 entry_has_data = True
             if entry_has_data:
-                pdf_entries_with_data.append(entry)
+                normalized_page = min_page_index if min_page_index is not None else sys.maxsize
+                pdf_entries_with_data.append((entry, normalized_page, entry_position))
 
         if not pdf_entries_with_data:
             ttk.Label(
@@ -3670,7 +3777,8 @@ class ReportApp:
             ).grid(row=0, column=0, sticky="w", padx=8, pady=8)
             return
 
-        self.combined_pdf_order = [entry.path for entry in pdf_entries_with_data]
+        pdf_entries_with_data.sort(key=lambda item: (item[1], item[2], item[0].path.name.lower()))
+        self.combined_pdf_order = [entry.path for entry, _page, _pos in pdf_entries_with_data]
         self.combined_max_data_columns = max_data_columns
         logger.info(
             "Combined PDF order: %s with max data columns=%d",
