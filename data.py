@@ -108,7 +108,7 @@ class ScrapeTask:
     entry_name: str
     entry_year: str
     category: str
-    page_index: int
+    page_indexes: List[int]
     prompt_text: str
     page_text: str
     scrape_root: Path
@@ -2742,22 +2742,72 @@ class ReportApp:
         selections = saved.get("selections") if isinstance(saved, dict) else None
         if selections is None:
             selections = saved
-        for category, page_index in selections.items():
-            if category not in entry.matches:
+        highlight_sources: Dict[str, Iterable[Any]] = {}
+        if isinstance(saved, dict):
+            raw_highlights = saved.get("highlights")
+            if isinstance(raw_highlights, dict):
+                for category, stored_pages in raw_highlights.items():
+                    if isinstance(stored_pages, (list, tuple, set)):
+                        highlight_sources[category] = stored_pages
+                    else:
+                        highlight_sources[category] = [stored_pages]
+
+        highlight_indexes: Dict[str, List[int]] = {}
+        for category, values in highlight_sources.items():
+            matches = entry.matches.get(category)
+            if matches is None:
                 continue
-            page_int = int(page_index)
-            found = False
-            for idx, match in enumerate(entry.matches[category]):
+            indexes: List[int] = []
+            for value in values:
+                try:
+                    page_int = int(value)
+                except (TypeError, ValueError):
+                    continue
+                target_idx: Optional[int] = None
+                for idx, match in enumerate(matches):
+                    if match.page_index == page_int:
+                        target_idx = idx
+                        break
+                if target_idx is None:
+                    match = self._add_manual_match(entry, category, page_int)
+                    matches = entry.matches[category]
+                    target_idx = matches.index(match)
+                if target_idx not in indexes:
+                    indexes.append(target_idx)
+            if indexes:
+                self._set_review_highlights(entry, category, indexes)
+                resolved_indexes = self._get_highlight_match_indexes(entry, category)
+                if resolved_indexes:
+                    highlight_indexes[category] = resolved_indexes
+                    entry.current_index[category] = resolved_indexes[0]
+
+        for category, page_index in selections.items():
+            matches = entry.matches.get(category)
+            if matches is None:
+                continue
+            try:
+                page_int = int(page_index)
+            except (TypeError, ValueError):
+                continue
+            target_idx: Optional[int] = None
+            for idx, match in enumerate(matches):
                 if match.page_index == page_int:
-                    entry.current_index[category] = idx
-                    self._set_review_highlights(entry, category, [idx])
-                    found = True
+                    target_idx = idx
                     break
-            if not found:
+            if target_idx is None:
                 match = self._add_manual_match(entry, category, page_int)
-                assigned_index = entry.matches[category].index(match)
-                entry.current_index[category] = assigned_index
-                self._set_review_highlights(entry, category, [assigned_index])
+                matches = entry.matches[category]
+                target_idx = matches.index(match)
+            existing = highlight_indexes.get(category)
+            if existing:
+                if target_idx not in existing:
+                    new_indexes = existing + [target_idx]
+                    self._set_review_highlights(entry, category, new_indexes)
+                    highlight_indexes[category] = self._get_highlight_match_indexes(entry, category)
+            else:
+                self._set_review_highlights(entry, category, [target_idx])
+                highlight_indexes[category] = self._get_highlight_match_indexes(entry, category)
+            entry.current_index[category] = target_idx
         if not entry.year and isinstance(saved, dict):
             stored_year = saved.get("year")
             if isinstance(stored_year, str):
@@ -2842,6 +2892,75 @@ class ReportApp:
             self.review_highlighted_matches[key] = filtered
         else:
             self.review_highlighted_matches.pop(key, None)
+        self._sync_entry_highlights(entry, category, persist=False)
+
+    def _get_highlight_match_indexes(self, entry: PDFEntry, category: str) -> List[int]:
+        key = self._review_highlight_key(entry, category)
+        highlights = self.review_highlighted_matches.get(key)
+        if not highlights:
+            return []
+        matches = entry.matches.get(category, [])
+        if not matches:
+            return []
+        valid_indexes: List[int] = []
+        for idx in sorted(highlights):
+            if 0 <= idx < len(matches):
+                valid_indexes.append(int(idx))
+        return valid_indexes
+
+    def _get_highlight_page_numbers(self, entry: PDFEntry, category: str) -> List[int]:
+        matches = entry.matches.get(category, [])
+        if not matches:
+            return []
+        indexes = self._get_highlight_match_indexes(entry, category)
+        if not indexes:
+            return []
+        seen: Set[int] = set()
+        pages: List[int] = []
+        for idx in sorted(indexes, key=lambda i: matches[i].page_index if 0 <= i < len(matches) else i):
+            if 0 <= idx < len(matches):
+                page_value = int(matches[idx].page_index)
+                if page_value not in seen:
+                    seen.add(page_value)
+                    pages.append(page_value)
+        return pages
+
+    def _ensure_assigned_record(self, entry: PDFEntry) -> Dict[str, Any]:
+        key = entry.path.name
+        record = self.assigned_pages.get(key)
+        if not isinstance(record, dict):
+            record = {"selections": {}, "year": entry.year}
+            self.assigned_pages[key] = record
+        if entry.year:
+            record["year"] = entry.year
+        selections = record.get("selections")
+        if not isinstance(selections, dict):
+            selections = {}
+            record["selections"] = selections
+        return record
+
+    def _sync_entry_highlights(
+        self, entry: PDFEntry, category: str, *, persist: bool = False
+    ) -> None:
+        pages = self._get_highlight_page_numbers(entry, category)
+        existing_record = self.assigned_pages.get(entry.path.name)
+        if not pages and not isinstance(existing_record, dict):
+            return
+        record = self._ensure_assigned_record(entry)
+        highlights = record.get("highlights")
+        if not isinstance(highlights, dict):
+            highlights = {}
+            record["highlights"] = highlights
+        if pages:
+            highlights[category] = list(pages)
+        else:
+            highlights.pop(category, None)
+            if not highlights:
+                record.pop("highlights", None)
+                if not record.get("selections") and not record.get("year"):
+                    self.assigned_pages.pop(entry.path.name, None)
+        if persist:
+            self._write_assigned_pages()
 
     def _set_review_highlights(
         self, entry: PDFEntry, category: str, indexes: Iterable[int]
@@ -2852,11 +2971,13 @@ class ReportApp:
             self.review_highlighted_matches[key] = normalized
         else:
             self.review_highlighted_matches.pop(key, None)
+        self._sync_entry_highlights(entry, category, persist=False)
 
     def _add_review_highlight(self, entry: PDFEntry, category: str, index: int) -> None:
         key = self._review_highlight_key(entry, category)
         highlights = self.review_highlighted_matches.setdefault(key, set())
         highlights.add(int(index))
+        self._sync_entry_highlights(entry, category, persist=False)
 
     def _remove_review_highlight(self, entry: PDFEntry, category: str, index: int) -> None:
         key = self._review_highlight_key(entry, category)
@@ -2866,6 +2987,7 @@ class ReportApp:
         highlights.discard(int(index))
         if not highlights:
             self.review_highlighted_matches.pop(key, None)
+        self._sync_entry_highlights(entry, category, persist=False)
 
     def is_match_highlighted(self, entry: PDFEntry, category: str, index: int) -> bool:
         key = self._review_highlight_key(entry, category)
@@ -3281,12 +3403,10 @@ class ReportApp:
     def _update_assigned_entry(
         self, entry: PDFEntry, category: str, page_index: int, *, persist: bool = False
     ) -> None:
-        key = entry.path.name
-        record = self.assigned_pages.setdefault(key, {"selections": {}, "year": entry.year})
+        record = self._ensure_assigned_record(entry)
         selections = record.setdefault("selections", {})
         selections[category] = int(page_index)
-        if entry.year:
-            record["year"] = entry.year
+        self._sync_entry_highlights(entry, category, persist=False)
         if persist:
             self._write_assigned_pages()
 
@@ -3316,17 +3436,23 @@ class ReportApp:
 
         if self.pdf_entries:
             for entry in self.pdf_entries:
-                record = self.assigned_pages.setdefault(
-                    entry.path.name, {"selections": {}, "year": entry.year}
-                )
+                record = self._ensure_assigned_record(entry)
                 record["year"] = entry.year
                 selections = record.setdefault("selections", {})
+                highlights = record.setdefault("highlights", {})
                 for category in COLUMNS:
                     page_index = self._get_selected_page_index(entry, category)
                     if page_index is None:
                         selections.pop(category, None)
                     else:
                         selections[category] = int(page_index)
+                    highlight_pages = self._get_highlight_page_numbers(entry, category)
+                    if highlight_pages:
+                        highlights[category] = list(highlight_pages)
+                    else:
+                        highlights.pop(category, None)
+                if not highlights:
+                    record.pop("highlights", None)
 
         self._write_assigned_pages()
         self._refresh_scraped_tab()
@@ -6728,12 +6854,12 @@ class ReportApp:
         scrape_root.mkdir(parents=True, exist_ok=True)
 
         errors: List[str] = []
-        pending: List[Tuple[PDFEntry, List[Tuple[str, int]]]] = []
+        pending: List[Tuple[PDFEntry, List[Tuple[str, List[int]]]]] = []
         metadata_cache: Dict[Path, Dict[str, Any]] = {}
         metadata_path_map: Dict[Path, Path] = {}
 
         for entry in self.pdf_entries:
-            entry_tasks: List[Tuple[str, int]] = []
+            entry_tasks: List[Tuple[str, List[int]]] = []
             entry_stem = entry.stem
             metadata_path = self._metadata_file_for_entry(scrape_root, entry_stem)
             if metadata_path.exists():
@@ -6750,8 +6876,14 @@ class ReportApp:
             metadata_cache[entry.path] = metadata
             metadata_path_map[entry.path] = metadata_path
             for category in COLUMNS:
-                page_index = self._get_selected_page_index(entry, category)
-                if page_index is None:
+                page_indexes = self._get_highlight_page_numbers(entry, category)
+                if not page_indexes:
+                    page_index = self._get_selected_page_index(entry, category)
+                    if page_index is None:
+                        continue
+                    page_indexes = [int(page_index)]
+                normalized_indexes = sorted({int(idx) for idx in page_indexes})
+                if not normalized_indexes:
                     continue
                 if not prompts.get(category):
                     continue
@@ -6775,7 +6907,7 @@ class ReportApp:
                                 file_exists = True
                 if file_exists:
                     continue
-                entry_tasks.append((category, page_index))
+                entry_tasks.append((category, normalized_indexes))
 
             if entry_tasks:
                 pending.append((entry, entry_tasks))
@@ -6815,7 +6947,8 @@ class ReportApp:
 
             metadata_entry = {
                 "csv": csv_path.name,
-                "page_index": job.page_index,
+                "page_index": job.page_indexes[0] if job.page_indexes else None,
+                "page_indexes": list(job.page_indexes),
                 "year": job.entry_year,
             }
             return True, metadata_entry, None
@@ -6828,7 +6961,7 @@ class ReportApp:
                 metadata = dict(metadata)
                 metadata_cache[entry.path] = metadata
                 metadata_changed.setdefault(entry.path, False)
-                for category, page_index in tasks:
+                for category, page_indexes in tasks:
                     removed = metadata.pop(category, None)
                     if removed is not None:
                         metadata_changed[entry.path] = True
@@ -6839,26 +6972,33 @@ class ReportApp:
                             self.scrape_progress["value"] = attempted
                             self.root.update()
                         continue
-                    try:
-                        page = entry.doc.load_page(page_index)
-                        page_text = page.get_text("text")
-                    except Exception as exc:
-                        errors.append(f"{entry.path.name} - {category}: Could not read page ({exc})")
+                    page_text_parts: List[str] = []
+                    successful_pages: List[int] = []
+                    for page_index in page_indexes:
+                        try:
+                            page = entry.doc.load_page(page_index)
+                            page_text_parts.append(page.get_text("text"))
+                            successful_pages.append(int(page_index))
+                        except Exception as exc:
+                            errors.append(
+                                f"{entry.path.name} - {category}: Could not read page {page_index + 1} ({exc})"
+                            )
+                    if not successful_pages:
                         attempted += 1
                         if hasattr(self, "scrape_progress"):
                             self.scrape_progress["value"] = attempted
                             self.root.update()
                         continue
-
+                    combined_text = "\n\n".join(part for part in page_text_parts if part)
                     jobs.append(
                         ScrapeTask(
                             entry_path=entry.path,
                             entry_name=entry.path.name,
                             entry_year=entry.year,
                             category=category,
-                            page_index=page_index,
+                            page_indexes=successful_pages,
                             prompt_text=prompt_text,
-                            page_text=page_text,
+                            page_text=combined_text,
                             scrape_root=scrape_root,
                         )
                     )
