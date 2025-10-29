@@ -370,7 +370,8 @@ class ReportApp:
         self.prompts_dir = self.app_root / "prompts"
         self.pattern_config_path = self.app_root / "pattern_config.json"
         self.type_item_category_path = self.app_root / "type_item_category.csv"
-        self.type_category_sort_order_path = self.app_root / "type_category_sort_order.csv"
+        self.combined_order_path = self.app_root / "combined_order.csv"
+        self.type_category_sort_order_path = self.combined_order_path
         self.global_note_assignments_path = self.app_root / "type_category_item_assignments.csv"
         self.config_data: Dict[str, Any] = {}
         self.last_company_preference: str = ""
@@ -3949,6 +3950,64 @@ class ReportApp:
             logger.warning("Could not read %s: %s", path, exc)
         return entries
 
+    def _ensure_combined_order_entries(self, records: List[Dict[str, str]]) -> None:
+        if not records:
+            return
+        path = getattr(self, "combined_order_path", None)
+        if path is None:
+            return
+        unique_records: List[Tuple[str, str]] = []
+        seen_keys: Set[Tuple[str, str]] = set()
+        for record in records:
+            type_value = str(record.get("Type", "") or "").strip()
+            category_value = str(record.get("Category", "") or "").strip()
+            if not type_value or not category_value:
+                continue
+            normalized = self._normalize_type_category_key(type_value, category_value)
+            if normalized in seen_keys:
+                continue
+            seen_keys.add(normalized)
+            unique_records.append((type_value, category_value))
+        if not unique_records:
+            return
+        existing_entries = self._load_type_category_entries()
+        existing_keys = {
+            self._normalize_type_category_key(type_value, category_value)
+            for type_value, category_value in existing_entries
+        }
+        new_entries = [
+            entry
+            for entry in unique_records
+            if self._normalize_type_category_key(*entry) not in existing_keys
+        ]
+        try:
+            should_initialize = not path.exists() or path.stat().st_size == 0
+        except OSError:
+            should_initialize = False
+        if should_initialize:
+            entries_to_write = unique_records
+            mode = "w"
+        else:
+            entries_to_write = new_entries
+            mode = "a"
+        if not entries_to_write:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open(mode, encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
+                if should_initialize:
+                    writer.writerow(["Type", "Category"])
+                for type_value, category_value in entries_to_write:
+                    writer.writerow([type_value, category_value])
+            logger.info(
+                "Recorded %d Type/Category combination(s) in %s",
+                len(entries_to_write),
+                path,
+            )
+        except Exception as exc:
+            logger.warning("Could not update %s: %s", path, exc)
+
     def _load_type_category_order_map(self) -> Dict[Tuple[str, str], int]:
         entries = self._load_type_category_entries()
         order: Dict[Tuple[str, str], int] = {}
@@ -4150,6 +4209,16 @@ class ReportApp:
         self._sort_combined_records(self.combined_all_records)
         if self.combined_ordered_columns:
             self._update_combined_tree_display()
+
+    def _on_resort_combined_clicked(self) -> None:
+        if not self.combined_all_records:
+            messagebox.showinfo(
+                "Combined Order",
+                "Build the combined table before sorting by the combined order file.",
+            )
+            return
+        self._ensure_combined_order_entries(self.combined_all_records)
+        self._apply_reference_sort_to_combined()
 
     def _generate_type_category_sort_order_csv(self) -> None:
         if not self.combined_all_records:
@@ -4426,6 +4495,12 @@ class ReportApp:
             text="Load Assignments",
             command=self._prompt_import_note_assignments,
         ).grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+        ttk.Button(
+            controls_frame,
+            text="Sort by Combined Order",
+            command=self._on_resort_combined_clicked,
+        ).grid(row=0, column=2, sticky="e", padx=(8, 0))
 
         tree_container = ttk.Frame(table_container)
         tree_container.grid(row=1, column=0, sticky="nsew")
@@ -5142,6 +5217,7 @@ class ReportApp:
                     ] = ordered_sources
                 combined_records.append(record)
 
+        self._ensure_combined_order_entries(combined_records)
         self._sort_combined_records(combined_records)
 
         logger.info(
