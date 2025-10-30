@@ -748,6 +748,9 @@ class ReportApp:
         page_index = int(page_indexes[position])
         state["current_page"] = page_index
         self.open_thumbnail_zoom(entry, page_index)
+        info = state.get("table_info") if isinstance(state, dict) else None
+        if isinstance(info, dict):
+            self._update_scraped_open_button(info)
         return "break"
 
     def _cycle_scraped_preview(self, widget: tk.Widget, direction: int = 1) -> None:
@@ -787,6 +790,9 @@ class ReportApp:
         base_text = state.get("title_base_text")
         if isinstance(title_label, ttk.Label) and isinstance(base_text, str):
             title_label.configure(text=f"{base_text} (Page {page_index + 1})")
+        info = state.get("table_info") if isinstance(state, dict) else None
+        if isinstance(info, dict):
+            self._update_scraped_open_button(info)
 
     def _on_scraped_image_frame_resize(
         self, event: tk.Event, widget: tk.Widget
@@ -3873,6 +3879,7 @@ class ReportApp:
                 table_frame.grid(row=row_index, column=1, sticky="nsew", padx=4)
                 self.scraped_inner.rowconfigure(row_index, weight=1)
 
+                preview_widget: Optional[tk.Widget] = None
                 photo = self._render_page(entry.doc, int(display_page_index), pdf_target_width)
                 if photo is not None:
                     self.scraped_images.append(photo)
@@ -3896,6 +3903,7 @@ class ReportApp:
                         "title_label": title_label,
                         "title_base_text": base_header_text,
                     }
+                    preview_widget = image_label
                     image_frame.bind(
                         "<Configure>",
                         lambda event, lbl=image_label: self._on_scraped_image_frame_resize(
@@ -3967,13 +3975,21 @@ class ReportApp:
                     )
                     divide_button.grid(row=0, column=2, sticky="e", padx=(0, 4))
 
+                    open_page_button = ttk.Button(
+                        controls_frame,
+                        text="Open Page",
+                        command=lambda t=tree: self._open_scraped_table_preview(t),
+                        width=12,
+                    )
+                    open_page_button.grid(row=0, column=3, sticky="e", padx=(0, 4))
+
                     delete_row_button = ttk.Button(
                         controls_frame,
                         text="Delete Row",
                         command=lambda t=tree: self._delete_scraped_row(t),
                         width=12,
                     )
-                    delete_row_button.grid(row=0, column=3, sticky="e")
+                    delete_row_button.grid(row=0, column=4, sticky="e")
 
                     info = {
                         "header": list(headings),
@@ -3986,9 +4002,16 @@ class ReportApp:
                         "category": category,
                         "button": delete_row_button,
                         "scale_buttons": (multiply_button, divide_button),
+                        "open_button": open_page_button,
+                        "preview_widget": preview_widget,
+                        "entry": entry,
                         "scalable_columns": scalable_columns,
                     }
                     self.scraped_table_sources[tree] = info
+                    if isinstance(preview_widget, tk.Widget):
+                        state = self.scraped_preview_states.get(preview_widget)
+                        if isinstance(state, dict):
+                            state["table_info"] = info
                     self._update_scraped_controls_state(info)
 
                 row_index += 1
@@ -4022,6 +4045,39 @@ class ReportApp:
                         button.state(["!disabled"])
                     else:
                         button.state(["disabled"])
+
+        self._update_scraped_open_button(info)
+
+    def _update_scraped_open_button(self, info: Dict[str, Any]) -> None:
+        open_button = info.get("open_button")
+        if not isinstance(open_button, ttk.Button):
+            return
+        preview_widget = info.get("preview_widget")
+        if not isinstance(preview_widget, tk.Widget):
+            open_button.state(["disabled"])
+            return
+        state = self.scraped_preview_states.get(preview_widget)
+        entry = state.get("entry") if isinstance(state, dict) else None
+        page_index = state.get("current_page") if isinstance(state, dict) else None
+        if isinstance(entry, PDFEntry) and isinstance(page_index, int) and page_index >= 0:
+            open_button.state(["!disabled"])
+        else:
+            open_button.state(["disabled"])
+
+    def _open_scraped_table_preview(self, tree: ttk.Treeview) -> None:
+        info = self.scraped_table_sources.get(tree)
+        if not isinstance(info, dict):
+            return
+        preview_widget = info.get("preview_widget")
+        if not isinstance(preview_widget, tk.Widget):
+            return
+        state = self.scraped_preview_states.get(preview_widget)
+        if not isinstance(state, dict):
+            return
+        entry = state.get("entry")
+        page_index = state.get("current_page")
+        if isinstance(entry, PDFEntry) and isinstance(page_index, int) and page_index >= 0:
+            self.open_thumbnail_zoom(entry, page_index)
 
     def _refresh_scraped_tree_display(self, tree: ttk.Treeview, info: Dict[str, Any]) -> None:
         for item in tree.get_children():
