@@ -469,6 +469,10 @@ class ReportApp:
         self.scraped_table_sources: Dict[ttk.Treeview, Dict[str, Any]] = {}
         self.specialism_prompt_overrides: Dict[str, Dict[str, str]] = {}
         self.specialism_prompt_paths: Dict[str, Dict[str, Path]] = {}
+        self.specialism_status_vars: Dict[str, tk.StringVar] = {}
+        self.specialism_status_labels: Dict[str, ttk.Label] = {}
+        self.specialism_buttons: Dict[str, ttk.Button] = {}
+        self.specialism_controls_frame: Optional[ttk.Frame] = None
         self.combined_split_pane: Optional[ttk.Panedwindow] = None
         self.combined_preview_detail_var = tk.StringVar(
             master=self.root, value="Select a row to view the PDF page."
@@ -615,6 +619,28 @@ class ReportApp:
             command=self._delete_all_scraped,
         )
         self.delete_all_button.pack(side=tk.RIGHT, padx=(8, 0))
+        specialism_controls = ttk.Frame(scraped_controls)
+        specialism_controls.pack(side=tk.RIGHT, padx=(0, 8))
+        self.specialism_controls_frame = specialism_controls
+        self.specialism_status_vars.clear()
+        self.specialism_status_labels.clear()
+        self.specialism_buttons.clear()
+        for category in reversed(COLUMNS):
+            category_frame = ttk.Frame(specialism_controls)
+            category_frame.pack(side=tk.LEFT, padx=(4, 0))
+            status_var = tk.StringVar(master=self.root, value="")
+            button = ttk.Button(
+                category_frame,
+                text=f"{category} Prompt",
+                command=lambda c=category: self._prompt_load_specialism_prompt(c),
+                width=18,
+            )
+            button.pack(side=tk.TOP, fill=tk.X)
+            status_label = ttk.Label(category_frame, textvariable=status_var, anchor="center")
+            status_label.pack(side=tk.TOP, fill=tk.X)
+            self.specialism_status_vars[category] = status_var
+            self.specialism_status_labels[category] = status_label
+            self.specialism_buttons[category] = button
         self.scraped_canvas = tk.Canvas(scraped_container)
         self.scraped_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scraped_scrollbar = ttk.Scrollbar(scraped_container, orient=tk.VERTICAL, command=self.scraped_canvas.yview)
@@ -624,6 +650,8 @@ class ReportApp:
         self.scraped_window = self.scraped_canvas.create_window((0, 0), window=self.scraped_inner, anchor="nw")
         self.scraped_inner.bind("<Configure>", lambda _e: self.scraped_canvas.configure(scrollregion=self.scraped_canvas.bbox("all")))
         self.scraped_canvas.bind("<Configure>", lambda e: self.scraped_canvas.itemconfigure(self.scraped_window, width=e.width))
+        self._refresh_specialism_status()
+        self._update_specialism_controls_state()
 
         labels_tab = ttk.Frame(notebook)
         self.combined_labels_tab = labels_tab
@@ -1097,6 +1125,8 @@ class ReportApp:
             self.note_assignments_path = None
             if self.embedded:
                 self._reset_review_scroll()
+            self._refresh_specialism_status(company="")
+            self._update_specialism_controls_state()
             return
         folder = self.companies_dir / company / "raw"
         self.folder_path.set(str(folder))
@@ -1107,6 +1137,8 @@ class ReportApp:
             self._reset_review_scroll()
         else:
             self._load_note_assignments(company)
+        self._refresh_specialism_status(company=company)
+        self._update_specialism_controls_state()
         if self._config_loaded:
             self._update_last_company(company)
 
@@ -3675,6 +3707,8 @@ class ReportApp:
         self.scraped_table_sources = {}
         self.scraped_preview_states = {}
         self._clear_combined_tab()
+        self._refresh_specialism_status()
+        self._update_specialism_controls_state()
         if hasattr(self, "scrape_progress"):
             self.scrape_progress["value"] = 0
         company = self.company_var.get()
@@ -3933,11 +3967,6 @@ class ReportApp:
                     controls_frame = ttk.Frame(table_frame)
                     controls_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
                     controls_frame.columnconfigure(0, weight=1)
-                    specialism_status_var = tk.StringVar(master=self.root, value="")
-                    specialism_status_label = ttk.Label(
-                        controls_frame, textvariable=specialism_status_var
-                    )
-                    specialism_status_label.grid(row=0, column=0, sticky="w")
                     tree = ttk.Treeview(
                         table_frame,
                         columns=columns,
@@ -3991,21 +4020,13 @@ class ReportApp:
                     )
                     open_page_button.grid(row=0, column=3, sticky="e", padx=(0, 4))
 
-                    specialism_button = ttk.Button(
-                        controls_frame,
-                        text="Load Specialism Prompt",
-                        command=lambda t=tree: self._prompt_load_specialism_prompt(t),
-                        width=22,
-                    )
-                    specialism_button.grid(row=0, column=4, sticky="e", padx=(0, 4))
-
                     relabel_button = ttk.Button(
                         controls_frame,
                         text="Relabel Dates",
                         command=lambda t=tree: self._prompt_relabel_scraped_dates(t),
                         width=14,
                     )
-                    relabel_button.grid(row=0, column=5, sticky="e", padx=(0, 4))
+                    relabel_button.grid(row=0, column=4, sticky="e", padx=(0, 4))
 
                     dedupe_button = ttk.Button(
                         controls_frame,
@@ -4013,7 +4034,7 @@ class ReportApp:
                         command=lambda t=tree: self._dedupe_scraped_headers(t),
                         width=18,
                     )
-                    dedupe_button.grid(row=0, column=6, sticky="e", padx=(0, 4))
+                    dedupe_button.grid(row=0, column=5, sticky="e", padx=(0, 4))
 
                     dedupe_items_button = ttk.Button(
                         controls_frame,
@@ -4021,7 +4042,7 @@ class ReportApp:
                         command=lambda t=tree: self._dedupe_scraped_items(t),
                         width=18,
                     )
-                    dedupe_items_button.grid(row=0, column=7, sticky="e", padx=(0, 4))
+                    dedupe_items_button.grid(row=0, column=6, sticky="e", padx=(0, 4))
 
                     delete_row_button = ttk.Button(
                         controls_frame,
@@ -4029,7 +4050,7 @@ class ReportApp:
                         command=lambda t=tree: self._delete_scraped_row(t),
                         width=12,
                     )
-                    delete_row_button.grid(row=0, column=8, sticky="e", padx=(0, 4))
+                    delete_row_button.grid(row=0, column=7, sticky="e", padx=(0, 4))
 
                     delete_column_button = tk.Menubutton(
                         controls_frame,
@@ -4038,7 +4059,7 @@ class ReportApp:
                         relief=tk.RAISED,
                         direction="below",
                     )
-                    delete_column_button.grid(row=0, column=9, sticky="e")
+                    delete_column_button.grid(row=0, column=8, sticky="e")
                     delete_column_menu = tk.Menu(delete_column_button, tearoff=False)
                     delete_column_button.configure(menu=delete_column_menu)
 
@@ -4057,9 +4078,6 @@ class ReportApp:
                         "relabel_button": relabel_button,
                         "dedupe_button": dedupe_button,
                         "dedupe_items_button": dedupe_items_button,
-                        "specialism_button": specialism_button,
-                        "specialism_status_var": specialism_status_var,
-                        "specialism_status_label": specialism_status_label,
                         "delete_column_button": delete_column_button,
                         "delete_column_menu": delete_column_menu,
                         "preview_widget": preview_widget,
@@ -4134,13 +4152,6 @@ class ReportApp:
             else:
                 dedupe_items_button.state(["disabled"])
 
-        specialism_button = info.get("specialism_button")
-        if isinstance(specialism_button, ttk.Button):
-            if self.company_var.get().strip():
-                specialism_button.state(["!disabled"])
-            else:
-                specialism_button.state(["disabled"])
-
         delete_column_button = info.get("delete_column_button")
         if isinstance(delete_column_button, tk.Menubutton):
             if has_csv and len(header) > 2:
@@ -4149,7 +4160,6 @@ class ReportApp:
                 delete_column_button.configure(state="disabled")
         self._populate_delete_column_menu(info)
 
-        self._update_specialism_status(info)
         self._update_scraped_open_button(info)
 
     def _update_scraped_open_button(self, info: Dict[str, Any]) -> None:
@@ -4168,40 +4178,48 @@ class ReportApp:
         else:
             open_button.state(["disabled"])
 
-    def _update_specialism_status(
-        self, info: Dict[str, Any], *, company: Optional[str] = None
-    ) -> None:
-        status_var = info.get("specialism_status_var")
-        if not isinstance(status_var, tk.StringVar):
-            return
-        category = info.get("category")
-        if not isinstance(category, str):
-            status_var.set("")
-            return
-        if company is None:
-            company = self.company_var.get().strip()
-        if not company:
-            status_var.set("")
-            return
-        path_map = self.specialism_prompt_paths.get(company)
-        path_value = path_map.get(category) if isinstance(path_map, dict) else None
-        if isinstance(path_value, Path):
-            status_var.set(f"Specialism: {path_value.name}")
-        elif isinstance(path_value, str) and path_value:
-            status_var.set(f"Specialism: {Path(path_value).name}")
-        else:
-            status_var.set("")
-
     def _refresh_specialism_status(
-        self, category: str, *, company: Optional[str] = None
+        self, category: Optional[str] = None, *, company: Optional[str] = None
     ) -> None:
-        if not isinstance(category, str):
+        if category is None:
+            categories: Iterable[str] = COLUMNS
+        elif isinstance(category, str):
+            categories = (category,)
+        else:
             return
-        if company is None:
-            company = self.company_var.get().strip()
-        for info in self.scraped_table_sources.values():
-            if info.get("category") == category:
-                self._update_specialism_status(info, company=company)
+        normalized_company = company.strip() if isinstance(company, str) else self.company_var.get().strip()
+        if not normalized_company:
+            for cat in categories:
+                status_var = self.specialism_status_vars.get(cat)
+                if isinstance(status_var, tk.StringVar):
+                    status_var.set("")
+            return
+        path_map = self.specialism_prompt_paths.get(normalized_company, {})
+        for cat in categories:
+            status_var = self.specialism_status_vars.get(cat)
+            if not isinstance(status_var, tk.StringVar):
+                continue
+            raw_value = path_map.get(cat) if isinstance(path_map, dict) else None
+            filename: Optional[str]
+            if isinstance(raw_value, Path):
+                filename = raw_value.name
+            elif isinstance(raw_value, str) and raw_value:
+                filename = Path(raw_value).name
+            else:
+                filename = None
+            if filename:
+                status_var.set(f"Loaded: {filename}")
+            else:
+                status_var.set("")
+
+    def _update_specialism_controls_state(self) -> None:
+        has_company = bool(self.company_var.get().strip())
+        for button in self.specialism_buttons.values():
+            if isinstance(button, ttk.Button):
+                if has_company:
+                    button.state(["!disabled"])
+                else:
+                    button.state(["disabled"])
 
     def _specialism_prompt_initial_dir(self, company: str, category: str) -> Optional[str]:
         normalized_company = company.strip()
@@ -4233,15 +4251,11 @@ class ReportApp:
                 continue
         return None
 
-    def _prompt_load_specialism_prompt(self, tree: ttk.Treeview) -> None:
-        info = self.scraped_table_sources.get(tree)
-        if not isinstance(info, dict):
-            return
-        category = info.get("category")
-        if not isinstance(category, str) or category not in COLUMNS:
+    def _prompt_load_specialism_prompt(self, category: str) -> None:
+        if category not in COLUMNS:
             messagebox.showinfo(
                 "Load Specialism Prompt",
-                "The selected table does not have a supported category.",
+                "Select a Financial, Income, or Shares prompt to override.",
             )
             return
         company = self.company_var.get().strip()
