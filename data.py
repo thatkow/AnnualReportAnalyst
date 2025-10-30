@@ -788,6 +788,74 @@ class ReportApp:
         if isinstance(title_label, ttk.Label) and isinstance(base_text, str):
             title_label.configure(text=f"{base_text} (Page {page_index + 1})")
 
+    def _on_scraped_image_frame_resize(
+        self, event: tk.Event, widget: tk.Widget
+    ) -> None:
+        state = self.scraped_preview_states.get(widget)
+        if not state:
+            return
+        width = getattr(event, "width", 0)
+        if width <= 0:
+            return
+        horizontal_padding = 0
+        try:
+            padding_value = event.widget.cget("padding")
+        except (tk.TclError, AttributeError):
+            padding_value = 0
+        if isinstance(padding_value, str):
+            parts = padding_value.split()
+            parsed: List[float] = []
+            for part in parts:
+                try:
+                    parsed.append(float(part))
+                except ValueError:
+                    continue
+            if len(parsed) == 1:
+                horizontal_padding = int(parsed[0] * 2)
+            elif len(parsed) == 2:
+                horizontal_padding = int(parsed[0] + parsed[1])
+            elif len(parsed) >= 4:
+                horizontal_padding = int(parsed[0] + parsed[2])
+        elif isinstance(padding_value, (tuple, list)):
+            parsed_pad: List[float] = []
+            for value in padding_value:
+                try:
+                    parsed_pad.append(float(value))
+                except (TypeError, ValueError):
+                    continue
+            if len(parsed_pad) == 1:
+                horizontal_padding = int(parsed_pad[0] * 2)
+            elif len(parsed_pad) >= 2:
+                horizontal_padding = int(parsed_pad[0] + parsed_pad[1])
+        available_width = max(0, width - horizontal_padding)
+        if available_width <= 0:
+            return
+        current_target = state.get("target_width")
+        try:
+            current_target_int = int(current_target)
+        except (TypeError, ValueError):
+            current_target_int = 0
+        if abs(current_target_int - available_width) < 3:
+            return
+        entry = state.get("entry")
+        if not isinstance(entry, PDFEntry):
+            return
+        current_page = state.get("current_page")
+        try:
+            page_index = int(current_page)
+        except (TypeError, ValueError):
+            page_index = 0
+        photo = self._render_page(entry.doc, page_index, available_width)
+        if photo is None:
+            return
+        self.scraped_images.append(photo)
+        try:
+            widget.configure(image=photo)
+        except Exception:
+            return
+        setattr(widget, "image", photo)
+        state["target_width"] = available_width
+
     def _on_thumbnail_scale(self, value: str) -> None:
         try:
             width = int(float(value))
@@ -3802,6 +3870,12 @@ class ReportApp:
                         "title_label": title_label,
                         "title_base_text": base_header_text,
                     }
+                    image_frame.bind(
+                        "<Configure>",
+                        lambda event, lbl=image_label: self._on_scraped_image_frame_resize(
+                            event, lbl
+                        ),
+                    )
                 else:
                     ttk.Label(image_frame, text="Preview unavailable").grid(row=0, column=0, sticky="nsew")
 
