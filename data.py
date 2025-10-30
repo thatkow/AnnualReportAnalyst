@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
@@ -3991,13 +3992,32 @@ class ReportApp:
                     )
                     relabel_button.grid(row=0, column=4, sticky="e", padx=(0, 4))
 
+                    dedupe_button = ttk.Button(
+                        controls_frame,
+                        text="Make Dates Unique",
+                        command=lambda t=tree: self._dedupe_scraped_headers(t),
+                        width=18,
+                    )
+                    dedupe_button.grid(row=0, column=5, sticky="e", padx=(0, 4))
+
                     delete_row_button = ttk.Button(
                         controls_frame,
                         text="Delete Row",
                         command=lambda t=tree: self._delete_scraped_row(t),
                         width=12,
                     )
-                    delete_row_button.grid(row=0, column=5, sticky="e")
+                    delete_row_button.grid(row=0, column=6, sticky="e", padx=(0, 4))
+
+                    delete_column_button = tk.Menubutton(
+                        controls_frame,
+                        text="Delete Column",
+                        width=14,
+                        relief=tk.RAISED,
+                        direction="below",
+                    )
+                    delete_column_button.grid(row=0, column=7, sticky="e")
+                    delete_column_menu = tk.Menu(delete_column_button, tearoff=False)
+                    delete_column_button.configure(menu=delete_column_menu)
 
                     info = {
                         "header": list(headings),
@@ -4012,9 +4032,13 @@ class ReportApp:
                         "scale_buttons": (multiply_button, divide_button),
                         "open_button": open_page_button,
                         "relabel_button": relabel_button,
+                        "dedupe_button": dedupe_button,
+                        "delete_column_button": delete_column_button,
+                        "delete_column_menu": delete_column_menu,
                         "preview_widget": preview_widget,
                         "entry": entry,
                         "scalable_columns": scalable_columns,
+                        "tree": tree,
                     }
                     self.scraped_table_sources[tree] = info
                     if isinstance(preview_widget, tk.Widget):
@@ -4063,6 +4087,21 @@ class ReportApp:
             else:
                 relabel_button.state(["disabled"])
 
+        dedupe_button = info.get("dedupe_button")
+        if isinstance(dedupe_button, ttk.Button):
+            if has_csv and len(header) > 2:
+                dedupe_button.state(["!disabled"])
+            else:
+                dedupe_button.state(["disabled"])
+
+        delete_column_button = info.get("delete_column_button")
+        if isinstance(delete_column_button, tk.Menubutton):
+            if has_csv and header:
+                delete_column_button.configure(state="normal")
+            else:
+                delete_column_button.configure(state="disabled")
+        self._populate_delete_column_menu(info)
+
         self._update_scraped_open_button(info)
 
     def _update_scraped_open_button(self, info: Dict[str, Any]) -> None:
@@ -4094,7 +4133,7 @@ class ReportApp:
         entry = state.get("entry")
         page_index = state.get("current_page")
         if isinstance(entry, PDFEntry) and isinstance(page_index, int) and page_index >= 0:
-            self.open_thumbnail_zoom(entry, page_index)
+            self._open_pdf_page_external(entry, page_index)
 
     def _prompt_relabel_scraped_dates(self, tree: ttk.Treeview) -> None:
         info = self.scraped_table_sources.get(tree)
@@ -4226,6 +4265,182 @@ class ReportApp:
             entry_rows[0][2].focus_set()
         else:
             dialog.focus_set()
+
+    def _populate_delete_column_menu(self, info: Dict[str, Any]) -> None:
+        delete_column_button = info.get("delete_column_button")
+        delete_column_menu = info.get("delete_column_menu")
+        tree = info.get("tree")
+        if not isinstance(delete_column_button, tk.Menubutton):
+            return
+        if not isinstance(delete_column_menu, tk.Menu):
+            delete_column_button.configure(state="disabled")
+            return
+        if not isinstance(tree, ttk.Treeview):
+            delete_column_button.configure(state="disabled")
+            return
+
+        delete_column_menu.delete(0, tk.END)
+        header: List[str] = info.get("header", [])
+        if not header:
+            delete_column_button.configure(state="disabled")
+            return
+
+        for column_index, heading in enumerate(header):
+            label = heading.strip() or f"Column {column_index + 1}"
+            delete_column_menu.add_command(
+                label=label,
+                command=lambda idx=column_index, t=tree: self._delete_scraped_column(t, idx),
+            )
+
+    def _dedupe_scraped_headers(self, tree: ttk.Treeview) -> None:
+        info = self.scraped_table_sources.get(tree)
+        if not isinstance(info, dict):
+            return
+
+        header: List[str] = info.get("header", [])
+        if len(header) <= 2:
+            messagebox.showinfo(
+                "Make Dates Unique", "This table does not have any date columns to update.",
+            )
+            return
+
+        csv_path = info.get("csv_path")
+        if not isinstance(csv_path, Path):
+            messagebox.showinfo(
+                "Make Dates Unique",
+                "This table is not associated with a CSV file that can be updated.",
+            )
+            return
+
+        rows: List[List[str]] = info.get("rows", [])
+        delimiter: str = info.get("delimiter", ",")
+
+        new_header = list(header)
+        seen: Dict[str, int] = {}
+        duplicates_found = False
+        for index, value in enumerate(new_header):
+            normalized = value.strip().lower()
+            if not normalized:
+                continue
+            count = seen.get(normalized, 0)
+            if count > 0 and index >= 2:
+                trimmed = value.strip()
+                suffix = f".{count}"
+                if not trimmed.endswith(suffix):
+                    trimmed = f"{trimmed}{suffix}"
+                new_header[index] = trimmed
+                duplicates_found = True
+            seen[normalized] = count + 1
+
+        if not duplicates_found:
+            messagebox.showinfo(
+                "Make Dates Unique", "No duplicate column labels were found after the first two columns.",
+            )
+            return
+
+        if not self._write_scraped_csv_rows(csv_path, new_header, rows, delimiter=delimiter):
+            return
+
+        info["header"] = new_header
+        info["scalable_columns"] = self._scraped_scalable_column_indices(new_header)
+        columns = list(tree["columns"])
+        for column_id, heading_text in zip(columns, new_header):
+            tree.heading(column_id, text=heading_text)
+
+        self._update_scraped_controls_state(info)
+        self._refresh_combined_tab(auto_update=True)
+        messagebox.showinfo(
+            "Make Dates Unique", "Duplicate column labels have been updated.",
+        )
+
+    def _delete_scraped_column(self, tree: ttk.Treeview, column_index: int) -> None:
+        info = self.scraped_table_sources.get(tree)
+        if not isinstance(info, dict):
+            return
+
+        header: List[str] = info.get("header", [])
+        if not header or not (0 <= column_index < len(header)):
+            return
+
+        csv_path = info.get("csv_path")
+        if not isinstance(csv_path, Path):
+            messagebox.showinfo(
+                "Delete Column",
+                "This table is not associated with a CSV file that can be updated.",
+            )
+            return
+
+        column_label = header[column_index].strip() or f"Column {column_index + 1}"
+        confirm = messagebox.askyesno(
+            "Delete Column", f"Delete column '{column_label}' from the table?", icon="warning"
+        )
+        if not confirm:
+            return
+
+        rows: List[List[str]] = info.get("rows", [])
+        updated_rows: List[List[str]] = []
+        for row in rows:
+            values = list(row)
+            if 0 <= column_index < len(values):
+                values.pop(column_index)
+            updated_rows.append(values)
+
+        new_header = [value for idx, value in enumerate(header) if idx != column_index]
+        delimiter: str = info.get("delimiter", ",")
+
+        if not self._write_scraped_csv_rows(csv_path, new_header, updated_rows, delimiter=delimiter):
+            return
+
+        info["header"] = new_header
+        info["rows"] = updated_rows
+        info["scalable_columns"] = self._scraped_scalable_column_indices(new_header)
+
+        columns = list(tree["columns"])
+        if 0 <= column_index < len(columns):
+            columns.pop(column_index)
+        tree.configure(columns=columns)
+        for column_id, heading_text in zip(columns, new_header):
+            tree.heading(column_id, text=heading_text)
+            tree.column(column_id, anchor="center", stretch=True, width=120)
+
+        self._refresh_scraped_tree_display(tree, info)
+        self._update_scraped_controls_state(info)
+        self._refresh_combined_tab(auto_update=True)
+
+    def _open_pdf_page_external(self, entry: PDFEntry, page_index: int) -> None:
+        if fitz is None:
+            messagebox.showwarning("Open Page", PYMUPDF_REQUIRED_MESSAGE)
+            return
+
+        if page_index < 0 or page_index >= len(entry.doc):
+            messagebox.showinfo(
+                "Open Page", "The requested page could not be found in the PDF document.",
+            )
+            return
+
+        try:
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", prefix="scraped_page_")
+        except Exception as exc:
+            messagebox.showwarning("Open Page", f"Could not create a temporary file: {exc}")
+            return
+
+        temp_path = Path(temp_file.name)
+        temp_file.close()
+
+        new_doc: Optional[fitz.Document] = None
+        try:
+            new_doc = fitz.open()
+            new_doc.insert_pdf(entry.doc, from_page=page_index, to_page=page_index)
+            new_doc.save(str(temp_path))
+        except Exception as exc:
+            messagebox.showwarning("Open Page", f"Could not extract PDF page: {exc}")
+            temp_path.unlink(missing_ok=True)
+            return
+        finally:
+            if new_doc is not None:
+                new_doc.close()
+
+        self._open_pdf(temp_path)
 
     def _refresh_scraped_tree_display(self, tree: ttk.Treeview, info: Dict[str, Any]) -> None:
         for item in tree.get_children():
