@@ -1987,18 +1987,42 @@ class ReportApp:
 
         parsed: Dict[str, Dict[str, Any]] = {}
         for pdf_name, value in data.items():
-            if isinstance(value, dict) and "selections" in value:
-                selections = value.get("selections")
-                if isinstance(selections, dict):
-                    parsed[pdf_name] = {
-                        "selections": {k: int(v) for k, v in selections.items() if isinstance(v, (int, float))},
-                        "year": value.get("year", ""),
-                    }
-            elif isinstance(value, dict):
-                parsed[pdf_name] = {
-                    "selections": {k: int(v) for k, v in value.items() if isinstance(v, (int, float))},
-                    "year": value.get("year", ""),
-                }
+            if not isinstance(value, dict):
+                continue
+
+            selections_obj = value.get("selections") if "selections" in value else value
+            selections: Dict[str, int] = {}
+            if isinstance(selections_obj, dict):
+                for category_key, raw_page in selections_obj.items():
+                    if isinstance(raw_page, (int, float)):
+                        selections[category_key] = int(raw_page)
+
+            highlights_map: Dict[str, List[int]] = {}
+            raw_highlights = value.get("highlights") if isinstance(value, dict) else None
+            if isinstance(raw_highlights, dict):
+                for category_key, stored_pages in raw_highlights.items():
+                    pages: List[int] = []
+                    if isinstance(stored_pages, (list, tuple, set)):
+                        iterable = stored_pages
+                    else:
+                        iterable = [stored_pages]
+                    for page_value in iterable:
+                        if isinstance(page_value, (int, float)):
+                            pages.append(int(page_value))
+                        else:
+                            try:
+                                pages.append(int(page_value))
+                            except (TypeError, ValueError):
+                                continue
+                    if pages:
+                        highlights_map[category_key] = pages
+
+            parsed[pdf_name] = {
+                "selections": selections,
+                "year": value.get("year", ""),
+            }
+            if highlights_map:
+                parsed[pdf_name]["highlights"] = highlights_map
         self.assigned_pages = parsed
 
     def _register_note_option(
