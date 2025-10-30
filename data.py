@@ -4096,7 +4096,7 @@ class ReportApp:
 
         delete_column_button = info.get("delete_column_button")
         if isinstance(delete_column_button, tk.Menubutton):
-            if has_csv and header:
+            if has_csv and len(header) > 2:
                 delete_column_button.configure(state="normal")
             else:
                 delete_column_button.configure(state="disabled")
@@ -4281,11 +4281,13 @@ class ReportApp:
 
         delete_column_menu.delete(0, tk.END)
         header: List[str] = info.get("header", [])
-        if not header:
+        deletable_indices = [index for index in range(len(header)) if index >= 2]
+        if not deletable_indices:
             delete_column_button.configure(state="disabled")
             return
 
-        for column_index, heading in enumerate(header):
+        for column_index in deletable_indices:
+            heading = header[column_index]
             label = heading.strip() or f"Column {column_index + 1}"
             delete_column_menu.add_command(
                 label=label,
@@ -4360,6 +4362,13 @@ class ReportApp:
 
         header: List[str] = info.get("header", [])
         if not header or not (0 <= column_index < len(header)):
+            return
+
+        if column_index < 2:
+            messagebox.showinfo(
+                "Delete Column",
+                "The first two columns cannot be deleted from this table.",
+            )
             return
 
         csv_path = info.get("csv_path")
