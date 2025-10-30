@@ -14,16 +14,17 @@ import calendar
 import csv
 import math
 import re
+from bisect import bisect_left
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import json
 import os
 import sys
 import webbrowser
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 
 import matplotlib
 
@@ -45,6 +46,10 @@ from matplotlib.ticker import ScalarFormatter
 
 import tkinter as tk
 from tkinter import messagebox, ttk
+
+import urllib.error
+import urllib.request
+from urllib.parse import quote
 
 
 BASE_FIELDS = {"Type", "Category", "Item", "Note"}
@@ -158,6 +163,44 @@ def _period_sort_key(label: str) -> Tuple[int, Any]:
     return (1, label.strip().lower())
 
 
+def _normalized_period_token(label: str) -> Tuple[str, int, int, str]:
+    """Return a hashable token so equivalent period labels can be aligned."""
+
+    normalized = re.sub(r"\s+", " ", label.strip().lower())
+    if not normalized:
+        return ("", 0, 0, "")
+
+    parsed = _parse_period_label(label)
+    if parsed is None:
+        return ("text", 0, 0, normalized)
+
+    year = parsed.year
+    quarter_match = re.search(r"q([1-4])", normalized)
+    if quarter_match:
+        return ("quarter", year, int(quarter_match.group(1)), "")
+    half_match = re.search(r"h([12])", normalized)
+    if half_match:
+        return ("half", year, int(half_match.group(1)), "")
+    if re.search(r"fy", normalized) or re.fullmatch(r"\d{4}", normalized):
+        return ("year", year, 0, "")
+
+    month = parsed.month
+    day = parsed.day
+    return ("date", year, month * 100 + day, "")
+
+
+def _lookup_period_value(collection: Dict[str, Any], label: str) -> Any:
+    """Attempt to find a period entry by direct label or normalized alias."""
+
+    if label in collection:
+        return collection[label]
+    token = _normalized_period_token(label)
+    for candidate_label, value in collection.items():
+        if _normalized_period_token(candidate_label) == token:
+            return value
+    raise KeyError(label)
+
+
 @dataclass
 class RowSegment:
     """Represent a single CSV row broken into period values for plotting."""
@@ -199,10 +242,151 @@ def open_pdf(pdf_path: Path, page: Optional[int] = None) -> None:
         messagebox.showwarning("Open PDF", f"Could not open PDF: {exc}")
 
 
-class PdfPageViewer(tk.Toplevel):
+class _PdfMonitorPlacementMixin:
+    """Utilities for positioning PDF viewers on the preferred monitor."""
+
+    _placement: str = "full"
+
+    def _preferred_monitor_info(self) -> Dict[str, int]:
+        monitor_info: Optional[Dict[str, int]] = None
+        monitor_count = 1
+        try:
+            monitor_count = int(self.tk.call("winfo", "monitorcount", self))  # type: ignore[attr-defined]
+        except tk.TclError:
+            monitor_count = 1
+
+        if monitor_count > 1:
+            monitors: List[Dict[str, Any]] = []
+            try:
+                monitors_raw = self.tk.splitlist(self.tk.call("winfo", "monitors", self))  # type: ignore[attr-defined]
+            except tk.TclError:
+                monitors_raw = []
+
+            for raw_monitor in monitors_raw:
+                parts = list(self.tk.splitlist(raw_monitor))  # type: ignore[attr-defined]
+                if len(parts) < 4:
+                    continue
+                try:
+                    x = int(parts[0])
+                    y = int(parts[1])
+                    width = int(parts[2])
+                    height = int(parts[3])
+                except (TypeError, ValueError):
+                    continue
+
+                primary = False
+                for extra in parts[4:]:
+                    text = str(extra).strip().lower()
+                    if text in {"1", "0", "true", "false"}:
+                        primary = text in {"1", "true"}
+                        break
+
+                monitors.append(
+                    {
+                        "x": x,
+                        "y": y,
+                        "width": width,
+                        "height": height,
+                        "primary": primary,
+                    }
+                )
+
+            non_primary = [monitor for monitor in monitors if not monitor.get("primary")]
+            if non_primary:
+                monitor_info = {
+                    "x": int(non_primary[0]["x"]),
+                    "y": int(non_primary[0]["y"]),
+                    "width": int(non_primary[0]["width"]),
+                    "height": int(non_primary[0]["height"]),
+                }
+            elif monitors:
+                monitor_info = {
+                    "x": int(monitors[0]["x"]),
+                    "y": int(monitors[0]["y"]),
+                    "width": int(monitors[0]["width"]),
+                    "height": int(monitors[0]["height"]),
+                }
+
+        if monitor_info is None:
+            monitor_info = {
+                "x": 0,
+                "y": 0,
+                "width": int(self.winfo_screenwidth()),
+                "height": int(self.winfo_screenheight()),
+            }
+
+        return monitor_info
+
+    def _apply_monitor_geometry(self, placement: str = "full") -> None:
+        monitor_info = self._preferred_monitor_info()
+        width = int(monitor_info["width"])
+        height = int(monitor_info["height"])
+        x = int(monitor_info["x"])
+        y = int(monitor_info["y"])
+
+        normalized = placement.lower()
+        if normalized not in {"full", "left", "right"}:
+            normalized = "full"
+        self._placement = normalized
+
+        if normalized in {"left", "right"} and width > 1:
+            left_width = max(1, width // 2)
+            right_width = max(1, width - left_width)
+            if normalized == "left":
+                width = left_width
+            else:
+                width = right_width
+                x += left_width
+
+        geometry = f"{width}x{height}+{x}+{y}"
+        self.geometry(geometry)  # type: ignore[misc]
+        self.update_idletasks()
+
+        if normalized == "full":
+            try:
+                self.attributes("-fullscreen", True)  # type: ignore[attr-defined]
+                return
+            except tk.TclError:
+                try:
+                    self.state("zoomed")  # type: ignore[attr-defined]
+                except tk.TclError:
+                    pass
+        else:
+            try:
+                self.attributes("-fullscreen", False)  # type: ignore[attr-defined]
+            except tk.TclError:
+                pass
+            try:
+                self.state("normal")  # type: ignore[attr-defined]
+            except tk.TclError:
+                pass
+
+
+def _render_pdf_page(pdf_path: Path, page_number: int) -> ImageTk.PhotoImage:
+    if fitz is None:
+        raise RuntimeError("PyMuPDF (fitz) is not installed")
+    if page_number <= 0:
+        raise ValueError("page_number must be 1 or greater")
+    with fitz.open(pdf_path) as doc:  # type: ignore[union-attr]
+        page = doc.load_page(page_number - 1)
+        zoom_matrix = fitz.Matrix(1.5, 1.5)
+        pix = page.get_pixmap(matrix=zoom_matrix)
+    mode = "RGBA" if pix.alpha else "RGB"
+    image = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+    return ImageTk.PhotoImage(image)
+
+
+class PdfPageViewer(_PdfMonitorPlacementMixin, tk.Toplevel):
     """Display a single rendered PDF page inside a scrollable window."""
 
-    def __init__(self, master: tk.Widget, pdf_path: Path, page_number: int) -> None:
+    def __init__(
+        self,
+        master: tk.Widget,
+        pdf_path: Path,
+        page_number: int,
+        *,
+        placement: str = "full",
+    ) -> None:
         super().__init__(master)
         if fitz is None:
             messagebox.showerror(
@@ -220,7 +404,8 @@ class PdfPageViewer(tk.Toplevel):
         self._page_number = page_number
         self._build_widgets()
         self._render_page()
-        self.bind("<Escape>", lambda _event: self.destroy())
+        self._apply_monitor_geometry(placement)
+        self.bind("<Escape>", self._close_from_escape)
 
     def _build_widgets(self) -> None:
         self.configure(bg="#2b2b2b")
@@ -241,10 +426,7 @@ class PdfPageViewer(tk.Toplevel):
         if fitz is None:
             raise RuntimeError("PyMuPDF (fitz) is not installed")
         try:
-            with fitz.open(self._pdf_path) as doc:
-                page = doc.load_page(self._page_number - 1)
-                zoom_matrix = fitz.Matrix(1.5, 1.5)
-                pix = page.get_pixmap(matrix=zoom_matrix)
+            self._photo = _render_pdf_page(self._pdf_path, self._page_number)
         except Exception as exc:
             messagebox.showwarning(
                 "Open PDF",
@@ -253,12 +435,162 @@ class PdfPageViewer(tk.Toplevel):
             self.after(0, self.destroy)
             return
 
-        mode = "RGBA" if pix.alpha else "RGB"
-        image = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
-        self._photo = ImageTk.PhotoImage(image)
+        if self._photo is None:
+            return
+
+        width = self._photo.width()
+        height = self._photo.height()
         self._canvas.delete("all")
         self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
-        self._canvas.configure(scrollregion=(0, 0, pix.width, pix.height))
+        self._canvas.configure(scrollregion=(0, 0, width, height))
+
+    def _close_from_escape(self, _event: Any) -> None:
+        try:
+            self.attributes("-fullscreen", False)
+        except tk.TclError:
+            pass
+        self.destroy()
+
+
+class PdfSplitViewer(_PdfMonitorPlacementMixin, tk.Toplevel):
+    """Display two PDF pages side-by-side on the preferred monitor."""
+
+    def __init__(
+        self,
+        master: tk.Widget,
+        left: Tuple[str, SegmentSource],
+        right: Tuple[str, SegmentSource],
+        title: str,
+    ) -> None:
+        super().__init__(master)
+        if fitz is None:
+            messagebox.showerror(
+                "PyMuPDF Required",
+                (
+                    "Viewing individual PDF pages requires the PyMuPDF package (import name 'fitz').\n"
+                    "Install PyMuPDF to enable in-app previews."
+                ),
+            )
+            self.after(0, self.destroy)
+            raise RuntimeError("PyMuPDF (fitz) is not installed")
+
+        self.title(title)
+        self._left_label, self._left_source = left
+        self._right_label, self._right_source = right
+        self._left_photo: Optional[ImageTk.PhotoImage] = None
+        self._right_photo: Optional[ImageTk.PhotoImage] = None
+        self._build_widgets()
+        self._render_pages()
+        self._apply_monitor_geometry("full")
+        self.bind("<Escape>", self._close_from_escape)
+
+    def _build_widgets(self) -> None:
+        self.configure(bg="#1f1f1f")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
+        paned.grid(row=0, column=0, sticky="nsew")
+
+        self._left_frame = ttk.Frame(paned)
+        self._left_frame.grid_rowconfigure(1, weight=1)
+        self._left_frame.grid_columnconfigure(0, weight=1)
+        self._right_frame = ttk.Frame(paned)
+        self._right_frame.grid_rowconfigure(1, weight=1)
+        self._right_frame.grid_columnconfigure(0, weight=1)
+        paned.add(self._left_frame, weight=1)
+        paned.add(self._right_frame, weight=1)
+
+        ttk.Label(
+            self._left_frame,
+            text=self._left_label,
+            anchor="center",
+            padding=(0, 6),
+        ).grid(row=0, column=0, columnspan=2, sticky="ew")
+
+        self._left_canvas = tk.Canvas(
+            self._left_frame, bg="#2b2b2b", highlightthickness=0
+        )
+        self._left_canvas.grid(row=1, column=0, sticky="nsew")
+        self._left_vbar = tk.Scrollbar(
+            self._left_frame, orient=tk.VERTICAL, command=self._left_canvas.yview
+        )
+        self._left_vbar.grid(row=1, column=1, sticky="ns")
+        self._left_canvas.configure(yscrollcommand=self._left_vbar.set)
+        self._left_hbar = tk.Scrollbar(
+            self._left_frame, orient=tk.HORIZONTAL, command=self._left_canvas.xview
+        )
+        self._left_hbar.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self._left_canvas.configure(xscrollcommand=self._left_hbar.set)
+
+        ttk.Label(
+            self._right_frame,
+            text=self._right_label,
+            anchor="center",
+            padding=(0, 6),
+        ).grid(row=0, column=0, columnspan=2, sticky="ew")
+
+        self._right_canvas = tk.Canvas(
+            self._right_frame, bg="#2b2b2b", highlightthickness=0
+        )
+        self._right_canvas.grid(row=1, column=0, sticky="nsew")
+        self._right_vbar = tk.Scrollbar(
+            self._right_frame, orient=tk.VERTICAL, command=self._right_canvas.yview
+        )
+        self._right_vbar.grid(row=1, column=1, sticky="ns")
+        self._right_canvas.configure(yscrollcommand=self._right_vbar.set)
+        self._right_hbar = tk.Scrollbar(
+            self._right_frame, orient=tk.HORIZONTAL, command=self._right_canvas.xview
+        )
+        self._right_hbar.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self._right_canvas.configure(xscrollcommand=self._right_hbar.set)
+
+    def _render_pages(self) -> None:
+        if fitz is None:
+            raise RuntimeError("PyMuPDF (fitz) is not installed")
+
+        try:
+            left_page = int(self._left_source.page)
+            self._left_photo = _render_pdf_page(self._left_source.pdf_path, left_page)
+        except Exception as exc:
+            messagebox.showwarning(
+                "Open PDF",
+                f"Could not render {self._left_label} page {self._left_source.page}: {exc}",
+            )
+            self.after(0, self.destroy)
+            return
+
+        try:
+            right_page = int(self._right_source.page)
+            self._right_photo = _render_pdf_page(self._right_source.pdf_path, right_page)
+        except Exception as exc:
+            messagebox.showwarning(
+                "Open PDF",
+                f"Could not render {self._right_label} page {self._right_source.page}: {exc}",
+            )
+            self.after(0, self.destroy)
+            return
+
+        if self._left_photo is not None:
+            width = self._left_photo.width()
+            height = self._left_photo.height()
+            self._left_canvas.delete("all")
+            self._left_canvas.create_image(0, 0, anchor="nw", image=self._left_photo)
+            self._left_canvas.configure(scrollregion=(0, 0, width, height))
+
+        if self._right_photo is not None:
+            width = self._right_photo.width()
+            height = self._right_photo.height()
+            self._right_canvas.delete("all")
+            self._right_canvas.create_image(0, 0, anchor="nw", image=self._right_photo)
+            self._right_canvas.configure(scrollregion=(0, 0, width, height))
+
+    def _close_from_escape(self, _event: Any) -> None:
+        try:
+            self.attributes("-fullscreen", False)
+        except tk.TclError:
+            pass
+        self.destroy()
 
 
 class FinanceDataset:
@@ -270,6 +602,7 @@ class FinanceDataset:
     NORMALIZATION_SHARES = "shares"
     NORMALIZATION_REPORTED = "reported"
     NORMALIZATION_SHARE_PRICE = "share_price"
+    NORMALIZATION_SHARE_PRICE_PERIOD = "share_price_period"
 
     _TYPE_TO_LABEL = {
         "financial": FINANCE_LABEL,
@@ -287,9 +620,41 @@ class FinanceDataset:
         self._color_cache: Dict[str, str] = {}
         self.share_counts: List[float] = []
         self.share_prices: List[float] = []
+        self.share_count_sources: Dict[str, SegmentSource] = {}
+        self.share_price_symbol: Optional[str] = None
+        self._period_share_price_map: Optional[Dict[str, float]] = None
+        self._share_price_error: Optional[str] = None
+        self._period_index: Dict[str, int] = {}
+        self._period_token_index: Dict[Tuple[str, int, int, str], int] = {}
         self._normalization_mode = self.NORMALIZATION_REPORTED
         self._load()
+        self._refresh_period_indices()
         self._load_metadata()
+        self._prefetch_share_prices()
+
+    def _prefetch_share_prices(self) -> None:
+        if self._period_share_price_map is not None or self._share_price_error is not None:
+            return
+        try:
+            self._period_share_price_map = self._fetch_period_share_prices()
+        except ValueError as exc:
+            self._share_price_error = str(exc)
+
+    def _refresh_period_indices(self) -> None:
+        self._period_index = {label: idx for idx, label in enumerate(self.periods)}
+        token_map: Dict[Tuple[str, int, int, str], int] = {}
+        for idx, label in enumerate(self.periods):
+            token = _normalized_period_token(label)
+            if token not in token_map:
+                token_map[token] = idx
+        self._period_token_index = token_map
+
+    def _resolve_period_index(self, label: str) -> Optional[int]:
+        lookup_label = str(label)
+        if lookup_label in self._period_index:
+            return self._period_index[lookup_label]
+        token = _normalized_period_token(lookup_label)
+        return self._period_token_index.get(token)
 
     @staticmethod
     def _clean_numeric(value: str) -> float:
@@ -474,6 +839,7 @@ class FinanceDataset:
             self.NORMALIZATION_SHARES,
             self.NORMALIZATION_REPORTED,
             self.NORMALIZATION_SHARE_PRICE,
+            self.NORMALIZATION_SHARE_PRICE_PERIOD,
         }
         if mode not in valid_modes:
             raise ValueError(f"Unsupported normalization mode: {mode}")
@@ -496,7 +862,13 @@ class FinanceDataset:
         elif mode == self.NORMALIZATION_SHARE_PRICE:
             if not self.share_counts:
                 raise ValueError("combined.csv is missing a share_count row")
-            latest_price = self.latest_share_price()
+            price_map = self._get_period_share_price_map()
+            latest_price: Optional[float] = None
+            for label in reversed(self.periods):
+                price = price_map.get(str(label))
+                if price is not None and math.isfinite(price) and price > 0:
+                    latest_price = float(price)
+                    break
             if latest_price is None:
                 raise ValueError(
                     f"Share price data is not available for {self.company_root.name or 'the selected company'}."
@@ -514,6 +886,30 @@ class FinanceDataset:
                     else:
                         multiples.append(latest_price / per_share)
                 segment.values = multiples
+        elif mode == self.NORMALIZATION_SHARE_PRICE_PERIOD:
+            if not self.share_counts:
+                raise ValueError("combined.csv is missing a share_count row")
+            price_map = self._get_period_share_price_map()
+            for segment in self.finance_segments + self.income_segments:
+                multiples: List[float] = []
+                for idx, value in enumerate(segment.raw_values):
+                    count = self.share_counts[idx] if idx < len(self.share_counts) else 0.0
+                    if idx < len(segment.periods):
+                        period_label = str(segment.periods[idx])
+                    elif idx < len(self.periods):
+                        period_label = str(self.periods[idx])
+                    else:
+                        period_label = str(idx)
+                    price = price_map.get(period_label)
+                    if count == 0 or price is None or price <= 0:
+                        multiples.append(0.0)
+                        continue
+                    per_share = value / count
+                    if per_share == 0:
+                        multiples.append(0.0)
+                    else:
+                        multiples.append(per_share / price)
+                segment.values = multiples
         else:
             for segment in self.finance_segments + self.income_segments:
                 segment.values = list(segment.raw_values)
@@ -529,11 +925,21 @@ class FinanceDataset:
         except (OSError, json.JSONDecodeError):
             return
 
+        ticker_value = (
+            payload.get("share_price_symbol")
+            or payload.get("share_price_ticker")
+            or payload.get("ticker")
+            or payload.get("symbol")
+        )
+        if isinstance(ticker_value, str) and ticker_value.strip():
+            self.share_price_symbol = ticker_value.strip()
+
         rows = payload.get("rows")
         if not isinstance(rows, list):
             return
 
         metadata_map: Dict[Tuple[str, str, str], Dict[str, SegmentSource]] = {}
+        share_count_sources: Dict[str, SegmentSource] = {}
 
         for entry in rows:
             if not isinstance(entry, dict):
@@ -542,6 +948,7 @@ class FinanceDataset:
             category_value = str(entry.get("category", ""))
             item_value = str(entry.get("item", ""))
             key = (type_value, category_value, item_value)
+            note_value = str(entry.get("note", "")).strip().lower()
             periods = entry.get("periods", {})
             if not isinstance(periods, dict):
                 continue
@@ -568,9 +975,16 @@ class FinanceDataset:
                         page = None
                 period_sources[str(label)] = SegmentSource(pdf_path=pdf_path, page=page)
             if period_sources:
+                if note_value == NOTE_SHARE_COUNT:
+                    share_count_sources = {
+                        str(label): source for label, source in period_sources.items()
+                    }
+                    continue
                 metadata_map[key] = period_sources
 
         if not metadata_map:
+            if share_count_sources:
+                self.share_count_sources = share_count_sources
             return
 
         for segment in self.finance_segments + self.income_segments:
@@ -578,6 +992,8 @@ class FinanceDataset:
             sources = metadata_map.get(key)
             if sources:
                 segment.sources = sources
+        if share_count_sources:
+            self.share_count_sources = share_count_sources
 
     def aggregate_totals(
         self, periods: Sequence[str], *, series: str
@@ -589,27 +1005,39 @@ class FinanceDataset:
         else:
             return [0.0] * len(periods), [False] * len(periods)
 
-        period_index = {label: idx for idx, label in enumerate(self.periods)}
+        if len(self._period_index) != len(self.periods):
+            self._refresh_period_indices()
+
         totals: List[float] = []
         has_data: List[bool] = []
 
         for label in periods:
-            idx = period_index.get(label)
+            idx = self._resolve_period_index(label)
             if idx is None:
-                totals.append(0.0)
+                totals.append(math.nan)
                 has_data.append(False)
                 continue
 
             total = 0.0
             present = False
+            has_nonzero = False
             for segment in segments:
                 if idx >= len(segment.values):
                     continue
+                value = segment.values[idx]
+                if not math.isfinite(value):
+                    continue
                 present = True
-                total += segment.values[idx]
+                total += value
+                if not has_nonzero and abs(value) > 1e-9:
+                    has_nonzero = True
 
-            totals.append(total)
-            has_data.append(present)
+            if present and has_nonzero:
+                totals.append(total)
+                has_data.append(True)
+            else:
+                totals.append(math.nan)
+                has_data.append(False)
 
         return totals, has_data
 
@@ -617,26 +1045,298 @@ class FinanceDataset:
         if not self.share_counts:
             return [math.nan] * len(periods), [False] * len(periods)
 
-        period_index = {label: idx for idx, label in enumerate(self.periods)}
+        if len(self._period_index) != len(self.periods):
+            self._refresh_period_indices()
+
         values: List[float] = []
         present: List[bool] = []
 
         for label in periods:
-            idx = period_index.get(label)
+            idx = self._resolve_period_index(label)
             if idx is None or idx >= len(self.share_counts):
                 values.append(math.nan)
                 present.append(False)
                 continue
-            values.append(self.share_counts[idx])
+            value = self.share_counts[idx]
+            if not math.isfinite(value) or abs(value) <= 1e-9:
+                values.append(math.nan)
+                present.append(False)
+                continue
+            values.append(float(value))
             present.append(True)
 
         return values, present
+
+    def _try_get_period_share_price_map(self) -> Dict[str, float]:
+        if self._period_share_price_map is not None:
+            return self._period_share_price_map
+        if self._share_price_error is not None:
+            return {}
+        try:
+            self._period_share_price_map = self._fetch_period_share_prices()
+        except ValueError as exc:
+            self._share_price_error = str(exc)
+            return {}
+        return self._period_share_price_map or {}
+
+    def _build_share_price_list(
+        self, periods: Sequence[str]
+    ) -> Tuple[List[float], List[bool]]:
+        price_map = self._try_get_period_share_price_map()
+        if len(self._period_index) != len(self.periods):
+            self._refresh_period_indices()
+        values: List[float] = []
+        present: List[bool] = []
+
+        for label in periods:
+            lookup_label = str(label)
+            price = price_map.get(lookup_label)
+            if price is None:
+                try:
+                    price = _lookup_period_value(price_map, lookup_label)
+                except KeyError:
+                    price = None
+            if price is None:
+                idx = self._resolve_period_index(lookup_label)
+                if idx is not None and idx < len(self.share_prices):
+                    fallback_price = self.share_prices[idx]
+                    if fallback_price and math.isfinite(fallback_price) and fallback_price > 0:
+                        price = float(fallback_price)
+            if price is not None and math.isfinite(price) and price > 0:
+                values.append(float(price))
+                present.append(True)
+            else:
+                values.append(math.nan)
+                present.append(False)
+
+        return values, present
+
+    def share_prices_for(self, periods: Sequence[str]) -> Tuple[List[float], List[bool]]:
+        values, present = self._build_share_price_list(periods)
+        if not any(present):
+            message = self._share_price_error or (
+                f"Share price data is not available for {self.company_root.name or 'the selected company'}."
+            )
+            raise ValueError(message)
+        return values, present
+
+    def share_prices_for_optional(
+        self, periods: Sequence[str]
+    ) -> Tuple[List[float], List[bool]]:
+        return self._build_share_price_list(periods)
+
+    def aggregate_raw_totals(
+        self, periods: Sequence[str], *, series: str
+    ) -> Tuple[List[float], List[bool]]:
+        if series == self.FINANCE_LABEL:
+            segments = self.finance_segments
+        elif series == self.INCOME_LABEL:
+            segments = self.income_segments
+        else:
+            return [math.nan] * len(periods), [False] * len(periods)
+
+        if len(self._period_index) != len(self.periods):
+            self._refresh_period_indices()
+
+        totals: List[float] = []
+        has_data: List[bool] = []
+
+        for label in periods:
+            idx = self._resolve_period_index(label)
+            if idx is None:
+                totals.append(math.nan)
+                has_data.append(False)
+                continue
+
+            total = 0.0
+            present = False
+            has_nonzero = False
+            for segment in segments:
+                if idx >= len(segment.raw_values):
+                    continue
+                value = segment.raw_values[idx]
+                if not math.isfinite(value):
+                    continue
+                present = True
+                total += value
+                if not has_nonzero and abs(value) > 1e-9:
+                    has_nonzero = True
+
+            if present and has_nonzero:
+                totals.append(total)
+                has_data.append(True)
+            else:
+                totals.append(math.nan)
+                has_data.append(False)
+
+        return totals, has_data
+
+    def source_for_series(self, series: str, period: str) -> Optional[SegmentSource]:
+        lookup: Sequence[RowSegment]
+        if series == self.FINANCE_LABEL:
+            lookup = self.finance_segments
+        elif series == self.INCOME_LABEL:
+            lookup = self.income_segments
+        else:
+            return None
+        for segment in lookup:
+            if not segment.sources:
+                continue
+            try:
+                return _lookup_period_value(segment.sources, str(period))
+            except KeyError:
+                continue
+        return None
+
+    def share_count_source_for(self, period: str) -> Optional[SegmentSource]:
+        if not self.share_count_sources:
+            return None
+        try:
+            return _lookup_period_value(self.share_count_sources, str(period))
+        except KeyError:
+            return None
 
     def latest_share_price(self) -> Optional[float]:
         for value in reversed(self.share_prices):
             if math.isfinite(value) and value > 0:
                 return value
         return None
+
+    def _resolve_share_price_symbol(self) -> Optional[str]:
+        if self.share_price_symbol and self.share_price_symbol.strip():
+            return self.share_price_symbol.strip()
+        company_name = self.company_root.name.strip()
+        return company_name or None
+
+    def _fetch_period_share_prices(self) -> Dict[str, float]:
+        symbol = self._resolve_share_price_symbol()
+        if not symbol:
+            raise ValueError("A share price symbol could not be determined for this company.")
+
+        period_dates: List[Tuple[str, datetime]] = []
+        for label in self.periods:
+            parsed = _parse_period_label(label)
+            if parsed is None:
+                continue
+            period_dates.append((label, parsed))
+
+        if not period_dates:
+            raise ValueError("The reporting periods could not be translated into calendar dates.")
+
+        period_dates.sort(key=lambda item: item[1])
+        earliest = period_dates[0][1]
+        latest = period_dates[-1][1]
+        start_date = (earliest - timedelta(days=3)).date()
+        end_date = (latest + timedelta(days=3)).date()
+        start_dt = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
+        end_dt = datetime(end_date.year, end_date.month, end_date.day, tzinfo=timezone.utc) + timedelta(days=1)
+        period1 = int(start_dt.timestamp())
+        period2 = int(end_dt.timestamp())
+
+        encoded_symbol = quote(symbol)
+        url = (
+            "https://query1.finance.yahoo.com/v8/finance/chart/"
+            f"{encoded_symbol}?interval=1d&period1={period1}&period2={period2}"
+        )
+
+        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.URLError as exc:
+            raise ValueError(
+                f"Unable to download share price history for {symbol}: {exc.reason if hasattr(exc, 'reason') else exc}"
+            ) from exc
+
+        chart = payload.get("chart", {}) if isinstance(payload, dict) else {}
+        results = chart.get("result") if isinstance(chart, dict) else None
+        if not results:
+            error_info = chart.get("error") if isinstance(chart, dict) else None
+            description = ""
+            if isinstance(error_info, dict):
+                description = error_info.get("description") or error_info.get("message") or ""
+            raise ValueError(
+                "Share price data was not returned by Yahoo Finance"
+                + (f": {description}" if description else ".")
+            )
+
+        result = results[0]
+        timestamps = result.get("timestamp") if isinstance(result, dict) else None
+        indicators = result.get("indicators") if isinstance(result, dict) else None
+        quotes = indicators.get("quote") if isinstance(indicators, dict) else None
+        quote0 = quotes[0] if isinstance(quotes, list) and quotes else None
+        closes = quote0.get("close") if isinstance(quote0, dict) else None
+
+        if not timestamps or not closes:
+            raise ValueError("Share price history was returned without timestamp information.")
+
+        date_prices: Dict[date, float] = {}
+        for index, timestamp_value in enumerate(timestamps):
+            if index >= len(closes):
+                break
+            close_value = closes[index]
+            if close_value is None or not math.isfinite(close_value):
+                continue
+            try:
+                ts = float(timestamp_value)
+            except (TypeError, ValueError):
+                continue
+            closing_time = datetime.fromtimestamp(ts, tz=timezone.utc)
+            date_prices[closing_time.date()] = float(close_value)
+
+        if not date_prices:
+            raise ValueError("No valid share price entries were found in the Yahoo Finance response.")
+
+        available_dates = sorted(date_prices.keys())
+        prices: Dict[str, float] = {}
+        for label, target_datetime in period_dates:
+            target_date = target_datetime.date()
+            price = date_prices.get(target_date)
+            if price is None:
+                index = bisect_left(available_dates, target_date)
+                while index < len(available_dates):
+                    candidate = available_dates[index]
+                    if candidate >= target_date:
+                        price = date_prices[candidate]
+                        break
+                    index += 1
+            if price is not None and price > 0 and math.isfinite(price):
+                prices[str(label)] = float(price)
+
+        if len(prices) < len(period_dates) and self.share_prices:
+            for idx, label in enumerate(self.periods):
+                if label in prices:
+                    continue
+                if idx >= len(self.share_prices):
+                    continue
+                fallback_price = self.share_prices[idx]
+                if fallback_price and math.isfinite(fallback_price) and fallback_price > 0:
+                    prices[str(label)] = float(fallback_price)
+
+        if len(prices) < len(period_dates):
+            missing_labels = [label for label, _ in period_dates if str(label) not in prices]
+            missing_preview = ", ".join(missing_labels[:3])
+            if len(missing_labels) > 3:
+                missing_preview += ", …"
+            raise ValueError(
+                "Share price history is unavailable for the following periods: "
+                f"{missing_preview}"
+            )
+
+        return prices
+
+    def _get_period_share_price_map(self) -> Dict[str, float]:
+        if self._period_share_price_map is not None:
+            return self._period_share_price_map
+        if self._share_price_error is not None:
+            raise ValueError(self._share_price_error)
+        try:
+            price_map = self._fetch_period_share_prices()
+        except ValueError as exc:
+            self._share_price_error = str(exc)
+            raise
+        self._period_share_price_map = price_map
+        return price_map
 
     def has_data(self) -> bool:
         return bool(self.finance_segments or self.income_segments)
@@ -656,6 +1356,7 @@ class FinancePlotFrame(ttk.Frame):
     MODE_STACKED = "stacked"
     MODE_LINE = "line"
     VALUE_MODE_SHARE_COUNT = "share_count"
+    VALUE_MODE_SHARE_PRICE = "share_price_values"
 
     def __init__(self, parent: tk.Widget) -> None:
         super().__init__(parent)
@@ -687,6 +1388,9 @@ class FinancePlotFrame(ttk.Frame):
         self._share_price_formatter = ScalarFormatter(useOffset=False)
         self._share_price_formatter.set_scientific(True)
         self._share_price_formatter.set_powerlimits((0, 0))
+        self._share_price_ratio_formatter = ScalarFormatter(useOffset=False)
+        self._share_price_ratio_formatter.set_scientific(True)
+        self._share_price_ratio_formatter.set_powerlimits((0, 0))
         self._render_empty()
 
     @staticmethod
@@ -712,8 +1416,85 @@ class FinancePlotFrame(ttk.Frame):
             self._show_context_menu if self.display_mode == self.MODE_STACKED else None
         )
         self.hover_helper.begin_update(context_callback)
-        self.figure.tight_layout()
         self.canvas.draw()
+
+    def _compute_period_metrics(
+        self,
+        dataset: FinanceDataset,
+        periods: Sequence[str],
+        *,
+        series: str,
+    ) -> Dict[str, Dict[str, Any]]:
+        if not periods:
+            return {}
+
+        share_counts, share_count_presence = dataset.share_counts_for(periods)
+        share_prices, share_price_presence = dataset.share_prices_for_optional(periods)
+        reported_totals, reported_presence = dataset.aggregate_raw_totals(periods, series=series)
+
+        metrics: Dict[str, Dict[str, Any]] = {}
+        for idx, label in enumerate(periods):
+            label_key = str(label)
+
+            share_count_value = (
+                float(share_counts[idx])
+                if idx < len(share_counts)
+                and share_count_presence[idx]
+                and math.isfinite(share_counts[idx])
+                and share_counts[idx] > 0
+                else math.nan
+            )
+
+            reported_value = (
+                float(reported_totals[idx])
+                if idx < len(reported_totals)
+                and reported_presence[idx]
+                and reported_totals[idx] is not None
+                and math.isfinite(reported_totals[idx])
+                else math.nan
+            )
+
+            share_price_value = (
+                float(share_prices[idx])
+                if idx < len(share_prices)
+                and share_price_presence[idx]
+                and math.isfinite(share_prices[idx])
+                and share_prices[idx] > 0
+                else math.nan
+            )
+
+            if (
+                math.isfinite(reported_value)
+                and math.isfinite(share_count_value)
+                and share_count_value != 0
+            ):
+                value_per_share = reported_value / share_count_value
+            else:
+                value_per_share = math.nan
+
+            if (
+                math.isfinite(reported_value)
+                and math.isfinite(share_count_value)
+                and share_count_value != 0
+                and math.isfinite(share_price_value)
+                and share_price_value > 0
+            ):
+                value_share_price_ratio = (
+                    reported_value / (share_count_value * share_price_value)
+                )
+            else:
+                value_share_price_ratio = math.nan
+
+            metrics[label_key] = {
+                "date": label,
+                "share_count": share_count_value,
+                "reported_sum": reported_value,
+                "value_per_share": value_per_share,
+                "value_share_price_ratio": value_share_price_ratio,
+                "share_price": share_price_value,
+            }
+
+        return metrics
 
     def set_display_mode(self, mode: str) -> None:
         if mode not in {self.MODE_STACKED, self.MODE_LINE}:
@@ -731,7 +1512,9 @@ class FinancePlotFrame(ttk.Frame):
             FinanceDataset.NORMALIZATION_SHARES,
             FinanceDataset.NORMALIZATION_REPORTED,
             FinanceDataset.NORMALIZATION_SHARE_PRICE,
+            FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
             self.VALUE_MODE_SHARE_COUNT,
+            self.VALUE_MODE_SHARE_PRICE,
         }
         if mode not in valid_modes:
             return False
@@ -739,6 +1522,26 @@ class FinancePlotFrame(ttk.Frame):
         if mode == self.VALUE_MODE_SHARE_COUNT:
             if self.normalization_mode == mode:
                 return True
+            self.normalization_mode = mode
+            if self.datasets:
+                self._render()
+            else:
+                self._render_empty()
+            return True
+
+        if mode == self.VALUE_MODE_SHARE_PRICE:
+            if self.normalization_mode == mode:
+                return True
+            periods = self.visible_periods()
+            if not periods:
+                periods = self.all_periods()
+            if periods and self.datasets:
+                for dataset in self.datasets.values():
+                    try:
+                        dataset.share_prices_for(periods)
+                    except ValueError as exc:
+                        messagebox.showwarning("Share Price", str(exc))
+                        return False
             self.normalization_mode = mode
             if self.datasets:
                 self._render()
@@ -791,11 +1594,12 @@ class FinancePlotFrame(ttk.Frame):
     @staticmethod
     def _merge_periods(existing: Sequence[str], new_periods: Sequence[str]) -> List[str]:
         ordered_unique: List[str] = []
-        seen = set()
+        seen_tokens: Set[Tuple[str, int, int, str]] = set()
         for label in list(existing) + list(new_periods):
-            if label in seen:
+            token = _normalized_period_token(label)
+            if token in seen_tokens:
                 continue
-            seen.add(label)
+            seen_tokens.add(token)
             ordered_unique.append(label)
         return FinancePlotFrame._sort_periods(ordered_unique)
 
@@ -819,12 +1623,51 @@ class FinancePlotFrame(ttk.Frame):
                 ordered.append(label)
         return self._sort_periods(ordered)
 
+    def _recalculate_periods_after_mutation(self) -> None:
+        if not self.datasets:
+            self.periods = None
+            self._periods_by_key.clear()
+            self._visible_periods = None
+            return
+        self._periods_by_key.clear()
+        for dataset in self.datasets.values():
+            self._register_periods(dataset)
+        self.periods = self._rebuild_period_sequence()
+        if self._visible_periods is None:
+            self._visible_periods = list(self.periods)
+        else:
+            previous = list(self._visible_periods)
+            allowed = set(self.periods)
+            updated = [label for label in previous if label in allowed]
+            if previous and not updated:
+                updated = list(self.periods)
+            self._visible_periods = updated
+
     def clear_companies(self) -> None:
         self.datasets.clear()
+        self._company_colors.clear()
         self.periods = None
         self._periods_by_key.clear()
         self._visible_periods = None
         self._render_empty()
+
+    def remove_company(self, company: str) -> bool:
+        if company not in self.datasets:
+            return False
+        self.datasets.pop(company, None)
+        self._company_colors.pop(company, None)
+        self._recalculate_periods_after_mutation()
+        if self.datasets:
+            self._render()
+        else:
+            self._render_empty()
+        return True
+
+    def has_companies(self) -> bool:
+        return bool(self.datasets)
+
+    def current_companies(self) -> List[str]:
+        return list(self.datasets.keys())
 
     def add_company(self, company: str, dataset: FinanceDataset) -> Tuple[bool, Optional[str]]:
         previous_periods = set(self.periods or [])
@@ -852,14 +1695,20 @@ class FinancePlotFrame(ttk.Frame):
         try:
             dataset.set_normalization_mode(self._dataset_normalization_mode)
         except ValueError as exc:
-            if self._dataset_normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
+            if self._dataset_normalization_mode in {
+                FinanceDataset.NORMALIZATION_SHARE_PRICE,
+                FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
+            }:
                 normalization_warning = str(exc)
                 fallback_mode = FinanceDataset.NORMALIZATION_SHARES
                 dataset.set_normalization_mode(fallback_mode)
                 for existing in self.datasets.values():
                     existing.set_normalization_mode(fallback_mode)
                 self._dataset_normalization_mode = fallback_mode
-                if self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
+                if self.normalization_mode in {
+                    FinanceDataset.NORMALIZATION_SHARE_PRICE,
+                    FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
+                }:
                     self.normalization_mode = fallback_mode
             else:
                 raise
@@ -920,7 +1769,7 @@ class FinancePlotFrame(ttk.Frame):
         legend_handles: List[Any] = []
 
         if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
-            hover_helper.begin_update(None)
+            hover_helper.begin_update(self._show_context_menu)
             x_positions = period_indices
             for company, dataset in self.datasets.items():
                 finance_color, _ = self._company_colors.setdefault(
@@ -933,9 +1782,21 @@ class FinancePlotFrame(ttk.Frame):
                     share_values[idx] if share_presence[idx] else math.nan
                     for idx in range(len(share_values))
                 ]
+                plot_positions = [
+                    x_positions[idx]
+                    for idx, present in enumerate(share_presence)
+                    if present and math.isfinite(share_points[idx])
+                ]
+                plot_values = [
+                    share_points[idx]
+                    for idx, present in enumerate(share_presence)
+                    if present and math.isfinite(share_points[idx])
+                ]
+                if not plot_positions:
+                    continue
                 line = self.axis.plot(
-                    x_positions,
-                    share_points,
+                    plot_positions,
+                    plot_values,
                     linestyle=":",
                     marker="o",
                     color=finance_color,
@@ -944,6 +1805,111 @@ class FinancePlotFrame(ttk.Frame):
                     label=f"{company} Number of shares",
                 )
                 legend_handles.append(line[0])
+                for idx, present in enumerate(share_presence):
+                    if not present:
+                        continue
+                    value = share_points[idx]
+                    if not math.isfinite(value):
+                        continue
+                    period_label = periods[idx] if idx < len(periods) else str(idx)
+                    metadata: Dict[str, Any] = {
+                        "key": f"{company}_share_count",
+                        "type_label": "Number of Shares",
+                        "type_value": "Number of Shares",
+                        "category": company,
+                        "item": "Shares",
+                        "period": period_label,
+                        "value": value,
+                        "company": company,
+                        "series": self.VALUE_MODE_SHARE_COUNT,
+                    }
+                    source = dataset.share_count_source_for(period_label)
+                    if source:
+                        metadata["pdf_path"] = str(source.pdf_path)
+                        metadata["pdf_page"] = source.page
+                    hover_helper.add_point_target(
+                        float(x_positions[idx]), float(value), metadata
+                    )
+
+            if period_indices:
+                self.axis.set_xticks(period_indices)
+                self.axis.set_xticklabels(periods, rotation=45, ha="right")
+                self.axis.set_xlim(-0.5, len(period_indices) - 0.5)
+            else:
+                self.axis.set_xlim(-0.6, 0.6)
+                self.axis.set_xticks([])
+
+        elif self.normalization_mode == self.VALUE_MODE_SHARE_PRICE:
+            hover_helper.begin_update(None)
+            x_positions = period_indices
+            for company, dataset in self.datasets.items():
+                finance_color, _ = self._company_colors.setdefault(
+                    company, self._next_color_pair()
+                )
+                try:
+                    share_prices, share_presence = dataset.share_prices_for(periods)
+                except ValueError:
+                    continue
+                if not any(share_presence):
+                    continue
+                price_points = [
+                    share_prices[idx] if share_presence[idx] else math.nan
+                    for idx in range(len(share_prices))
+                ]
+                plot_positions = [
+                    x_positions[idx]
+                    for idx, present in enumerate(share_presence)
+                    if present and math.isfinite(price_points[idx])
+                ]
+                plot_values = [
+                    price_points[idx]
+                    for idx, present in enumerate(share_presence)
+                    if present and math.isfinite(price_points[idx])
+                ]
+                if not plot_positions:
+                    continue
+                share_price_metrics = self._compute_period_metrics(
+                    dataset,
+                    periods,
+                    series=FinanceDataset.FINANCE_LABEL,
+                )
+                line = self.axis.plot(
+                    plot_positions,
+                    plot_values,
+                    linestyle="-",
+                    marker="o",
+                    color=finance_color,
+                    markerfacecolor=finance_color,
+                    markeredgecolor=finance_color,
+                    linewidth=1.6,
+                    markersize=6,
+                    label=f"{company} Share Price",
+                )
+                legend_handles.append(line[0])
+                for idx, present in enumerate(share_presence):
+                    if not present:
+                        continue
+                    value = price_points[idx]
+                    if not math.isfinite(value):
+                        continue
+                    period_label = periods[idx] if idx < len(periods) else str(idx)
+                    metadata = {
+                        "key": f"{company}_share_price",
+                        "type_label": "Share Price",
+                        "type_value": "Share Price",
+                        "category": company,
+                        "item": dataset.share_price_symbol or "Share Price",
+                        "period": str(period_label),
+                        "value": value,
+                        "company": company,
+                        "series": self.VALUE_MODE_SHARE_PRICE,
+                    }
+                    extra = share_price_metrics.get(str(period_label))
+                    if extra:
+                        metadata.update(extra)
+                    hover_helper.add_point_target(
+                        float(x_positions[idx]), float(value), metadata
+                    )
 
             if period_indices:
                 self.axis.set_xticks(period_indices)
@@ -993,14 +1959,27 @@ class FinancePlotFrame(ttk.Frame):
                 finance_active_indices = [
                     idx for idx, flag in enumerate(finance_nonzero) if flag
                 ]
+                finance_totals_all = [0.0] * len(periods)
+                if finance_segment_values:
+                    for _, segment_values in finance_segment_values:
+                        for idx, value in enumerate(segment_values):
+                            finance_totals_all[idx] += value
                 finance_positions_active = [
                     finance_positions[idx] for idx in finance_active_indices
                 ]
                 finance_periods_active = [
                     periods[idx] for idx in finance_active_indices
                 ]
+                finance_totals_active = [
+                    finance_totals_all[idx] for idx in finance_active_indices
+                ]
                 finance_pos_totals = [0.0] * len(finance_active_indices)
                 finance_neg_totals = [0.0] * len(finance_active_indices)
+                finance_metrics = self._compute_period_metrics(
+                    dataset,
+                    finance_periods_active,
+                    series=FinanceDataset.FINANCE_LABEL,
+                )
 
                 if finance_active_indices:
                     for segment, segment_values in finance_segment_values:
@@ -1020,6 +1999,7 @@ class FinancePlotFrame(ttk.Frame):
                             color=dataset.color_for_key(segment.key),
                             edgecolor=finance_color,
                             linewidth=2.4,
+                            linestyle="-",
                         )
                         hover_helper.add_segment(
                             rectangles,
@@ -1027,6 +2007,9 @@ class FinancePlotFrame(ttk.Frame):
                             finance_periods_active,
                             company,
                             values=filtered_values,
+                            series_label=FinanceDataset.FINANCE_LABEL,
+                            totals=finance_totals_active,
+                            metadata_overrides=finance_metrics,
                         )
 
                 income_segment_values: List[Tuple[RowSegment, List[float]]] = []
@@ -1050,14 +2033,27 @@ class FinancePlotFrame(ttk.Frame):
                 income_active_indices = [
                     idx for idx, flag in enumerate(income_nonzero) if flag
                 ]
+                income_totals_all = [0.0] * len(periods)
+                if income_segment_values:
+                    for _, segment_values in income_segment_values:
+                        for idx, value in enumerate(segment_values):
+                            income_totals_all[idx] += value
                 income_positions_active = [
                     income_positions[idx] for idx in income_active_indices
                 ]
                 income_periods_active = [
                     periods[idx] for idx in income_active_indices
                 ]
+                income_totals_active = [
+                    income_totals_all[idx] for idx in income_active_indices
+                ]
                 income_pos_totals = [0.0] * len(income_active_indices)
                 income_neg_totals = [0.0] * len(income_active_indices)
+                income_metrics = self._compute_period_metrics(
+                    dataset,
+                    income_periods_active,
+                    series=FinanceDataset.INCOME_LABEL,
+                )
 
                 if income_active_indices:
                     for segment, segment_values in income_segment_values:
@@ -1075,8 +2071,9 @@ class FinancePlotFrame(ttk.Frame):
                             width=bar_width,
                             bottom=bottoms,
                             color=dataset.color_for_key(segment.key),
-                            edgecolor=income_color,
+                            edgecolor=finance_color,
                             linewidth=2.4,
+                            linestyle="--",
                         )
                         hover_helper.add_segment(
                             rectangles,
@@ -1084,6 +2081,9 @@ class FinancePlotFrame(ttk.Frame):
                             income_periods_active,
                             company,
                             values=filtered_values,
+                            series_label=FinanceDataset.INCOME_LABEL,
+                            totals=income_totals_active,
+                            metadata_overrides=income_metrics,
                         )
 
                 if finance_active_indices:
@@ -1104,6 +2104,7 @@ class FinancePlotFrame(ttk.Frame):
                             facecolor="white",
                             edgecolor=finance_color,
                             linewidth=1.0,
+                            linestyle="-",
                             label=f"{company} {FinanceDataset.FINANCE_LABEL}",
                         )
                     )
@@ -1124,8 +2125,9 @@ class FinancePlotFrame(ttk.Frame):
                     legend_handles.append(
                         Patch(
                             facecolor="white",
-                            edgecolor=income_color,
+                            edgecolor=finance_color,
                             linewidth=1.0,
+                            linestyle="--",
                             label=f"{company} {FinanceDataset.INCOME_LABEL}",
                         )
                     )
@@ -1146,7 +2148,7 @@ class FinancePlotFrame(ttk.Frame):
                 self.axis.set_xticks([])
 
         else:
-            hover_helper.begin_update(None)
+            hover_helper.begin_update(self._show_context_menu)
             x_positions = period_indices
             for company, dataset in self.datasets.items():
                 finance_color, income_color = self._company_colors.setdefault(
@@ -1159,17 +2161,32 @@ class FinancePlotFrame(ttk.Frame):
                 )
                 finance_included = [
                     finance_presence[idx]
-                    and not math.isclose(value, 0.0, abs_tol=1e-12)
-                    for idx, value in enumerate(finance_totals)
+                    and math.isfinite(finance_totals[idx])
+                    for idx in range(len(finance_totals))
                 ]
                 finance_points = [
                     value if finance_included[idx] else math.nan
                     for idx, value in enumerate(finance_totals)
                 ]
-                if any(finance_included):
+                finance_metrics = self._compute_period_metrics(
+                    dataset,
+                    periods,
+                    series=FinanceDataset.FINANCE_LABEL,
+                )
+                plot_positions = [
+                    x_positions[idx]
+                    for idx, included in enumerate(finance_included)
+                    if included and math.isfinite(finance_points[idx])
+                ]
+                plot_values = [
+                    finance_points[idx]
+                    for idx, included in enumerate(finance_included)
+                    if included and math.isfinite(finance_points[idx])
+                ]
+                if plot_positions:
                     line = self.axis.plot(
-                        x_positions,
-                        finance_points,
+                        plot_positions,
+                        plot_values,
                         linestyle="-",
                         marker="o",
                         color=company_color,
@@ -1178,23 +2195,68 @@ class FinancePlotFrame(ttk.Frame):
                         label=f"{company} {FinanceDataset.FINANCE_LABEL}",
                     )
                     legend_handles.append(line[0])
+                    for idx, present in enumerate(finance_included):
+                        if not present:
+                            continue
+                        value = finance_points[idx]
+                        if not math.isfinite(value):
+                            continue
+                        period_label = periods[idx] if idx < len(periods) else str(idx)
+                        metadata: Dict[str, Any] = {
+                            "key": f"{company}_finance_total",
+                            "type_label": FinanceDataset.FINANCE_LABEL,
+                            "type_value": FinanceDataset.FINANCE_LABEL,
+                            "category": company,
+                            "item": "Total",
+                            "period": str(period_label),
+                            "value": float(value),
+                            "company": company,
+                            "series": FinanceDataset.FINANCE_LABEL,
+                        }
+                        source = dataset.source_for_series(
+                            FinanceDataset.FINANCE_LABEL, str(period_label)
+                        )
+                        if source:
+                            metadata["pdf_path"] = str(source.pdf_path)
+                            metadata["pdf_page"] = source.page
+                        extra = finance_metrics.get(str(period_label))
+                        if extra:
+                            metadata.update(extra)
+                        hover_helper.add_point_target(
+                            float(x_positions[idx]), float(value), metadata
+                        )
 
                 income_totals, income_presence = dataset.aggregate_totals(
                     periods, series=FinanceDataset.INCOME_LABEL
                 )
                 income_included = [
                     income_presence[idx]
-                    and not math.isclose(value, 0.0, abs_tol=1e-12)
-                    for idx, value in enumerate(income_totals)
+                    and math.isfinite(income_totals[idx])
+                    for idx in range(len(income_totals))
                 ]
                 income_points = [
                     value if income_included[idx] else math.nan
                     for idx, value in enumerate(income_totals)
                 ]
-                if any(income_included):
+                income_metrics = self._compute_period_metrics(
+                    dataset,
+                    periods,
+                    series=FinanceDataset.INCOME_LABEL,
+                )
+                plot_positions = [
+                    x_positions[idx]
+                    for idx, included in enumerate(income_included)
+                    if included and math.isfinite(income_points[idx])
+                ]
+                plot_values = [
+                    income_points[idx]
+                    for idx, included in enumerate(income_included)
+                    if included and math.isfinite(income_points[idx])
+                ]
+                if plot_positions:
                     line = self.axis.plot(
-                        x_positions,
-                        income_points,
+                        plot_positions,
+                        plot_values,
                         linestyle="--",
                         marker="o",
                         color=company_color,
@@ -1203,6 +2265,36 @@ class FinancePlotFrame(ttk.Frame):
                         label=f"{company} {FinanceDataset.INCOME_LABEL}",
                     )
                     legend_handles.append(line[0])
+                    for idx, present in enumerate(income_included):
+                        if not present:
+                            continue
+                        value = income_points[idx]
+                        if not math.isfinite(value):
+                            continue
+                        period_label = periods[idx] if idx < len(periods) else str(idx)
+                        metadata = {
+                            "key": f"{company}_income_total",
+                            "type_label": FinanceDataset.INCOME_LABEL,
+                            "type_value": FinanceDataset.INCOME_LABEL,
+                            "category": company,
+                            "item": "Total",
+                            "period": str(period_label),
+                            "value": float(value),
+                            "company": company,
+                            "series": FinanceDataset.INCOME_LABEL,
+                        }
+                        source = dataset.source_for_series(
+                            FinanceDataset.INCOME_LABEL, str(period_label)
+                        )
+                        if source:
+                            metadata["pdf_path"] = str(source.pdf_path)
+                            metadata["pdf_page"] = source.page
+                        extra = income_metrics.get(str(period_label))
+                        if extra:
+                            metadata.update(extra)
+                        hover_helper.add_point_target(
+                            float(x_positions[idx]), float(value), metadata
+                        )
 
             if period_indices:
                 self.axis.set_xticks(period_indices)
@@ -1217,12 +2309,18 @@ class FinancePlotFrame(ttk.Frame):
         if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
             self.axis.yaxis.set_major_formatter(self._share_count_formatter)
             self.axis.set_ylabel("Number of Shares")
+        elif self.normalization_mode == self.VALUE_MODE_SHARE_PRICE:
+            self.axis.yaxis.set_major_formatter(self._share_price_formatter)
+            self.axis.set_ylabel("Share Price")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARES:
             self.axis.yaxis.set_major_formatter(self._per_share_formatter)
-            self.axis.set_ylabel("Value per Share")
+            self.axis.set_ylabel("Value/Share")
         elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE:
             self.axis.yaxis.set_major_formatter(self._share_price_formatter)
             self.axis.set_ylabel("Share Price Multiple")
+        elif self.normalization_mode == FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD:
+            self.axis.yaxis.set_major_formatter(self._share_price_ratio_formatter)
+            self.axis.set_ylabel("Value/(Share*Price)")
         else:
             self.axis.yaxis.set_major_formatter(self._reported_formatter)
             self.axis.set_ylabel("Reported Value")
@@ -1230,21 +2328,26 @@ class FinancePlotFrame(ttk.Frame):
             companies_list = ", ".join(self.datasets.keys())
             if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
                 self.axis.set_title(f"Number of Shares — {companies_list}")
+            elif self.normalization_mode == self.VALUE_MODE_SHARE_PRICE:
+                self.axis.set_title(f"Share Price — {companies_list}")
             else:
                 self.axis.set_title(f"Finance vs Income Statement — {companies_list}")
         else:
             if self.normalization_mode == self.VALUE_MODE_SHARE_COUNT:
                 self.axis.set_title("Number of Shares")
+            elif self.normalization_mode == self.VALUE_MODE_SHARE_PRICE:
+                self.axis.set_title("Share Price")
             else:
                 self.axis.set_title("Finance vs Income Statement")
 
         if legend_handles:
-            legend_kwargs = {"loc": "upper left"}
-            if mode == self.MODE_STACKED and self.normalization_mode != self.VALUE_MODE_SHARE_COUNT:
-                legend_kwargs["ncol"] = 2
+            legend_kwargs = {
+                "loc": "center left",
+                "bbox_to_anchor": (1.02, 0.5),
+                "borderaxespad": 0.0,
+            }
             self.axis.legend(handles=legend_handles, **legend_kwargs)
 
-        self.figure.tight_layout()
         self.canvas.draw()
 
     def _ensure_context_menu(self) -> tk.Menu:
@@ -1277,57 +2380,183 @@ class FinancePlotFrame(ttk.Frame):
             menu.grab_release()
 
     def _open_pdf_from_context(self) -> None:
-        if not self._context_metadata:
+        metadata = self._context_metadata
+        if not metadata:
             return
-        pdf_path_value = self._context_metadata.get("pdf_path")
-        if not pdf_path_value:
-            messagebox.showinfo("Open PDF", "No PDF is associated with this bar segment.")
-            return
-        pdf_path = Path(str(pdf_path_value))
-        page_value = self._context_metadata.get("pdf_page")
-        page: Optional[int]
-        try:
-            page = int(page_value) if page_value is not None else None
-        except (TypeError, ValueError):
-            page = None
-        if page is not None and page <= 0:
-            page = None
+
+        def _parse_page(value: Any) -> Optional[int]:
+            try:
+                number = int(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+            if number is None or number <= 0:
+                return None
+            return number
+
+        def _context_source(path_value: Any, page_value: Any) -> Optional[SegmentSource]:
+            if not path_value:
+                return None
+            pdf_path = Path(str(path_value))
+            return SegmentSource(pdf_path=pdf_path, page=_parse_page(page_value))
+
+        company_value = metadata.get("company")
+        period_value = metadata.get("period")
+        period_label = str(period_value) if period_value is not None else None
+        dataset = None
+        if company_value is not None:
+            dataset = self.datasets.get(str(company_value))
+        series_value = metadata.get("series")
+        pdf_path_value = metadata.get("pdf_path")
+        page_value = metadata.get("pdf_page")
+
+        sources_to_open: List[Tuple[str, SegmentSource, str]] = []
+        paired_sources: Optional[
+            Tuple[Tuple[str, SegmentSource], Tuple[str, SegmentSource]]
+        ] = None
+
+        if series_value == self.VALUE_MODE_SHARE_COUNT:
+            if dataset is not None and period_label is not None:
+                share_source = dataset.share_count_source_for(period_label)
+                if share_source is not None:
+                    sources_to_open.append(("Number of Shares", share_source, "full"))
+            if not sources_to_open:
+                fallback = _context_source(pdf_path_value, page_value)
+                if fallback is not None:
+                    sources_to_open.append(("Number of Shares", fallback, "full"))
+                else:
+                    messagebox.showinfo(
+                        "Open PDF", "No PDF is associated with this data point."
+                    )
+                    self._context_metadata = None
+                    return
+        else:
+            finance_source: Optional[SegmentSource] = None
+            income_source: Optional[SegmentSource] = None
+            if dataset is not None and period_label is not None:
+                finance_source = dataset.source_for_series(
+                    FinanceDataset.FINANCE_LABEL, period_label
+                )
+                income_source = dataset.source_for_series(
+                    FinanceDataset.INCOME_LABEL, period_label
+                )
+            if finance_source or income_source:
+                if (
+                    finance_source is not None
+                    and finance_source.page is not None
+                    and income_source is not None
+                    and income_source.page is not None
+                ):
+                    paired_sources = (
+                        (FinanceDataset.FINANCE_LABEL, finance_source),
+                        (FinanceDataset.INCOME_LABEL, income_source),
+                    )
+                else:
+                    if finance_source is not None:
+                        sources_to_open.append(
+                            (FinanceDataset.FINANCE_LABEL, finance_source, "full")
+                        )
+                    if income_source is not None:
+                        sources_to_open.append(
+                            (FinanceDataset.INCOME_LABEL, income_source, "full")
+                        )
+            else:
+                fallback = _context_source(pdf_path_value, page_value)
+                if fallback is not None:
+                    label_text = (
+                        metadata.get("type_label")
+                        or metadata.get("type_value")
+                        or "Entry"
+                    )
+                    sources_to_open.append((str(label_text), fallback, "full"))
+                else:
+                    messagebox.showinfo(
+                        "Open PDF", "No PDF is associated with this bar segment."
+                    )
+                    self._context_metadata = None
+                    return
+
+        if paired_sources is not None:
+            company_label = metadata.get("company") or "Company"
+            period_label = metadata.get("period") or "Period"
+            title = f"{company_label} — {period_label}"
+            if not self._open_pdf_pair(paired_sources[0], paired_sources[1], title):
+                for label_text, source, placement in (
+                    (paired_sources[0][0], paired_sources[0][1], "left"),
+                    (paired_sources[1][0], paired_sources[1][1], "right"),
+                ):
+                    sources_to_open.append((label_text, source, placement))
+
+        for label_text, source, placement in sources_to_open:
+            self._open_pdf_source(source, str(label_text), placement)
+
+        self._context_metadata = None
+
+    def _open_pdf_source(
+        self, source: SegmentSource, label: str, placement: str = "full"
+    ) -> None:
+        pdf_path = source.pdf_path
+        page = source.page
         if not pdf_path.exists():
             messagebox.showwarning(
                 "Open PDF",
-                f"The PDF for this bar segment could not be found at {pdf_path}.",
+                f"The PDF for {label} could not be found at {pdf_path}.",
             )
             return
         if page is None:
             messagebox.showinfo(
                 "Open PDF",
-                "No page number is available for this entry. The PDF will open to its first page.",
+                f"No page number is available for {label}. The PDF will open to its first page.",
             )
             open_pdf(pdf_path, None)
-            self._context_metadata = None
             return
         if fitz is None:
             messagebox.showwarning(
                 "Open PDF",
                 (
                     "Viewing individual PDF pages requires the PyMuPDF package (import name 'fitz').\n"
-                    "The full PDF will be opened instead."
+                    f"The full PDF for {label} will be opened instead."
                 ),
             )
             open_pdf(pdf_path, page)
-            self._context_metadata = None
             return
         try:
-            viewer = PdfPageViewer(self, pdf_path, page)
+            viewer = PdfPageViewer(self, pdf_path, page, placement=placement)
             viewer.focus_set()
         except Exception as exc:
             messagebox.showwarning(
                 "Open PDF",
-                f"Could not display page {page} from {pdf_path.name}: {exc}\n"
+                f"Could not display page {page} from {pdf_path.name} ({label}): {exc}\n"
                 "The full PDF will be opened instead.",
             )
             open_pdf(pdf_path, page)
-        self._context_metadata = None
+
+    def _open_pdf_pair(
+        self,
+        left: Tuple[str, SegmentSource],
+        right: Tuple[str, SegmentSource],
+        title: str,
+    ) -> bool:
+        left_source = left[1]
+        right_source = right[1]
+        if left_source.page is None or right_source.page is None:
+            return False
+        if not left_source.pdf_path.exists() or not right_source.pdf_path.exists():
+            return False
+        if fitz is None:
+            return False
+        try:
+            viewer = PdfSplitViewer(self, left, right, title)
+            viewer.focus_set()
+            return True
+        except Exception as exc:
+            messagebox.showwarning(
+                "Open PDF",
+                (
+                    "Could not display the Finance and Income PDFs together. "
+                    f"The individual documents will be opened instead.\nDetails: {exc}"
+                ),
+            )
+            return False
 
 
 class BarHoverHelper:
@@ -1336,6 +2565,7 @@ class BarHoverHelper:
     def __init__(self, axis) -> None:
         self.axis = axis
         self._rectangles: List[Tuple[Rectangle, Dict[str, Any]]] = []
+        self._point_targets: List[Tuple[Tuple[float, float], Dict[str, Any]]] = []
         self._annotation = self._create_annotation()
         self._canvas: Optional[FigureCanvasTkAgg] = None
         self._tk_widget: Optional[tk.Widget] = None
@@ -1344,6 +2574,8 @@ class BarHoverHelper:
         self._motion_binding_id: Optional[str] = None
         self._leave_binding_id: Optional[str] = None
         self._active_rectangle: Optional[Rectangle] = None
+        self._active_point: Optional[Tuple[float, float]] = None
+        self._point_hit_radius: float = 12.0
         self._context_callback: Optional[Callable[[Dict[str, Any], Any], None]] = None
 
     def _create_annotation(self):
@@ -1420,7 +2652,9 @@ class BarHoverHelper:
     def reset(self) -> None:
         self._ensure_annotation()
         self._rectangles.clear()
+        self._point_targets.clear()
         self._active_rectangle = None
+        self._active_point = None
         self._annotation.set_visible(False)
 
     def _on_tk_motion(self, tk_event: tk.Event) -> None:  # type: ignore[name-defined]
@@ -1480,6 +2714,9 @@ class BarHoverHelper:
         company: str,
         *,
         values: Optional[Sequence[float]] = None,
+        series_label: Optional[str] = None,
+        totals: Optional[Sequence[float]] = None,
+        metadata_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> None:
         for index, rect in enumerate(bar_container.patches):
             value_list = values if values is not None else segment.values
@@ -1489,17 +2726,31 @@ class BarHoverHelper:
                 "type_value": segment.type_value,
                 "category": segment.category,
                 "item": segment.item,
-                "period": periods[index] if index < len(periods) else str(index),
+                "period": str(periods[index]) if index < len(periods) else str(index),
                 "value": value_list[index] if index < len(value_list) else 0.0,
                 "company": company,
             }
+            if series_label:
+                metadata["series"] = series_label
             period_label = metadata["period"]
             if period_label is not None and segment.sources:
-                source = segment.sources.get(str(period_label))
+                try:
+                    source = _lookup_period_value(segment.sources, str(period_label))
+                except KeyError:
+                    source = None
                 if source:
                     metadata["pdf_path"] = str(source.pdf_path)
                     metadata["pdf_page"] = source.page
+            if totals is not None and index < len(totals):
+                metadata["sum_value"] = totals[index]
+            if metadata_overrides:
+                extra = metadata_overrides.get(str(period_label))
+                if extra:
+                    metadata.update(extra)
             self._rectangles.append((rect, metadata))
+
+    def add_point_target(self, x: float, y: float, metadata: Dict[str, Any]) -> None:
+        self._point_targets.append(((float(x), float(y)), metadata))
 
     def clear(self) -> None:
         self.reset()
@@ -1515,12 +2766,42 @@ class BarHoverHelper:
         type_value = metadata.get("type_value") or metadata.get("type_label") or "—"
         category = metadata.get("category") or "—"
         item = metadata.get("item") or "—"
-        return (
-            f"TYPE: {type_value}\n"
-            f"CATEGORY: {category}\n"
-            f"ITEM: {item}\n"
-            f"AMOUNT: {formatted_value}"
-        )
+        date_value = metadata.get("date") or metadata.get("period") or "—"
+        share_count = metadata.get("share_count")
+        reported_sum = metadata.get("reported_sum")
+        value_per_share = metadata.get("value_per_share")
+        value_share_price_ratio = metadata.get("value_share_price_ratio")
+        share_price_value = metadata.get("share_price")
+
+        def _format_scientific(raw: Any) -> str:
+            if isinstance(raw, (int, float)) and math.isfinite(raw):
+                return f"{raw:.3e}"
+            return "—"
+
+        def _format_decimal(raw: Any) -> str:
+            if isinstance(raw, (int, float)) and math.isfinite(raw):
+                return f"{raw:,.2f}"
+            return "—"
+
+        def _format_ratio(raw: Any) -> str:
+            if isinstance(raw, (int, float)) and math.isfinite(raw):
+                return f"{raw:,.6f}"
+            return "—"
+
+        lines = [
+            f"TYPE: {type_value}",
+            f"CATEGORY: {category}",
+            f"ITEM: {item}",
+            f"DATE: {date_value}",
+            f"AMOUNT: {formatted_value}",
+            f"REPORTED SUM: {_format_scientific(reported_sum)}",
+            f"NUMBER OF SHARES: {_format_scientific(share_count)}",
+            f"VALUE/SHARE: {_format_decimal(value_per_share)}",
+            f"SHARE PRICE: {_format_decimal(share_price_value)}",
+            f"VALUE/(SHARE*PRICE): {_format_ratio(value_share_price_ratio)}",
+        ]
+
+        return "\n".join(lines)
 
     def _position_annotation(self, x: float, y: float, value: float) -> None:
         xlim = self.axis.get_xlim()
@@ -1564,8 +2845,30 @@ class BarHoverHelper:
             return
         self._annotation.set_visible(False)
         self._active_rectangle = None
+        self._active_point = None
         if self._canvas is not None:
             self._canvas.draw_idle()
+
+    def _find_point_hit(
+        self, display_x: float, display_y: float
+    ) -> Optional[Tuple[float, float, Dict[str, Any]]]:
+        if not self._point_targets:
+            return None
+        transform = self.axis.transData.transform
+        threshold_sq = self._point_hit_radius * self._point_hit_radius
+        closest: Optional[Tuple[float, float, Dict[str, Any]]] = None
+        best_distance = threshold_sq
+        for (x, y), metadata in self._point_targets:
+            if not math.isfinite(x) or not math.isfinite(y):
+                continue
+            pixel_x, pixel_y = transform((x, y))
+            dx = display_x - pixel_x
+            dy = display_y - pixel_y
+            distance_sq = dx * dx + dy * dy
+            if distance_sq <= best_distance:
+                closest = (x, y, metadata)
+                best_distance = distance_sq
+        return closest
 
     def _handle_motion_at(self, display_x: float, display_y: float) -> None:
         if self._canvas is None:
@@ -1596,6 +2899,26 @@ class BarHoverHelper:
             self._canvas.draw_idle()
             return
 
+        point_hit = self._find_point_hit(display_x, display_y)
+        if point_hit is not None:
+            point_x, point_y, metadata = point_hit
+            if (
+                self._active_point != (point_x, point_y)
+                or not self._annotation.get_visible()
+            ):
+                self._annotation.set_text(self._format_text(metadata))
+                self._annotation.set_visible(True)
+            self._active_rectangle = None
+            self._active_point = (point_x, point_y)
+            raw_value = metadata.get("value")
+            if isinstance(raw_value, (int, float)) and math.isfinite(raw_value):
+                numeric_value = float(raw_value)
+            else:
+                numeric_value = 0.0
+            self._position_annotation(point_x, point_y, numeric_value)
+            self._canvas.draw_idle()
+            return
+
         self._hide_annotation()
 
     def _on_motion(self, event) -> None:
@@ -1616,6 +2939,11 @@ class BarHoverHelper:
             contains, _ = rect.contains(event)
             if contains:
                 return metadata
+        if event.x is None or event.y is None:
+            return None
+        point_hit = self._find_point_hit(float(event.x), float(event.y))
+        if point_hit is not None:
+            return point_hit[2]
         return None
 
     def _on_button_press(self, event) -> None:
@@ -1645,6 +2973,8 @@ class FinanceAnalystApp:
             value=FinanceDataset.NORMALIZATION_SHARES
         )
         self.period_vars: Dict[str, tk.BooleanVar] = {}
+        self.period_all_var = tk.BooleanVar(value=True)
+        self._updating_period_checks = False
 
         self._build_ui()
         self._refresh_company_list()
@@ -1667,6 +2997,14 @@ class FinanceAnalystApp:
 
         self.open_button = ttk.Button(controls, text="Add", command=self._open_selected_company)
         self.open_button.pack(side=tk.LEFT)
+        self.remove_button = ttk.Button(
+            controls, text="Remove", command=self._remove_selected_company
+        )
+        self.remove_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.clear_button = ttk.Button(
+            controls, text="Clear All", command=self._clear_all_companies
+        )
+        self.clear_button.pack(side=tk.LEFT, padx=(6, 0))
 
         mode_frame = ttk.Frame(outer)
         mode_frame.pack(fill=tk.X, pady=(0, 12))
@@ -1692,16 +3030,23 @@ class FinanceAnalystApp:
         ttk.Label(values_frame, text="Values:").pack(side=tk.LEFT)
         ttk.Radiobutton(
             values_frame,
-            text="Normalize over number of shares",
+            text="Value/Share",
             variable=self.normalization_var,
             value=FinanceDataset.NORMALIZATION_SHARES,
             command=self._on_normalization_change,
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Radiobutton(
             values_frame,
-            text="Normalize over latest share price",
+            text="Value/(Share*Price)",
             variable=self.normalization_var,
-            value=FinanceDataset.NORMALIZATION_SHARE_PRICE,
+            value=FinanceDataset.NORMALIZATION_SHARE_PRICE_PERIOD,
+            command=self._on_normalization_change,
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Radiobutton(
+            values_frame,
+            text="Share price",
+            variable=self.normalization_var,
+            value=FinancePlotFrame.VALUE_MODE_SHARE_PRICE,
             command=self._on_normalization_change,
         ).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Radiobutton(
@@ -1722,11 +3067,19 @@ class FinanceAnalystApp:
         self.periods_frame = ttk.Frame(outer)
         self.periods_frame.pack(fill=tk.X, pady=(0, 12))
         ttk.Label(self.periods_frame, text="Dates:").pack(side=tk.LEFT)
+        self.period_all_check = ttk.Checkbutton(
+            self.periods_frame,
+            text="All dates",
+            variable=self.period_all_var,
+            command=self._toggle_all_periods,
+        )
+        self.period_all_check.pack(side=tk.LEFT, padx=(6, 6))
         self.period_checks_frame = ttk.Frame(self.periods_frame)
         self.period_checks_frame.pack(side=tk.LEFT, padx=(6, 0))
 
         self.plot_frame = FinancePlotFrame(outer)
         self.plot_frame.pack(fill=tk.BOTH, expand=True)
+        self.plot_frame.set_normalization_mode(self.normalization_var.get())
 
     def _on_mode_change(self) -> None:
         mode = self.mode_var.get()
@@ -1741,7 +3094,10 @@ class FinanceAnalystApp:
             self.normalization_var.set(self.plot_frame.normalization_mode)
 
     def _on_period_toggle(self) -> None:
+        if self._updating_period_checks:
+            return
         self._apply_period_filters()
+        self._update_period_all_state()
 
     def _apply_period_filters(self) -> None:
         active_periods = [
@@ -1751,6 +3107,32 @@ class FinanceAnalystApp:
             self.plot_frame.set_visible_periods([])
             return
         self.plot_frame.set_visible_periods(active_periods)
+
+    def _toggle_all_periods(self) -> None:
+        if self._updating_period_checks:
+            return
+        desired = self.period_all_var.get()
+        self._updating_period_checks = True
+        for var in self.period_vars.values():
+            var.set(desired)
+        self._updating_period_checks = False
+        self._apply_period_filters()
+        self._update_period_all_state()
+
+    def _update_period_all_state(self) -> None:
+        if not hasattr(self, "period_all_check"):
+            return
+        if not self.period_vars:
+            self._updating_period_checks = True
+            self.period_all_var.set(False)
+            self._updating_period_checks = False
+            self.period_all_check.state(["disabled"])
+            return
+        self.period_all_check.state(["!disabled"])
+        all_selected = all(var.get() for var in self.period_vars.values())
+        self._updating_period_checks = True
+        self.period_all_var.set(all_selected)
+        self._updating_period_checks = False
 
     def _refresh_period_controls(self) -> None:
         periods = self.plot_frame.all_periods()
@@ -1771,6 +3153,7 @@ class FinanceAnalystApp:
             check.pack(side=tk.LEFT, padx=(0, 6))
             self.period_vars[label] = var
 
+        self._update_period_all_state()
         self._apply_period_filters()
 
 
@@ -1805,6 +3188,27 @@ class FinanceAnalystApp:
             if combined_path.exists():
                 candidates.append(path.name)
         return candidates
+
+    def _remove_selected_company(self) -> None:
+        company = self.company_var.get().strip()
+        if not company:
+            messagebox.showinfo(
+                "Remove Company", "Choose a company to remove from the chart."
+            )
+            return
+        if not self.plot_frame.remove_company(company):
+            messagebox.showinfo(
+                "Remove Company", f"{company} is not currently on the chart."
+            )
+            return
+        self._refresh_period_controls()
+
+    def _clear_all_companies(self) -> None:
+        if not self.plot_frame.has_companies():
+            messagebox.showinfo("Clear Chart", "There are no companies to clear from the chart.")
+            return
+        self.plot_frame.clear_companies()
+        self._refresh_period_controls()
 
     def _open_selected_company(self) -> None:
         company = self.company_var.get().strip()
