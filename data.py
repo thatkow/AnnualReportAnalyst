@@ -413,6 +413,7 @@ class ReportApp:
         self.assigned_pages: Dict[str, Dict[str, Any]] = {}
         self.assigned_pages_path: Optional[Path] = None
         self.scraped_images: List[ImageTk.PhotoImage] = []
+        self.scraped_preview_states: Dict[tk.Widget, Dict[str, Any]] = {}
         self._thumbnail_resize_job: Optional[str] = None
         self.company_tabs: Dict[str, "ReportApp"] = {}
         self.company_frames: Dict[str, ttk.Frame] = {}
@@ -719,6 +720,73 @@ class ReportApp:
             self.canvas.yview_scroll(-1, "units")
         elif event.num == 5 or event.delta < 0:
             self.canvas.yview_scroll(1, "units")
+
+    def _event_has_control(self, event: tk.Event) -> bool:
+        try:
+            return bool(int(event.state) & 0x0004)
+        except Exception:
+            return False
+
+    def _on_scraped_image_click(self, event: tk.Event, widget: tk.Widget) -> Optional[str]:
+        state = self.scraped_preview_states.get(widget)
+        if not state:
+            return None
+        if self._event_has_control(event):
+            self._cycle_scraped_preview(widget)
+            return "break"
+        entry = state.get("entry")
+        if not isinstance(entry, PDFEntry):
+            return "break"
+        page_indexes: List[int] = state.get("page_indexes", [])
+        if not page_indexes:
+            return "break"
+        position = state.get("position", 0)
+        if not isinstance(position, int) or position < 0:
+            position = 0
+        if position >= len(page_indexes):
+            position = len(page_indexes) - 1
+        page_index = int(page_indexes[position])
+        state["current_page"] = page_index
+        self.open_thumbnail_zoom(entry, page_index)
+        return "break"
+
+    def _cycle_scraped_preview(self, widget: tk.Widget, direction: int = 1) -> None:
+        state = self.scraped_preview_states.get(widget)
+        if not state:
+            return
+        page_indexes: List[int] = state.get("page_indexes", [])
+        if len(page_indexes) <= 1:
+            return
+        position = state.get("position", 0)
+        try:
+            position_int = int(position)
+        except (TypeError, ValueError):
+            position_int = 0
+        new_position = (position_int + direction) % len(page_indexes)
+        entry = state.get("entry")
+        if not isinstance(entry, PDFEntry):
+            return
+        target_width = state.get("target_width", self.thumbnail_width_var.get())
+        try:
+            width_int = int(target_width)
+        except (TypeError, ValueError):
+            width_int = self.thumbnail_width_var.get()
+        page_index = int(page_indexes[new_position])
+        photo = self._render_page(entry.doc, page_index, width_int)
+        if photo is None:
+            return
+        self.scraped_images.append(photo)
+        try:
+            widget.configure(image=photo)
+        except Exception:
+            return
+        setattr(widget, "image", photo)
+        state["position"] = new_position
+        state["current_page"] = page_index
+        title_label = state.get("title_label")
+        base_text = state.get("title_base_text")
+        if isinstance(title_label, ttk.Label) and isinstance(base_text, str):
+            title_label.configure(text=f"{base_text} (Page {page_index + 1})")
 
     def _on_thumbnail_scale(self, value: str) -> None:
         try:
@@ -3502,6 +3570,7 @@ class ReportApp:
             child.destroy()
         self.scraped_images.clear()
         self.scraped_table_sources = {}
+        self.scraped_preview_states = {}
         self._clear_combined_tab()
         if hasattr(self, "scrape_progress"):
             self.scrape_progress["value"] = 0
@@ -3542,9 +3611,37 @@ class ReportApp:
                 meta = metadata.get(category)
                 if not isinstance(meta, dict):
                     continue
-                page_index = meta.get("page_index")
-                if page_index is None:
-                    continue
+                page_index_value = meta.get("page_index")
+                try:
+                    initial_page_index = (
+                        int(page_index_value)
+                        if page_index_value is not None
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    initial_page_index = None
+                meta_page_indexes = meta.get("page_indexes")
+                parsed_page_indexes: List[int] = []
+                if isinstance(meta_page_indexes, list):
+                    for idx in meta_page_indexes:
+                        try:
+                            parsed_page_indexes.append(int(idx))
+                        except (TypeError, ValueError):
+                            continue
+                if initial_page_index is not None:
+                    try:
+                        current_page_position = parsed_page_indexes.index(initial_page_index)
+                    except ValueError:
+                        parsed_page_indexes.insert(0, initial_page_index)
+                        current_page_position = 0
+                else:
+                    current_page_position = 0
+                if not parsed_page_indexes:
+                    if initial_page_index is None:
+                        continue
+                    parsed_page_indexes = [initial_page_index]
+                    current_page_position = 0
+                display_page_index = parsed_page_indexes[current_page_position]
                 preview_mode: Optional[str] = None
                 preview_path: Optional[Path] = None
                 preview_text: Optional[str] = None
@@ -3607,15 +3704,17 @@ class ReportApp:
                 header_frame.columnconfigure(4, weight=0)
                 header_frame.columnconfigure(5, weight=0)
                 header_frame.columnconfigure(6, weight=0)
-                ttk.Label(
+                base_header_text = f"{entry.path.name} - {category}"
+                title_label = ttk.Label(
                     header_frame,
-                    text=f"{entry.path.name} - {category} (Page {int(page_index) + 1})",
+                    text=f"{base_header_text} (Page {display_page_index + 1})",
                     font=("TkDefaultFont", 10, "bold"),
-                ).grid(row=0, column=0, sticky="w")
+                )
+                title_label.grid(row=0, column=0, sticky="w")
                 ttk.Button(
                     header_frame,
                     text="View Prompt",
-                    command=lambda e=entry, c=category, p=int(page_index): self._show_prompt_preview(
+                    command=lambda e=entry, c=category, p=int(display_page_index): self._show_prompt_preview(
                         e, c, p
                     ),
                     width=12,
@@ -3623,7 +3722,7 @@ class ReportApp:
                 ttk.Button(
                     header_frame,
                     text="View Raw Text",
-                    command=lambda e=entry, p=int(page_index): self._show_raw_text_dialog(e, p),
+                    command=lambda e=entry, p=int(display_page_index): self._show_raw_text_dialog(e, p),
                     width=14,
                 ).grid(row=0, column=2, sticky="e", padx=(0, 4))
                 ttk.Button(
@@ -3680,15 +3779,29 @@ class ReportApp:
                 table_frame.grid(row=row_index, column=1, sticky="nsew", padx=4)
                 self.scraped_inner.rowconfigure(row_index, weight=1)
 
-                photo = self._render_page(entry.doc, int(page_index), pdf_target_width)
+                photo = self._render_page(entry.doc, int(display_page_index), pdf_target_width)
                 if photo is not None:
                     self.scraped_images.append(photo)
                     image_label = ttk.Label(image_frame, image=photo, cursor="hand2")
                     image_label.grid(row=0, column=0, sticky="nsew")
                     image_label.bind(
                         "<Button-1>",
-                        lambda _e, e=entry, p=int(page_index): self.open_thumbnail_zoom(e, p),
+                        lambda event, lbl=image_label: self._on_scraped_image_click(event, lbl),
                     )
+                    image_label.bind(
+                        "<Control-Button-1>",
+                        lambda event, lbl=image_label: self._on_scraped_image_click(event, lbl),
+                    )
+                    self.scraped_preview_states[image_label] = {
+                        "entry": entry,
+                        "category": category,
+                        "page_indexes": list(parsed_page_indexes),
+                        "position": current_page_position,
+                        "current_page": display_page_index,
+                        "target_width": pdf_target_width,
+                        "title_label": title_label,
+                        "title_base_text": base_header_text,
+                    }
                 else:
                     ttk.Label(image_frame, text="Preview unavailable").grid(row=0, column=0, sticky="nsew")
 
