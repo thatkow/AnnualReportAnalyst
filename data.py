@@ -467,6 +467,8 @@ class ReportApp:
             Tuple[PDFEntry, int, Tuple[str, str, str]]
         ] = None
         self.scraped_table_sources: Dict[ttk.Treeview, Dict[str, Any]] = {}
+        self.specialism_prompt_overrides: Dict[str, Dict[str, str]] = {}
+        self.specialism_prompt_paths: Dict[str, Dict[str, Path]] = {}
         self.combined_split_pane: Optional[ttk.Panedwindow] = None
         self.combined_preview_detail_var = tk.StringVar(
             master=self.root, value="Select a row to view the PDF page."
@@ -3931,6 +3933,11 @@ class ReportApp:
                     controls_frame = ttk.Frame(table_frame)
                     controls_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
                     controls_frame.columnconfigure(0, weight=1)
+                    specialism_status_var = tk.StringVar(master=self.root, value="")
+                    specialism_status_label = ttk.Label(
+                        controls_frame, textvariable=specialism_status_var
+                    )
+                    specialism_status_label.grid(row=0, column=0, sticky="w")
                     tree = ttk.Treeview(
                         table_frame,
                         columns=columns,
@@ -3984,13 +3991,21 @@ class ReportApp:
                     )
                     open_page_button.grid(row=0, column=3, sticky="e", padx=(0, 4))
 
+                    specialism_button = ttk.Button(
+                        controls_frame,
+                        text="Load Specialism Prompt",
+                        command=lambda t=tree: self._prompt_load_specialism_prompt(t),
+                        width=22,
+                    )
+                    specialism_button.grid(row=0, column=4, sticky="e", padx=(0, 4))
+
                     relabel_button = ttk.Button(
                         controls_frame,
                         text="Relabel Dates",
                         command=lambda t=tree: self._prompt_relabel_scraped_dates(t),
                         width=14,
                     )
-                    relabel_button.grid(row=0, column=4, sticky="e", padx=(0, 4))
+                    relabel_button.grid(row=0, column=5, sticky="e", padx=(0, 4))
 
                     dedupe_button = ttk.Button(
                         controls_frame,
@@ -3998,7 +4013,7 @@ class ReportApp:
                         command=lambda t=tree: self._dedupe_scraped_headers(t),
                         width=18,
                     )
-                    dedupe_button.grid(row=0, column=5, sticky="e", padx=(0, 4))
+                    dedupe_button.grid(row=0, column=6, sticky="e", padx=(0, 4))
 
                     dedupe_items_button = ttk.Button(
                         controls_frame,
@@ -4006,7 +4021,7 @@ class ReportApp:
                         command=lambda t=tree: self._dedupe_scraped_items(t),
                         width=18,
                     )
-                    dedupe_items_button.grid(row=0, column=6, sticky="e", padx=(0, 4))
+                    dedupe_items_button.grid(row=0, column=7, sticky="e", padx=(0, 4))
 
                     delete_row_button = ttk.Button(
                         controls_frame,
@@ -4014,7 +4029,7 @@ class ReportApp:
                         command=lambda t=tree: self._delete_scraped_row(t),
                         width=12,
                     )
-                    delete_row_button.grid(row=0, column=7, sticky="e", padx=(0, 4))
+                    delete_row_button.grid(row=0, column=8, sticky="e", padx=(0, 4))
 
                     delete_column_button = tk.Menubutton(
                         controls_frame,
@@ -4023,7 +4038,7 @@ class ReportApp:
                         relief=tk.RAISED,
                         direction="below",
                     )
-                    delete_column_button.grid(row=0, column=8, sticky="e")
+                    delete_column_button.grid(row=0, column=9, sticky="e")
                     delete_column_menu = tk.Menu(delete_column_button, tearoff=False)
                     delete_column_button.configure(menu=delete_column_menu)
 
@@ -4042,6 +4057,9 @@ class ReportApp:
                         "relabel_button": relabel_button,
                         "dedupe_button": dedupe_button,
                         "dedupe_items_button": dedupe_items_button,
+                        "specialism_button": specialism_button,
+                        "specialism_status_var": specialism_status_var,
+                        "specialism_status_label": specialism_status_label,
                         "delete_column_button": delete_column_button,
                         "delete_column_menu": delete_column_menu,
                         "preview_widget": preview_widget,
@@ -4116,6 +4134,13 @@ class ReportApp:
             else:
                 dedupe_items_button.state(["disabled"])
 
+        specialism_button = info.get("specialism_button")
+        if isinstance(specialism_button, ttk.Button):
+            if self.company_var.get().strip():
+                specialism_button.state(["!disabled"])
+            else:
+                specialism_button.state(["disabled"])
+
         delete_column_button = info.get("delete_column_button")
         if isinstance(delete_column_button, tk.Menubutton):
             if has_csv and len(header) > 2:
@@ -4124,6 +4149,7 @@ class ReportApp:
                 delete_column_button.configure(state="disabled")
         self._populate_delete_column_menu(info)
 
+        self._update_specialism_status(info)
         self._update_scraped_open_button(info)
 
     def _update_scraped_open_button(self, info: Dict[str, Any]) -> None:
@@ -4141,6 +4167,123 @@ class ReportApp:
             open_button.state(["!disabled"])
         else:
             open_button.state(["disabled"])
+
+    def _update_specialism_status(
+        self, info: Dict[str, Any], *, company: Optional[str] = None
+    ) -> None:
+        status_var = info.get("specialism_status_var")
+        if not isinstance(status_var, tk.StringVar):
+            return
+        category = info.get("category")
+        if not isinstance(category, str):
+            status_var.set("")
+            return
+        if company is None:
+            company = self.company_var.get().strip()
+        if not company:
+            status_var.set("")
+            return
+        path_map = self.specialism_prompt_paths.get(company)
+        path_value = path_map.get(category) if isinstance(path_map, dict) else None
+        if isinstance(path_value, Path):
+            status_var.set(f"Specialism: {path_value.name}")
+        elif isinstance(path_value, str) and path_value:
+            status_var.set(f"Specialism: {Path(path_value).name}")
+        else:
+            status_var.set("")
+
+    def _refresh_specialism_status(
+        self, category: str, *, company: Optional[str] = None
+    ) -> None:
+        if not isinstance(category, str):
+            return
+        if company is None:
+            company = self.company_var.get().strip()
+        for info in self.scraped_table_sources.values():
+            if info.get("category") == category:
+                self._update_specialism_status(info, company=company)
+
+    def _specialism_prompt_initial_dir(self, company: str, category: str) -> Optional[str]:
+        normalized_company = company.strip()
+        if normalized_company:
+            existing = self.specialism_prompt_paths.get(normalized_company, {})
+            previous = existing.get(category)
+            if isinstance(previous, Path) and previous.exists():
+                try:
+                    return str(previous.parent)
+                except Exception:
+                    pass
+            elif isinstance(previous, str):
+                try:
+                    previous_path = Path(previous)
+                    if previous_path.exists():
+                        return str(previous_path.parent)
+                except Exception:
+                    pass
+        candidate_dirs: List[Path] = []
+        if normalized_company:
+            company_dir = self.companies_dir / normalized_company
+            candidate_dirs.extend([company_dir / "prompts", company_dir / "prompt"])
+        candidate_dirs.append(self.prompts_dir)
+        for directory in candidate_dirs:
+            try:
+                if directory.exists():
+                    return str(directory)
+            except Exception:
+                continue
+        return None
+
+    def _prompt_load_specialism_prompt(self, tree: ttk.Treeview) -> None:
+        info = self.scraped_table_sources.get(tree)
+        if not isinstance(info, dict):
+            return
+        category = info.get("category")
+        if not isinstance(category, str) or category not in COLUMNS:
+            messagebox.showinfo(
+                "Load Specialism Prompt",
+                "The selected table does not have a supported category.",
+            )
+            return
+        company = self.company_var.get().strip()
+        if not company:
+            messagebox.showinfo(
+                "Load Specialism Prompt",
+                "Select a company before loading a specialism prompt.",
+            )
+            return
+        dialog_kwargs: Dict[str, Any] = {
+            "title": f"Select {category} Prompt",
+            "filetypes": [("Text Files", "*.txt"), ("All Files", "*.*")],
+            "parent": self.root,
+        }
+        initial_dir = self._specialism_prompt_initial_dir(company, category)
+        if initial_dir:
+            dialog_kwargs["initialdir"] = initial_dir
+        selected = filedialog.askopenfilename(**dialog_kwargs)
+        if not selected:
+            return
+        selected_path = Path(selected)
+        try:
+            prompt_text = selected_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            messagebox.showwarning(
+                "Load Specialism Prompt",
+                f"Could not read the selected prompt file: {exc}",
+            )
+            return
+        normalized_company = company.strip()
+        overrides = self.specialism_prompt_overrides.setdefault(normalized_company, {})
+        overrides[category] = prompt_text
+        path_map = self.specialism_prompt_paths.setdefault(normalized_company, {})
+        path_map[category] = selected_path
+        self._refresh_specialism_status(category, company=normalized_company)
+        messagebox.showinfo(
+            "Specialism Prompt Loaded",
+            (
+                f"Loaded {category} specialism prompt from '{selected_path.name}'.\n"
+                "AIScrape and prompt previews will use this text for the current company."
+            ),
+        )
 
     def _open_scraped_table_preview(self, tree: ttk.Treeview) -> None:
         info = self.scraped_table_sources.get(tree)
@@ -7189,6 +7332,18 @@ class ReportApp:
         return True
 
     def _get_prompt_text(self, company: str, category: str) -> Optional[str]:
+        normalized_company = company.strip() if company else ""
+        if normalized_company:
+            override_map = self.specialism_prompt_overrides.get(normalized_company)
+            if isinstance(override_map, dict) and category in override_map:
+                override_text = override_map.get(category)
+                if override_text is not None:
+                    return override_text
+        global_overrides = self.specialism_prompt_overrides.get("")
+        if isinstance(global_overrides, dict) and category in global_overrides:
+            override_text = global_overrides.get(category)
+            if override_text is not None:
+                return override_text
         candidate_paths: List[Path] = []
         if company:
             company_dir = self.companies_dir / company
