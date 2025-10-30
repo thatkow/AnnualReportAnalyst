@@ -830,6 +830,32 @@ class ReportApp:
         available_width = max(0, width - horizontal_padding)
         if available_width <= 0:
             return
+        resize_job = state.get("resize_job")
+        if resize_job is not None:
+            try:
+                self.root.after_cancel(resize_job)
+            except tk.TclError:
+                pass
+        state["pending_width"] = available_width
+        state["resize_job"] = self.root.after(
+            120,
+            lambda lbl=widget: self._apply_scraped_frame_resize(lbl),
+        )
+
+    def _apply_scraped_frame_resize(self, widget: tk.Widget) -> None:
+        state = self.scraped_preview_states.get(widget)
+        if not state:
+            return
+        state.pop("resize_job", None)
+        pending_width = state.pop("pending_width", None)
+        if pending_width is None:
+            return
+        try:
+            available_width = int(pending_width)
+        except (TypeError, ValueError):
+            return
+        if available_width <= 0:
+            return
         current_target = state.get("target_width")
         try:
             current_target_int = int(current_target)
