@@ -33,6 +33,8 @@ from PIL import Image, ImageTk
 import webbrowser
 import requests
 
+from analyst import FinanceDataset, FinancePlotFrame
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -480,6 +482,8 @@ class ReportApp:
         self.note_key_bindings: Dict[str, str] = DEFAULT_NOTE_KEY_BINDINGS.copy()
         self.note_display_labels: Dict[str, str] = DEFAULT_NOTE_LABELS.copy()
 
+        self.chart_plot_frame: Optional[FinancePlotFrame] = None
+
         self._build_ui()
         self._load_pattern_config()
         self._apply_configured_note_key_bindings()
@@ -674,6 +678,16 @@ class ReportApp:
 
         self.combined_result_frame = ttk.Frame(combined_container, padding=8)
         self.combined_result_frame.pack(fill=tk.BOTH, expand=True)
+
+        chart_container = ttk.Frame(notebook)
+        notebook.add(chart_container, text="Chart")
+        chart_content = ttk.Frame(chart_container, padding=8)
+        chart_content.pack(fill=tk.BOTH, expand=True)
+        chart_frame = FinancePlotFrame(chart_content)
+        chart_frame.pack(fill=tk.BOTH, expand=True)
+        chart_frame.set_display_mode(FinancePlotFrame.MODE_STACKED)
+        chart_frame.set_normalization_mode(FinanceDataset.NORMALIZATION_REPORTED)
+        self.chart_plot_frame = chart_frame
 
         notebook.bind("<<NotebookTabChanged>>", self._on_primary_tab_changed)
 
@@ -3967,6 +3981,43 @@ class ReportApp:
         self.combined_save_button = None
         self.combined_preview_detail_var.set("Select a row to view the PDF page.")
         self.combined_header_label_widgets.clear()
+        self._refresh_chart_tab()
+
+    def _refresh_chart_tab(self) -> None:
+        plot_frame = self.chart_plot_frame
+        if plot_frame is None:
+            return
+        plot_frame.clear_companies()
+        if not self.combined_all_records or not self.combined_ordered_columns:
+            return
+        company = self.company_var.get().strip()
+        if not company:
+            return
+        self._export_final_combined_csv()
+        combined_path = self.companies_dir / company / "combined.csv"
+        try:
+            dataset = FinanceDataset(combined_path)
+        except (FileNotFoundError, ValueError) as exc:
+            logger.info("Chart dataset unavailable for %s: %s", company, exc)
+            return
+        if not dataset.has_data():
+            logger.info(
+                "Combined CSV for %s does not contain Finance or Income data for chart.",
+                company,
+            )
+            return
+        try:
+            _, warning = plot_frame.add_company(company, dataset)
+        except ValueError as exc:
+            logger.warning("Unable to render chart for %s: %s", company, exc)
+            return
+        except Exception:
+            logger.exception("Unexpected error while rendering chart for %s", company)
+            return
+        if warning:
+            logger.warning("Chart normalization warning for %s: %s", company, warning)
+        plot_frame.set_display_mode(FinancePlotFrame.MODE_STACKED)
+        plot_frame.set_normalization_mode(FinanceDataset.NORMALIZATION_REPORTED)
 
     def _refresh_combined_tab(self, *, auto_update: bool = False) -> None:
         if not hasattr(self, "combined_header_frame"):
@@ -5164,6 +5215,7 @@ class ReportApp:
         else:
             self._clear_combined_preview()
         self._update_combined_save_button_state()
+        self._refresh_chart_tab()
         if self.combined_show_blank_notes_var.get():
             self._focus_first_blank_note(notify_if_missing=True)
 
