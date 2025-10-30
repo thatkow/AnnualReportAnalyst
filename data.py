@@ -3688,6 +3688,7 @@ class ReportApp:
                         tree.heading(col, text=heading)
                         tree.column(col, anchor="center", stretch=True, width=120)
                     table_rows: List[List[str]] = []
+                    date_columns = self._scraped_date_column_indices(headings)
                     if data_rows:
                         for data in data_rows:
                             values = list(data)
@@ -3699,17 +3700,31 @@ class ReportApp:
                             display_values = [self._format_table_value(value) for value in values]
                             tree.insert("", tk.END, values=display_values)
 
+                    multiply_button = ttk.Button(
+                        controls_frame,
+                        text="×10 Dates",
+                        command=lambda t=tree: self._scale_scraped_table(t, 10.0),
+                        width=12,
+                    )
+                    multiply_button.grid(row=0, column=1, sticky="e", padx=(0, 4))
+
+                    divide_button = ttk.Button(
+                        controls_frame,
+                        text="÷10 Dates",
+                        command=lambda t=tree: self._scale_scraped_table(t, 0.1),
+                        width=12,
+                    )
+                    divide_button.grid(row=0, column=2, sticky="e", padx=(0, 4))
+
                     delete_row_button = ttk.Button(
                         controls_frame,
                         text="Delete Row",
                         command=lambda t=tree: self._delete_scraped_row(t),
                         width=12,
                     )
-                    delete_row_button.grid(row=0, column=1, sticky="e")
-                    if csv_target_path is None or not table_rows:
-                        delete_row_button.state(["disabled"])
+                    delete_row_button.grid(row=0, column=3, sticky="e")
 
-                    self.scraped_table_sources[tree] = {
+                    info = {
                         "header": list(headings),
                         "rows": table_rows,
                         "csv_path": csv_target_path,
@@ -3719,11 +3734,207 @@ class ReportApp:
                         "entry_stem": entry_stem,
                         "category": category,
                         "button": delete_row_button,
+                        "scale_buttons": (multiply_button, divide_button),
+                        "date_columns": date_columns,
                     }
+                    self.scraped_table_sources[tree] = info
+                    self._update_scraped_controls_state(info)
 
                 row_index += 1
 
         self._refresh_combined_tab(auto_update=True)
+
+    def _scraped_date_column_indices(self, headings: List[str]) -> List[int]:
+        date_columns: List[int] = []
+        for index, heading in enumerate(headings):
+            if not isinstance(heading, str):
+                continue
+            label = heading.strip()
+            if not label or label.lower() in {"type", "category", "item", "note"}:
+                continue
+            if self._parse_combined_period_label(label) is not None:
+                date_columns.append(index)
+        return date_columns
+
+    def _update_scraped_controls_state(self, info: Dict[str, Any]) -> None:
+        rows: List[List[str]] = info.get("rows", [])
+        csv_path = info.get("csv_path")
+        has_rows = bool(rows)
+        has_csv = isinstance(csv_path, Path)
+        has_date_columns = bool(info.get("date_columns"))
+
+        delete_button = info.get("button")
+        if isinstance(delete_button, ttk.Button):
+            if has_rows and has_csv:
+                delete_button.state(["!disabled"])
+            else:
+                delete_button.state(["disabled"])
+
+        scale_buttons = info.get("scale_buttons")
+        if isinstance(scale_buttons, tuple):
+            for button in scale_buttons:
+                if isinstance(button, ttk.Button):
+                    if has_rows and has_csv and has_date_columns:
+                        button.state(["!disabled"])
+                    else:
+                        button.state(["disabled"])
+
+    def _refresh_scraped_tree_display(self, tree: ttk.Treeview, info: Dict[str, Any]) -> None:
+        for item in tree.get_children():
+            tree.delete(item)
+        columns = list(tree["columns"])
+        data_rows: List[List[str]] = info.get("rows", [])
+        for row in data_rows:
+            values = list(row)
+            if len(values) < len(columns):
+                values.extend([""] * (len(columns) - len(values)))
+            elif len(values) > len(columns):
+                values = values[: len(columns)]
+            display_values = [self._format_table_value(value) for value in values]
+            tree.insert("", tk.END, values=display_values)
+        tree.configure(height=min(15, max(3, len(data_rows))))
+
+    def _scale_scraped_table(self, tree: ttk.Treeview, factor: float) -> None:
+        info = self.scraped_table_sources.get(tree)
+        if not info:
+            return
+
+        csv_path = info.get("csv_path")
+        if not isinstance(csv_path, Path):
+            messagebox.showinfo(
+                "Scale Values", "This table is not associated with a CSV file that can be updated."
+            )
+            return
+
+        date_columns: List[int] = info.get("date_columns", [])
+        if not date_columns:
+            messagebox.showinfo(
+                "Scale Values", "No date-based columns are available for scaling in this table."
+            )
+            return
+
+        data_rows: List[List[str]] = info.get("rows", [])
+        if not data_rows:
+            messagebox.showinfo("Scale Values", "There are no rows available to scale.")
+            return
+
+        header: List[str] = info.get("header", [])
+        header_length = len(header)
+        delimiter: str = info.get("delimiter", ",")
+
+        updated_rows: List[List[str]] = []
+        changed = False
+        for original_row in data_rows:
+            values = list(original_row)
+            if len(values) < header_length:
+                values.extend([""] * (header_length - len(values)))
+            elif len(values) > header_length:
+                values = values[:header_length]
+            for column_index in date_columns:
+                if 0 <= column_index < len(values):
+                    new_value = self._scale_scraped_cell_value(values[column_index], factor)
+                    if new_value is not None and new_value != values[column_index]:
+                        values[column_index] = new_value
+                        changed = True
+            updated_rows.append(values)
+
+        if not changed:
+            messagebox.showinfo(
+                "Scale Values", "No numeric date values were updated for this table."
+            )
+            return
+
+        if not self._write_scraped_csv_rows(csv_path, header, updated_rows, delimiter=delimiter):
+            scrape_root: Optional[Path] = info.get("scrape_root")
+            metadata_path: Optional[Path] = info.get("metadata_path")
+            entry_stem = info.get("entry_stem")
+            category: Optional[str] = info.get("category")
+            if (
+                isinstance(scrape_root, Path)
+                and isinstance(metadata_path, Path)
+                and isinstance(entry_stem, str)
+                and isinstance(category, str)
+            ):
+                self._reload_scraped_csv(scrape_root, metadata_path, entry_stem, category)
+            return
+
+        info["rows"] = updated_rows
+        self._refresh_scraped_tree_display(tree, info)
+        self._update_scraped_controls_state(info)
+        self._refresh_combined_tab(auto_update=True)
+
+    def _scale_scraped_cell_value(self, original: str, factor: float) -> Optional[str]:
+        numeric_value = self._parse_numeric_value(original)
+        if numeric_value is None:
+            return None
+
+        scaled_value = numeric_value * factor
+        stripped = original.strip()
+        if not stripped:
+            return None
+
+        leading_ws_match = re.match(r"^\s*", original)
+        trailing_ws_match = re.search(r"\s*$", original)
+        leading_ws = leading_ws_match.group(0) if leading_ws_match else ""
+        trailing_ws = trailing_ws_match.group(0) if trailing_ws_match else ""
+
+        has_percent = stripped.endswith("%")
+        if has_percent:
+            stripped = stripped[:-1].rstrip()
+
+        used_parentheses = stripped.startswith("(") and stripped.endswith(")")
+        if used_parentheses:
+            stripped = stripped[1:-1].strip()
+
+        if stripped.startswith("-") or stripped.startswith("+"):
+            stripped = stripped[1:].lstrip()
+
+        prefix_match = re.match(r"^[^\d]*", stripped)
+        prefix = prefix_match.group(0) if prefix_match else ""
+        remainder = stripped[len(prefix) :]
+        if not remainder:
+            return None
+
+        number_match = re.match(
+            r"[-+]?(?:(?:\d[\d,]*)(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?",
+            remainder,
+        )
+        if not number_match:
+            formatted_number = f"{abs(scaled_value):.6g}"
+            formatted = f"{prefix}{formatted_number}"
+            if scaled_value < 0:
+                if used_parentheses:
+                    formatted = f"({formatted})"
+                else:
+                    formatted = f"-{formatted}"
+            if has_percent:
+                formatted = f"{formatted}%"
+            return f"{leading_ws}{formatted}{trailing_ws}"
+
+        number_segment = number_match.group(0)
+        suffix_extra = remainder[len(number_segment) :]
+        normalized_segment = number_segment.replace(",", "")
+        normalized_segment = re.sub(r"[eE][-+]?\d+", "", normalized_segment)
+        decimal_match = re.search(r"\.(\d+)", normalized_segment)
+        decimal_places = len(decimal_match.group(1)) if decimal_match else 0
+
+        absolute_value = abs(scaled_value)
+        if decimal_places > 0:
+            formatted_number = f"{absolute_value:,.{decimal_places}f}"
+        else:
+            formatted_number = f"{absolute_value:,.0f}"
+
+        formatted = f"{prefix}{formatted_number}{suffix_extra}"
+        if scaled_value < 0:
+            if used_parentheses:
+                formatted = f"({formatted})"
+            else:
+                formatted = f"-{formatted}"
+
+        if has_percent:
+            formatted = f"{formatted}%"
+
+        return f"{leading_ws}{formatted}{trailing_ws}"
 
     def _clear_combined_tab(self) -> None:
         if not hasattr(self, "combined_header_frame"):
@@ -6070,11 +6281,7 @@ class ReportApp:
             return
 
         info["rows"] = data_rows
-        button: Optional[ttk.Button] = info.get("button")
-        if isinstance(button, ttk.Button) and data_rows:
-            button.state(["!disabled"])
-        elif isinstance(button, ttk.Button) and not data_rows:
-            button.state(["disabled"])
+        self._update_scraped_controls_state(info)
 
         self._refresh_combined_tab(auto_update=True)
 
