@@ -3939,7 +3939,7 @@ class ReportApp:
                         tree.heading(col, text=heading)
                         tree.column(col, anchor="center", stretch=True, width=120)
                     table_rows: List[List[str]] = []
-                    date_columns = self._scraped_date_column_indices(headings)
+                    scalable_columns = self._scraped_scalable_column_indices(headings)
                     if data_rows:
                         for data in data_rows:
                             values = list(data)
@@ -3953,7 +3953,7 @@ class ReportApp:
 
                     multiply_button = ttk.Button(
                         controls_frame,
-                        text="×10 Dates",
+                        text="×10",
                         command=lambda t=tree: self._scale_scraped_table(t, 10.0),
                         width=12,
                     )
@@ -3961,7 +3961,7 @@ class ReportApp:
 
                     divide_button = ttk.Button(
                         controls_frame,
-                        text="÷10 Dates",
+                        text="÷10",
                         command=lambda t=tree: self._scale_scraped_table(t, 0.1),
                         width=12,
                     )
@@ -3986,7 +3986,7 @@ class ReportApp:
                         "category": category,
                         "button": delete_row_button,
                         "scale_buttons": (multiply_button, divide_button),
-                        "date_columns": date_columns,
+                        "scalable_columns": scalable_columns,
                     }
                     self.scraped_table_sources[tree] = info
                     self._update_scraped_controls_state(info)
@@ -3995,24 +3995,17 @@ class ReportApp:
 
         self._refresh_combined_tab(auto_update=True)
 
-    def _scraped_date_column_indices(self, headings: List[str]) -> List[int]:
-        date_columns: List[int] = []
-        for index, heading in enumerate(headings):
-            if not isinstance(heading, str):
-                continue
-            label = heading.strip()
-            if not label or label.lower() in {"type", "category", "item", "note"}:
-                continue
-            if self._parse_combined_period_label(label) is not None:
-                date_columns.append(index)
-        return date_columns
+    def _scraped_scalable_column_indices(self, headings: List[str]) -> List[int]:
+        if not headings:
+            return []
+        return [index for index in range(len(headings)) if index >= 2]
 
     def _update_scraped_controls_state(self, info: Dict[str, Any]) -> None:
         rows: List[List[str]] = info.get("rows", [])
         csv_path = info.get("csv_path")
         has_rows = bool(rows)
         has_csv = isinstance(csv_path, Path)
-        has_date_columns = bool(info.get("date_columns"))
+        has_scalable_columns = bool(info.get("scalable_columns"))
 
         delete_button = info.get("button")
         if isinstance(delete_button, ttk.Button):
@@ -4025,7 +4018,7 @@ class ReportApp:
         if isinstance(scale_buttons, tuple):
             for button in scale_buttons:
                 if isinstance(button, ttk.Button):
-                    if has_rows and has_csv and has_date_columns:
+                    if has_rows and has_csv and has_scalable_columns:
                         button.state(["!disabled"])
                     else:
                         button.state(["disabled"])
@@ -4057,10 +4050,11 @@ class ReportApp:
             )
             return
 
-        date_columns: List[int] = info.get("date_columns", [])
-        if not date_columns:
+        scalable_columns: List[int] = info.get("scalable_columns", [])
+        if not scalable_columns:
             messagebox.showinfo(
-                "Scale Values", "No date-based columns are available for scaling in this table."
+                "Scale Values",
+                "No columns beyond the first two are available for scaling in this table.",
             )
             return
 
@@ -4081,7 +4075,7 @@ class ReportApp:
                 values.extend([""] * (header_length - len(values)))
             elif len(values) > header_length:
                 values = values[:header_length]
-            for column_index in date_columns:
+            for column_index in scalable_columns:
                 if 0 <= column_index < len(values):
                     new_value = self._scale_scraped_cell_value(values[column_index], factor)
                     if new_value is not None and new_value != values[column_index]:
@@ -4091,7 +4085,7 @@ class ReportApp:
 
         if not changed:
             messagebox.showinfo(
-                "Scale Values", "No numeric date values were updated for this table."
+                "Scale Values", "No numeric values were updated for this table."
             )
             return
 
