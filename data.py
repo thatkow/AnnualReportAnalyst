@@ -4000,13 +4000,21 @@ class ReportApp:
                     )
                     dedupe_button.grid(row=0, column=5, sticky="e", padx=(0, 4))
 
+                    dedupe_items_button = ttk.Button(
+                        controls_frame,
+                        text="Make Items Unique",
+                        command=lambda t=tree: self._dedupe_scraped_items(t),
+                        width=18,
+                    )
+                    dedupe_items_button.grid(row=0, column=6, sticky="e", padx=(0, 4))
+
                     delete_row_button = ttk.Button(
                         controls_frame,
                         text="Delete Row",
                         command=lambda t=tree: self._delete_scraped_row(t),
                         width=12,
                     )
-                    delete_row_button.grid(row=0, column=6, sticky="e", padx=(0, 4))
+                    delete_row_button.grid(row=0, column=7, sticky="e", padx=(0, 4))
 
                     delete_column_button = tk.Menubutton(
                         controls_frame,
@@ -4015,7 +4023,7 @@ class ReportApp:
                         relief=tk.RAISED,
                         direction="below",
                     )
-                    delete_column_button.grid(row=0, column=7, sticky="e")
+                    delete_column_button.grid(row=0, column=8, sticky="e")
                     delete_column_menu = tk.Menu(delete_column_button, tearoff=False)
                     delete_column_button.configure(menu=delete_column_menu)
 
@@ -4033,6 +4041,7 @@ class ReportApp:
                         "open_button": open_page_button,
                         "relabel_button": relabel_button,
                         "dedupe_button": dedupe_button,
+                        "dedupe_items_button": dedupe_items_button,
                         "delete_column_button": delete_column_button,
                         "delete_column_menu": delete_column_menu,
                         "preview_widget": preview_widget,
@@ -4055,6 +4064,12 @@ class ReportApp:
         if not headings:
             return []
         return [index for index in range(len(headings)) if index >= 2]
+
+    def _scraped_item_column_index(self, headings: List[str]) -> Optional[int]:
+        for index, value in enumerate(headings):
+            if isinstance(value, str) and value.strip().lower() == "item":
+                return index
+        return None
 
     def _update_scraped_controls_state(self, info: Dict[str, Any]) -> None:
         rows: List[List[str]] = info.get("rows", [])
@@ -4093,6 +4108,13 @@ class ReportApp:
                 dedupe_button.state(["!disabled"])
             else:
                 dedupe_button.state(["disabled"])
+
+        dedupe_items_button = info.get("dedupe_items_button")
+        if isinstance(dedupe_items_button, ttk.Button):
+            if has_csv and has_rows and self._scraped_item_column_index(header) is not None:
+                dedupe_items_button.state(["!disabled"])
+            else:
+                dedupe_items_button.state(["disabled"])
 
         delete_column_button = info.get("delete_column_button")
         if isinstance(delete_column_button, tk.Menubutton):
@@ -4353,6 +4375,79 @@ class ReportApp:
         self._refresh_combined_tab(auto_update=True)
         messagebox.showinfo(
             "Make Dates Unique", "Duplicate column labels have been updated.",
+        )
+
+    def _dedupe_scraped_items(self, tree: ttk.Treeview) -> None:
+        info = self.scraped_table_sources.get(tree)
+        if not isinstance(info, dict):
+            return
+
+        header: List[str] = info.get("header", [])
+        if not header:
+            messagebox.showinfo(
+                "Make Items Unique", "This table does not have any columns to update.",
+            )
+            return
+
+        item_index = self._scraped_item_column_index(header)
+        if item_index is None:
+            messagebox.showinfo(
+                "Make Items Unique", "No 'ITEM' column was found in this table.",
+            )
+            return
+
+        csv_path = info.get("csv_path")
+        if not isinstance(csv_path, Path):
+            messagebox.showinfo(
+                "Make Items Unique",
+                "This table is not associated with a CSV file that can be updated.",
+            )
+            return
+
+        rows: List[List[str]] = info.get("rows", [])
+        if not rows:
+            messagebox.showinfo(
+                "Make Items Unique", "There are no rows available to update.",
+            )
+            return
+
+        updated_rows: List[List[str]] = []
+        seen: Dict[str, int] = {}
+        duplicates_found = False
+        for row in rows:
+            values = list(row)
+            if item_index >= len(values):
+                values.extend([""] * (item_index - len(values) + 1))
+            raw_value = values[item_index].strip()
+            if raw_value:
+                base_value = re.sub(r"\.\d+$", "", raw_value)
+                normalized = base_value.lower()
+                count = seen.get(normalized, 0)
+                if count == 0:
+                    if base_value != values[item_index]:
+                        values[item_index] = base_value
+                else:
+                    values[item_index] = f"{base_value}.{count}"
+                    duplicates_found = True
+                seen[normalized] = count + 1
+            updated_rows.append(values)
+
+        if not duplicates_found:
+            messagebox.showinfo(
+                "Make Items Unique", "No duplicate ITEM entries were found to update.",
+            )
+            return
+
+        delimiter: str = info.get("delimiter", ",")
+        if not self._write_scraped_csv_rows(csv_path, header, updated_rows, delimiter=delimiter):
+            return
+
+        info["rows"] = updated_rows
+        self._refresh_scraped_tree_display(tree, info)
+        self._update_scraped_controls_state(info)
+        self._refresh_combined_tab(auto_update=True)
+        messagebox.showinfo(
+            "Make Items Unique", "Duplicate ITEM entries have been updated.",
         )
 
     def _delete_scraped_column(self, tree: ttk.Treeview, column_index: int) -> None:
