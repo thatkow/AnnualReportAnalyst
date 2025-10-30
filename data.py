@@ -3983,13 +3983,21 @@ class ReportApp:
                     )
                     open_page_button.grid(row=0, column=3, sticky="e", padx=(0, 4))
 
+                    relabel_button = ttk.Button(
+                        controls_frame,
+                        text="Relabel Dates",
+                        command=lambda t=tree: self._prompt_relabel_scraped_dates(t),
+                        width=14,
+                    )
+                    relabel_button.grid(row=0, column=4, sticky="e", padx=(0, 4))
+
                     delete_row_button = ttk.Button(
                         controls_frame,
                         text="Delete Row",
                         command=lambda t=tree: self._delete_scraped_row(t),
                         width=12,
                     )
-                    delete_row_button.grid(row=0, column=4, sticky="e")
+                    delete_row_button.grid(row=0, column=5, sticky="e")
 
                     info = {
                         "header": list(headings),
@@ -4003,6 +4011,7 @@ class ReportApp:
                         "button": delete_row_button,
                         "scale_buttons": (multiply_button, divide_button),
                         "open_button": open_page_button,
+                        "relabel_button": relabel_button,
                         "preview_widget": preview_widget,
                         "entry": entry,
                         "scalable_columns": scalable_columns,
@@ -4046,6 +4055,14 @@ class ReportApp:
                     else:
                         button.state(["disabled"])
 
+        relabel_button = info.get("relabel_button")
+        header: List[str] = info.get("header", [])
+        if isinstance(relabel_button, ttk.Button):
+            if has_csv and len(header) > 2:
+                relabel_button.state(["!disabled"])
+            else:
+                relabel_button.state(["disabled"])
+
         self._update_scraped_open_button(info)
 
     def _update_scraped_open_button(self, info: Dict[str, Any]) -> None:
@@ -4078,6 +4095,137 @@ class ReportApp:
         page_index = state.get("current_page")
         if isinstance(entry, PDFEntry) and isinstance(page_index, int) and page_index >= 0:
             self.open_thumbnail_zoom(entry, page_index)
+
+    def _prompt_relabel_scraped_dates(self, tree: ttk.Treeview) -> None:
+        info = self.scraped_table_sources.get(tree)
+        if not isinstance(info, dict):
+            return
+
+        header: List[str] = info.get("header", [])
+        if len(header) <= 2:
+            messagebox.showinfo(
+                "Relabel Dates", "This table does not have any date columns to relabel."
+            )
+            return
+
+        csv_path = info.get("csv_path")
+        if not isinstance(csv_path, Path):
+            messagebox.showinfo(
+                "Relabel Dates",
+                "This table is not associated with a CSV file that can be updated.",
+            )
+            return
+
+        rows: List[List[str]] = info.get("rows", [])
+        delimiter: str = info.get("delimiter", ",")
+
+        try:
+            dialog = tk.Toplevel(self.root)
+        except tk.TclError:
+            return
+
+        dialog.title("Relabel Dates")
+        dialog.transient(self.root)
+        try:
+            dialog.grab_set()
+        except tk.TclError:
+            pass
+
+        content = ttk.Frame(dialog, padding=12)
+        content.pack(fill=tk.BOTH, expand=True)
+        content.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            content,
+            text="Update the column labels for the date values and click Save to apply the changes.",
+            wraplength=400,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+
+        entry_rows: List[Tuple[int, tk.StringVar, ttk.Entry]] = []
+        current_row = 1
+        for index in range(2, len(header)):
+            label_text = header[index].strip() or f"Column {index + 1}"
+            ttk.Label(content, text=f"{label_text}:").grid(
+                row=current_row, column=0, sticky="w", padx=(0, 8), pady=2
+            )
+            var = tk.StringVar(value=header[index])
+            entry = ttk.Entry(content, textvariable=var)
+            entry.grid(row=current_row, column=1, sticky="ew", pady=2)
+            entry_rows.append((index, var, entry))
+            current_row += 1
+
+        button_frame = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        button_frame.pack(fill=tk.X)
+        button_frame.columnconfigure(0, weight=1)
+
+        def _close_dialog() -> None:
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            dialog.destroy()
+
+        def _on_cancel() -> None:
+            _close_dialog()
+
+        def _on_save() -> None:
+            new_header = list(header)
+            seen: Set[str] = set()
+            for idx, existing in enumerate(new_header):
+                if idx < 2:
+                    normalized = existing.strip().lower()
+                    if normalized:
+                        seen.add(normalized)
+            for column_index, var, _entry in entry_rows:
+                value = var.get().strip()
+                if not value:
+                    messagebox.showerror(
+                        "Relabel Dates", "Column labels cannot be left blank.", parent=dialog
+                    )
+                    return
+                normalized = value.lower()
+                if normalized in seen:
+                    messagebox.showerror(
+                        "Relabel Dates",
+                        "Each column label must be unique.",
+                        parent=dialog,
+                    )
+                    return
+                seen.add(normalized)
+                new_header[column_index] = value
+
+            if not self._write_scraped_csv_rows(
+                csv_path, new_header, rows, delimiter=delimiter
+            ):
+                return
+
+            info["header"] = new_header
+            info["scalable_columns"] = self._scraped_scalable_column_indices(new_header)
+            columns = list(tree["columns"])
+            for column_id, heading_text in zip(columns, new_header):
+                tree.heading(column_id, text=heading_text)
+
+            self._update_scraped_controls_state(info)
+            self._refresh_combined_tab(auto_update=True)
+            _close_dialog()
+
+        ttk.Button(button_frame, text="Cancel", command=_on_cancel).grid(
+            row=0, column=1, sticky="e"
+        )
+        ttk.Button(button_frame, text="Save", command=_on_save).grid(
+            row=0, column=2, sticky="e", padx=(8, 0)
+        )
+
+        dialog.protocol("WM_DELETE_WINDOW", _on_cancel)
+        dialog.bind("<Escape>", lambda _e: _on_cancel())
+        dialog.bind("<Return>", lambda _e: _on_save())
+
+        dialog.wait_visibility()
+        if entry_rows:
+            entry_rows[0][2].focus_set()
+        else:
+            dialog.focus_set()
 
     def _refresh_scraped_tree_display(self, tree: ttk.Treeview, info: Dict[str, Any]) -> None:
         for item in tree.get_children():
