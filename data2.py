@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -51,6 +51,33 @@ class PDFEntry:
         for column in COLUMNS:
             self.matches.setdefault(column, [])
             self.current_index.setdefault(column, 0 if self.matches[column] else None)
+
+
+class CollapsibleFrame(ttk.Frame):
+    def __init__(self, master: tk.Widget, title: str, initially_open: bool = False) -> None:
+        super().__init__(master)
+        self._title = title
+        self._open = initially_open
+        self._header = ttk.Button(self, text=self._formatted_title(), command=self._toggle, style="Toolbutton")
+        self._header.pack(fill=tk.X)
+        self._content = ttk.Frame(self)
+        if self._open:
+            self._content.pack(fill=tk.BOTH, expand=True)
+
+    @property
+    def content(self) -> ttk.Frame:
+        return self._content
+
+    def _formatted_title(self) -> str:
+        return ("▼ " if self._open else "► ") + self._title
+
+    def _toggle(self) -> None:
+        self._open = not self._open
+        if self._open:
+            self._content.pack(fill=tk.BOTH, expand=True)
+        else:
+            self._content.pack_forget()
+        self._header.configure(text=self._formatted_title())
 
 
 class MatchThumbnail:
@@ -223,6 +250,7 @@ class ReportAppV2:
                 self.root.title("Annual Report Analyst (Preview)")
             except tk.TclError:
                 pass
+        self.root.after(0, self._maximize_window)
 
         self.app_root = Path(__file__).resolve().parent
         self.companies_dir = self.app_root / "companies"
@@ -241,7 +269,8 @@ class ReportAppV2:
 
         self.pdf_entries: List[PDFEntry] = []
         self.category_rows: Dict[Tuple[Path, str], CategoryRow] = {}
-        self.year_vars: Dict[Path, tk.StringVar] = {}
+        self.assigned_pages: Dict[str, Dict[str, Any]] = {}
+        self.assigned_pages_path: Optional[Path] = None
 
         self.downloads_dir = tk.StringVar(master=self.root)
         self.recent_download_minutes = tk.IntVar(master=self.root, value=5)
@@ -252,6 +281,16 @@ class ReportAppV2:
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
+        menu_bar = tk.Menu(self.root)
+        file_menu = tk.Menu(menu_bar, tearoff=False)
+        file_menu.add_command(label="New Company", command=self.create_company)
+        file_menu.add_command(label="Set Downloads Dir", command=self._set_downloads_dir)
+        menu_bar.add_cascade(label="File", menu=file_menu)
+        try:
+            self.root.config(menu=menu_bar)
+        except tk.TclError:
+            pass
+
         top = ttk.Frame(self.root, padding=8)
         top.pack(fill=tk.X)
 
@@ -261,11 +300,15 @@ class ReportAppV2:
         self.company_combo.bind("<<ComboboxSelected>>", self._on_company_selected)
 
         ttk.Button(top, text="Load PDFs", command=self.load_pdfs).pack(side=tk.LEFT)
-        ttk.Button(top, text="New Company", command=self.create_company).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(top, text="Set Downloads Dir", command=self._set_downloads_dir).pack(side=tk.LEFT, padx=(8, 0))
 
-        patterns_frame = ttk.LabelFrame(self.root, text="Regex patterns (one per line)", padding=8)
-        patterns_frame.pack(fill=tk.X, padx=8, pady=(4, 0))
+        options_section = CollapsibleFrame(self.root, "Patterns & Review Options", initially_open=False)
+        options_section.pack(fill=tk.X, padx=8, pady=(4, 0))
+
+        options_inner = ttk.Frame(options_section.content, padding=8)
+        options_inner.pack(fill=tk.BOTH, expand=True)
+
+        patterns_frame = ttk.LabelFrame(options_inner, text="Regex patterns (one per line)", padding=8)
+        patterns_frame.pack(fill=tk.BOTH, expand=True)
 
         columns_frame = ttk.Frame(patterns_frame)
         columns_frame.pack(fill=tk.X)
@@ -297,8 +340,8 @@ class ReportAppV2:
         apply_button = ttk.Button(patterns_frame, text="Apply Patterns", command=self.load_pdfs)
         apply_button.pack(anchor="e", pady=(8, 0))
 
-        year_frame = ttk.LabelFrame(self.root, text="Year pattern", padding=8)
-        year_frame.pack(fill=tk.X, padx=8, pady=(4, 0))
+        year_frame = ttk.LabelFrame(options_inner, text="Year pattern", padding=8)
+        year_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         year_text = tk.Text(year_frame, height=2, width=30)
         year_text.pack(fill=tk.BOTH, expand=True)
         year_text.insert("1.0", "\n".join(YEAR_DEFAULT_PATTERNS))
@@ -310,8 +353,8 @@ class ReportAppV2:
             variable=self.year_whitespace_as_space_var,
         ).pack(anchor="w")
 
-        review_controls = ttk.Frame(self.root, padding=8)
-        review_controls.pack(fill=tk.X)
+        review_controls = ttk.Frame(options_inner, padding=(0, 8, 0, 0))
+        review_controls.pack(fill=tk.X, pady=(8, 0))
         ttk.Label(review_controls, text="Thumbnail width:").pack(side=tk.LEFT)
         self.thumbnail_scale = ttk.Scale(
             review_controls,
@@ -332,6 +375,8 @@ class ReportAppV2:
         review_scrollbar = ttk.Scrollbar(review_container, orient=tk.VERTICAL, command=self.review_canvas.yview)
         review_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.review_canvas.configure(yscrollcommand=review_scrollbar.set)
+        self.review_canvas.bind("<Enter>", self._bind_review_mousewheel)
+        self.review_canvas.bind("<Leave>", self._unbind_review_mousewheel)
 
         self.inner_frame = ttk.Frame(self.review_canvas)
         self.canvas_window = self.review_canvas.create_window((0, 0), window=self.inner_frame, anchor="nw")
@@ -340,6 +385,26 @@ class ReportAppV2:
             "<Configure>",
             lambda event: self.review_canvas.itemconfigure(self.canvas_window, width=event.width),
         )
+
+        actions_frame = ttk.Frame(self.root, padding=8)
+        actions_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self.commit_button = ttk.Button(actions_frame, text="Commit", command=self.commit_assignments)
+        self.commit_button.pack(side=tk.RIGHT)
+
+    def _maximize_window(self) -> None:
+        try:
+            self.root.state("zoomed")
+        except tk.TclError:
+            pass
+        try:
+            self.root.attributes("-zoomed", True)
+        except tk.TclError:
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            try:
+                self.root.geometry(f"{screen_width}x{screen_height}")
+            except tk.TclError:
+                pass
 
     # ------------------------------------------------------------------ Config
     def _load_config(self) -> None:
@@ -413,6 +478,50 @@ class ReportAppV2:
     def _set_folder_for_company(self, company: str) -> None:
         folder = self.companies_dir / company / "raw"
         self.folder_path.set(str(folder))
+        self._load_assigned_pages(company)
+        self.clear_entries()
+
+    def _load_assigned_pages(self, company: str) -> None:
+        self.assigned_pages = {}
+        self.assigned_pages_path = self.companies_dir / company / "assigned.json"
+        if not self.assigned_pages_path.exists():
+            return
+        try:
+            with self.assigned_pages_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            return
+
+        if not isinstance(data, dict):
+            return
+
+        parsed: Dict[str, Dict[str, Any]] = {}
+        for pdf_name, value in data.items():
+            if not isinstance(pdf_name, str) or not isinstance(value, dict):
+                continue
+
+            record: Dict[str, Any] = {}
+            selections_obj = value.get("selections") if "selections" in value else value
+            if isinstance(selections_obj, dict):
+                selections: Dict[str, int] = {}
+                for category, raw_page in selections_obj.items():
+                    try:
+                        selections[category] = int(raw_page)
+                    except (TypeError, ValueError):
+                        continue
+                if selections:
+                    record["selections"] = selections
+
+            year_value = value.get("year")
+            if isinstance(year_value, str):
+                record["year"] = year_value
+            elif isinstance(year_value, (int, float)):
+                record["year"] = str(int(year_value))
+
+            if record:
+                parsed[pdf_name] = record
+
+        self.assigned_pages = parsed
 
     # ------------------------------------------------------------------ Pattern helpers
     def _read_text_lines(self, widget: tk.Text) -> List[str]:
@@ -468,7 +577,6 @@ class ReportAppV2:
                 pass
         self.pdf_entries.clear()
         self.category_rows.clear()
-        self.year_vars.clear()
         for child in self.inner_frame.winfo_children():
             child.destroy()
 
@@ -530,10 +638,52 @@ class ReportAppV2:
                             break
 
             entry = PDFEntry(path=pdf_path, doc=doc, matches=matches, year=year_value)
+            self._apply_existing_assignments(entry)
             self.pdf_entries.append(entry)
 
         self._rebuild_review_grid()
         self._save_config()
+
+    def _apply_existing_assignments(self, entry: PDFEntry) -> None:
+        record = self.assigned_pages.get(entry.path.name)
+        if not isinstance(record, dict):
+            return
+
+        stored_year = record.get("year")
+        if isinstance(stored_year, str) and stored_year:
+            entry.year = stored_year
+        elif isinstance(stored_year, (int, float)):
+            entry.year = str(int(stored_year))
+
+        selections = record.get("selections")
+        if not isinstance(selections, dict):
+            return
+
+        total_pages = len(entry.doc)
+        for category, raw_page in selections.items():
+            try:
+                page_index = int(raw_page)
+            except (TypeError, ValueError):
+                continue
+            if page_index < 0 or page_index >= total_pages:
+                continue
+
+            matches = entry.matches.setdefault(category, [])
+            selected_index: Optional[int] = None
+            for idx, match in enumerate(matches):
+                if match.page_index == page_index:
+                    selected_index = idx
+                    break
+            if selected_index is None:
+                manual_match = Match(page_index=page_index, source="manual")
+                matches.append(manual_match)
+                matches.sort(key=lambda m: m.page_index)
+                try:
+                    selected_index = matches.index(manual_match)
+                except ValueError:
+                    selected_index = None
+            if selected_index is not None:
+                entry.current_index[category] = selected_index
 
     def _rebuild_review_grid(self) -> None:
         for child in self.inner_frame.winfo_children():
@@ -554,10 +704,8 @@ class ReportAppV2:
             info_frame = ttk.Frame(container)
             info_frame.grid(row=0, column=0, sticky="nw", padx=(0, 12))
             ttk.Label(info_frame, text=str(entry.path.name), anchor="w", width=30, wraplength=200).pack(anchor="w")
-            year_var = tk.StringVar(value=entry.year)
-            self.year_vars[entry.path] = year_var
-            year_var.trace_add("write", lambda *_args, e=entry, v=year_var: setattr(e, "year", v.get()))
-            ttk.Entry(info_frame, textvariable=year_var, width=20).pack(fill=tk.X, pady=(4, 0))
+            if entry.year:
+                ttk.Label(info_frame, text=f"Year: {entry.year}", foreground="#555555").pack(anchor="w", pady=(4, 0))
 
             types_frame = ttk.Frame(container)
             types_frame.grid(row=0, column=1, sticky="ew")
@@ -574,6 +722,23 @@ class ReportAppV2:
         self.inner_frame.columnconfigure(0, weight=1)
 
     # ------------------------------------------------------------------ Interactions
+    def _bind_review_mousewheel(self, _: tk.Event) -> None:  # type: ignore[override]
+        self.review_canvas.bind_all("<MouseWheel>", self._on_review_mousewheel)
+        self.review_canvas.bind_all("<Button-4>", self._on_review_mousewheel)
+        self.review_canvas.bind_all("<Button-5>", self._on_review_mousewheel)
+
+    def _unbind_review_mousewheel(self, _: tk.Event) -> None:  # type: ignore[override]
+        self.review_canvas.unbind_all("<MouseWheel>")
+        self.review_canvas.unbind_all("<Button-4>")
+        self.review_canvas.unbind_all("<Button-5>")
+
+    def _on_review_mousewheel(self, event: tk.Event) -> None:  # type: ignore[override]
+        if getattr(event, "delta", 0):
+            step = -1 if event.delta > 0 else 1
+        else:
+            step = -1 if getattr(event, "num", 0) == 4 else 1
+        self.review_canvas.yview_scroll(step, "units")
+
     def _on_thumbnail_scale(self, value: str) -> None:
         try:
             width = int(float(value))
@@ -649,6 +814,81 @@ class ReportAppV2:
             return ImageTk.PhotoImage(image, master=self.root)
         except Exception:
             return None
+
+    def _get_selected_page_index(self, entry: PDFEntry, category: str) -> Optional[int]:
+        matches = entry.matches.get(category, [])
+        index = entry.current_index.get(category)
+        if index is None or index < 0 or index >= len(matches):
+            return None
+        return matches[index].page_index
+
+    def _write_assigned_pages(self) -> bool:
+        if self.assigned_pages_path is None:
+            company = self.company_var.get().strip()
+            if not company:
+                return False
+            self.assigned_pages_path = self.companies_dir / company / "assigned.json"
+        try:
+            self.assigned_pages_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            messagebox.showwarning(
+                "Commit Assignments",
+                "Could not create the folder for saving assignments.",
+            )
+            return False
+        try:
+            with self.assigned_pages_path.open("w", encoding="utf-8") as fh:
+                json.dump(self.assigned_pages, fh, indent=2)
+        except OSError as exc:
+            messagebox.showwarning("Commit Assignments", f"Could not save assignments: {exc}")
+            return False
+        return True
+
+    def commit_assignments(self) -> None:
+        company = self.company_var.get().strip()
+        if not company:
+            messagebox.showinfo("Select Company", "Please choose a company before committing assignments.")
+            return
+        if not messagebox.askyesno(
+            "Confirm Commit",
+            f"Commit the current assignments for {company}?",
+            parent=self.root,
+        ):
+            return
+
+        if self.pdf_entries:
+            for entry in self.pdf_entries:
+                record: Dict[str, Any] = self.assigned_pages.get(entry.path.name, {})
+                if not isinstance(record, dict):
+                    record = {}
+                if entry.year:
+                    record["year"] = entry.year
+                else:
+                    record.pop("year", None)
+
+                selections = record.get("selections")
+                if not isinstance(selections, dict):
+                    selections = {}
+
+                for category in COLUMNS:
+                    page_index = self._get_selected_page_index(entry, category)
+                    if page_index is None:
+                        selections.pop(category, None)
+                    else:
+                        selections[category] = int(page_index)
+
+                if selections:
+                    record["selections"] = selections
+                else:
+                    record.pop("selections", None)
+
+                if record:
+                    self.assigned_pages[entry.path.name] = record
+                else:
+                    self.assigned_pages.pop(entry.path.name, None)
+
+        if self._write_assigned_pages():
+            messagebox.showinfo("Commit Assignments", "Assignments saved.")
 
     # ------------------------------------------------------------------ Company creation
     def _set_downloads_dir(self) -> None:
