@@ -41,6 +41,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+
+
 COLUMNS = ["Financial", "Income", "Shares"]
 DEFAULT_PATTERNS = {
     "Financial": ["statement of financial position"],
@@ -387,6 +390,7 @@ class ReportApp:
         if company_name:
             self.company_var.set(company_name)
         self.api_key_var = tk.StringVar(master=self.root)
+        self.openai_model_var = tk.StringVar(master=self.root, value=DEFAULT_OPENAI_MODEL)
         self.thumbnail_width_var = tk.IntVar(master=self.root, value=220)
         self.review_primary_match_filter_var = tk.BooleanVar(master=self.root, value=False)
         self.pattern_texts: Dict[str, tk.Text] = {}
@@ -609,6 +613,15 @@ class ReportApp:
         self.api_key_entry.pack(side=tk.LEFT, padx=4)
         self.api_key_entry.bind("<Return>", self._on_api_key_enter)
         self.api_key_entry.bind("<KP_Enter>", self._on_api_key_enter)
+        ttk.Label(scraped_controls, text="Model:").pack(side=tk.LEFT, padx=(8, 0))
+        self.openai_model_entry = ttk.Entry(
+            scraped_controls,
+            textvariable=self.openai_model_var,
+            width=18,
+        )
+        self.openai_model_entry.pack(side=tk.LEFT, padx=4)
+        self.openai_model_entry.bind("<Return>", self._on_openai_model_enter)
+        self.openai_model_entry.bind("<KP_Enter>", self._on_openai_model_enter)
         self.scrape_button = ttk.Button(scraped_controls, text="AIScrape", command=self.scrape_selections)
         self.scrape_button.pack(side=tk.LEFT, padx=(8, 0))
         self.scrape_progress = ttk.Progressbar(scraped_controls, orient=tk.HORIZONTAL, mode="determinate", length=200)
@@ -1149,6 +1162,16 @@ class ReportApp:
     def _save_api_key(self) -> None:
         api_key = self.api_key_var.get().strip()
         self.config_data["api_key"] = api_key
+        self._write_config()
+
+    def _on_openai_model_enter(self, _: tk.Event) -> str:  # type: ignore[override]
+        self._save_openai_model()
+        return "break"
+
+    def _save_openai_model(self) -> None:
+        model = self.openai_model_var.get().strip() or DEFAULT_OPENAI_MODEL
+        self.openai_model_var.set(model)
+        self.config_data["openai_model"] = model
         self._write_config()
 
     def _load_pdfs_on_start(self) -> None:
@@ -7376,11 +7399,11 @@ class ReportApp:
                     continue
         return None
 
-    def _call_openai(self, api_key: str, prompt: str, page_text: str) -> str:
+    def _call_openai(self, api_key: str, model: str, prompt: str, page_text: str) -> str:
         url = "https://api.openai.com/v1/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         payload = {
-            "model": "gpt-4o-mini",
+            "model": model,
             "messages": [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": page_text},
@@ -7644,6 +7667,11 @@ class ReportApp:
         self.last_company_preference = data.get("last_company", "")
         if "api_key" in data:
             self.api_key_var.set(str(data.get("api_key", "")))
+        stored_model = str(data.get("openai_model", "")).strip()
+        if stored_model:
+            self.openai_model_var.set(stored_model)
+        else:
+            self.openai_model_var.set(DEFAULT_OPENAI_MODEL)
         self._ensure_download_settings()
         self._apply_last_company_selection()
         self._config_loaded = True
@@ -8031,6 +8059,8 @@ class ReportApp:
             return
 
         self._save_api_key()
+        self._save_openai_model()
+        model_name = self.openai_model_var.get().strip() or DEFAULT_OPENAI_MODEL
 
         scrape_root = self.companies_dir / company / "openapiscrape"
         scrape_root.mkdir(parents=True, exist_ok=True)
@@ -8112,7 +8142,7 @@ class ReportApp:
 
         def _run_job(job: ScrapeTask) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
             try:
-                response_text = self._call_openai(api_key, job.prompt_text, job.page_text)
+                response_text = self._call_openai(api_key, model_name, job.prompt_text, job.page_text)
             except requests.RequestException as exc:
                 return False, None, f"{job.entry_name} - {job.category}: API request failed ({exc})"
             except Exception as exc:
