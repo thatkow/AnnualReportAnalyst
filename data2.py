@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -42,6 +43,16 @@ DEFAULT_PATTERNS = {
 YEAR_DEFAULT_PATTERNS = [r"(\d{4})\s+Annual\s+Report"]
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+
+SCRAPE_EXPECTED_COLUMNS = [
+    "CATEGORY",
+    "SUBCATEGORY",
+    "ITEM",
+    "NOTE",
+    "30.06.2023",
+    "30.06.2022",
+]
+SCRAPE_PLACEHOLDER_ROWS = 10
 
 SHIFT_MASK = 0x0001
 CONTROL_MASK = 0x0004
@@ -281,6 +292,185 @@ class CategoryRow:
             self.scrollbar.grid()
 
 
+class ScrapeResultPanel:
+    def __init__(
+        self,
+        parent: tk.Widget,
+        app: "ReportAppV2",
+        entry: PDFEntry,
+        category: str,
+        target_dir: Path,
+    ) -> None:
+        self.app = app
+        self.entry = entry
+        self.category = category
+        self.target_dir = target_dir
+        self.csv_path = target_dir / f"{category}.csv"
+        self.multiplier_path = target_dir / f"{category}_multiplier.txt"
+        self.has_csv_data = False
+        self._updating_multiplier = False
+
+        self.container = tk.Frame(
+            parent,
+            highlightbackground="#c3c3c3",
+            highlightcolor="#c3c3c3",
+            highlightthickness=1,
+            bd=1,
+            relief=tk.FLAT,
+        )
+        self.container.pack(fill=tk.X, pady=(0, 8))
+
+        self.frame = ttk.Frame(self.container, padding=8)
+        self.frame.pack(fill=tk.BOTH, expand=True)
+
+        header = ttk.Frame(self.frame)
+        header.pack(fill=tk.X)
+        title_text = f"{entry.path.name} – {category}"
+        self.title_label = ttk.Label(header, text=title_text, font=("TkDefaultFont", 10, "bold"))
+        self.title_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        multiplier_box = ttk.Frame(header)
+        multiplier_box.pack(side=tk.RIGHT)
+        ttk.Label(multiplier_box, text="Multiplier:").pack(side=tk.LEFT)
+        self.multiplier_var = tk.StringVar(master=self.frame)
+        self.multiplier_entry = ttk.Entry(multiplier_box, textvariable=self.multiplier_var, width=16)
+        self.multiplier_entry.pack(side=tk.LEFT, padx=(4, 0))
+        self.multiplier_entry.bind("<FocusOut>", self._on_multiplier_changed)
+        self.multiplier_entry.bind("<Return>", self._on_multiplier_submit)
+        self.multiplier_entry.bind("<KP_Enter>", self._on_multiplier_submit)
+
+        table_container = ttk.Frame(self.frame)
+        table_container.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        self.table = ttk.Treeview(
+            table_container,
+            columns=SCRAPE_EXPECTED_COLUMNS,
+            show="headings",
+            height=SCRAPE_PLACEHOLDER_ROWS,
+        )
+        for column in SCRAPE_EXPECTED_COLUMNS:
+            self.table.heading(column, text=column)
+            anchor = tk.W if column in {"CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"} else tk.E
+            self.table.column(column, anchor=anchor, width=140, stretch=True)
+        self.table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(table_container, orient=tk.VERTICAL, command=self.table.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.table.configure(yscrollcommand=scrollbar.set)
+
+        for widget in (
+            self.container,
+            self.frame,
+            header,
+            self.title_label,
+            table_container,
+            self.table,
+        ):
+            widget.bind("<Button-1>", self._handle_activate, add="+")
+
+        self.set_placeholder("-")
+
+    def destroy(self) -> None:
+        self.container.destroy()
+
+    def set_placeholder(self, fill: str) -> None:
+        rows = [[fill for _ in SCRAPE_EXPECTED_COLUMNS] for _ in range(SCRAPE_PLACEHOLDER_ROWS)]
+        self._populate(rows)
+        self.has_csv_data = False
+
+    def mark_loading(self) -> None:
+        if self.has_csv_data:
+            return
+        rows = [["?" for _ in SCRAPE_EXPECTED_COLUMNS] for _ in range(SCRAPE_PLACEHOLDER_ROWS)]
+        self._populate(rows)
+
+    def load_from_files(self) -> None:
+        rows: List[List[str]] = []
+        if self.csv_path.exists():
+            try:
+                with self.csv_path.open("r", encoding="utf-8", newline="") as fh:
+                    reader = csv.reader(fh)
+                    for raw_row in reader:
+                        if any(cell.strip() for cell in raw_row):
+                            rows.append([cell.strip() for cell in raw_row])
+            except OSError:
+                rows = []
+
+        if rows:
+            self._populate(rows)
+            self.has_csv_data = True
+        else:
+            self.set_placeholder("-")
+
+        if self.multiplier_path.exists():
+            try:
+                text = self.multiplier_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                text = ""
+            self._set_multiplier(text)
+        else:
+            self._set_multiplier("")
+
+    def set_multiplier(self, value: str) -> None:
+        self._set_multiplier(value)
+
+    def _set_multiplier(self, value: str) -> None:
+        self._updating_multiplier = True
+        self.multiplier_var.set(value)
+        self._updating_multiplier = False
+
+    def save_multiplier(self) -> None:
+        if self._updating_multiplier:
+            return
+        value = self.multiplier_var.get().strip()
+        try:
+            self.target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.exception("Unable to ensure scrape directory exists: %s", self.target_dir)
+            return
+        try:
+            if value:
+                self.multiplier_path.write_text(value, encoding="utf-8")
+            elif self.multiplier_path.exists():
+                self.multiplier_path.unlink()
+        except OSError:
+            logger.exception("Unable to persist multiplier for %s - %s", self.entry.path.name, self.category)
+
+    def set_active(self, active: bool) -> None:
+        color = "#1E90FF" if active else "#c3c3c3"
+        thickness = 2 if active else 1
+        self.container.configure(highlightbackground=color, highlightcolor=color, highlightthickness=thickness)
+
+    def _populate(self, rows: List[List[str]]) -> None:
+        for item in self.table.get_children(""):
+            self.table.delete(item)
+        column_count = len(SCRAPE_EXPECTED_COLUMNS)
+        for row in rows:
+            values = list(row[:column_count])
+            if len(values) < column_count:
+                values.extend([""] * (column_count - len(values)))
+            self.table.insert("", "end", values=values)
+
+    def _handle_activate(self, _: tk.Event) -> None:  # type: ignore[override]
+        self.app._on_scrape_panel_clicked(self)
+
+    def _on_multiplier_changed(self, _: tk.Event) -> None:  # type: ignore[override]
+        self.save_multiplier()
+
+    def _on_multiplier_submit(self, _: tk.Event) -> str:  # type: ignore[override]
+        self.save_multiplier()
+        return "break"
+
+
+@dataclass
+class ScrapeJob:
+    entry: PDFEntry
+    category: str
+    pages: List[int]
+    prompt_text: str
+    model_name: str
+    temp_pdf: Path
+    target_dir: Path
+
+
 class ReportAppV2:
     def __init__(self, root: tk.Misc) -> None:
         if fitz is None:
@@ -328,8 +518,14 @@ class ReportAppV2:
         self.fullscreen_preview_entry: Optional[Path] = None
         self.fullscreen_preview_page: Optional[int] = None
 
-        self.scrape_tree_items: Dict[str, Tuple[PDFEntry, str]] = {}
-        self.scrape_preview_images: List[ImageTk.PhotoImage] = []
+        self.scrape_panels: Dict[Tuple[Path, str], ScrapeResultPanel] = {}
+        self.active_scrape_key: Optional[Tuple[Path, str]] = None
+        self.scrape_preview_photo: Optional[ImageTk.PhotoImage] = None
+        self.scrape_preview_pages: List[int] = []
+        self.scrape_preview_entry: Optional[PDFEntry] = None
+        self.scrape_preview_category: Optional[str] = None
+        self.scrape_preview_cycle_index: int = 0
+        self._scrape_thread: Optional[threading.Thread] = None
 
         self.downloads_dir = tk.StringVar(master=self.root)
         self.recent_download_minutes = tk.IntVar(master=self.root, value=5)
@@ -488,33 +684,55 @@ class ReportAppV2:
         scrape_body = ttk.Frame(scrape_tab, padding=(8, 0, 8, 8))
         scrape_body.pack(fill=tk.BOTH, expand=True)
 
-        preview_container = ttk.Frame(scrape_body)
-        preview_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrape_split = ttk.Panedwindow(scrape_body, orient=tk.HORIZONTAL)
+        scrape_split.pack(fill=tk.BOTH, expand=True)
 
-        self.scrape_preview_canvas = tk.Canvas(preview_container)
-        self.scrape_preview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        preview_scrollbar = ttk.Scrollbar(preview_container, orient=tk.VERTICAL, command=self.scrape_preview_canvas.yview)
-        preview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.scrape_preview_canvas.configure(yscrollcommand=preview_scrollbar.set)
-        self.scrape_preview_inner = ttk.Frame(self.scrape_preview_canvas)
-        self.scrape_preview_window = self.scrape_preview_canvas.create_window((0, 0), window=self.scrape_preview_inner, anchor="nw")
-        self.scrape_preview_inner.bind(
-            "<Configure>",
-            lambda _e: self.scrape_preview_canvas.configure(scrollregion=self.scrape_preview_canvas.bbox("all")),
-        )
-        self.scrape_preview_canvas.bind(
-            "<Configure>",
-            lambda event: self.scrape_preview_canvas.itemconfigure(self.scrape_preview_window, width=event.width),
-        )
+        preview_frame = ttk.Frame(scrape_split, padding=(0, 0, 8, 0))
+        scrape_split.add(preview_frame, weight=1)
 
-        tree_container = ttk.Frame(scrape_body, padding=(8, 0, 0, 0))
-        tree_container.pack(side=tk.LEFT, fill=tk.BOTH)
-        self.scrape_tree = ttk.Treeview(tree_container, show="tree")
-        self.scrape_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        tree_scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=self.scrape_tree.yview)
-        tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.scrape_tree.configure(yscrollcommand=tree_scrollbar.set)
-        self.scrape_tree.bind("<<TreeviewSelect>>", self._on_scrape_tree_select)
+        preview_header = ttk.Frame(preview_frame)
+        preview_header.pack(fill=tk.X)
+        self.scrape_preview_title_var = tk.StringVar(value="Select a section to preview.")
+        ttk.Label(preview_header, textvariable=self.scrape_preview_title_var, font=("TkDefaultFont", 10, "bold")).pack(
+            side=tk.LEFT,
+            fill=tk.X,
+            expand=True,
+        )
+        self.scrape_preview_page_var = tk.StringVar(value="")
+        ttk.Label(preview_header, textvariable=self.scrape_preview_page_var).pack(side=tk.RIGHT)
+
+        self.scrape_preview_label = tk.Label(
+            preview_frame,
+            text="Select a section to preview.",
+            justify=tk.CENTER,
+            anchor="center",
+            background="#f0f0f0",
+        )
+        self.scrape_preview_label.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.scrape_preview_label.bind("<Button-1>", self._on_scrape_preview_click)
+
+        tables_frame = ttk.Frame(scrape_split)
+        scrape_split.add(tables_frame, weight=1)
+
+        self.scrape_tables_canvas = tk.Canvas(tables_frame)
+        self.scrape_tables_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tables_scrollbar = ttk.Scrollbar(tables_frame, orient=tk.VERTICAL, command=self.scrape_tables_canvas.yview)
+        tables_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.scrape_tables_canvas.configure(yscrollcommand=tables_scrollbar.set)
+        self.scrape_tables_inner = ttk.Frame(self.scrape_tables_canvas)
+        self.scrape_tables_window = self.scrape_tables_canvas.create_window(
+            (0, 0),
+            window=self.scrape_tables_inner,
+            anchor="nw",
+        )
+        self.scrape_tables_inner.bind(
+            "<Configure>",
+            lambda _e: self.scrape_tables_canvas.configure(scrollregion=self.scrape_tables_canvas.bbox("all")),
+        )
+        self.scrape_tables_canvas.bind(
+            "<Configure>",
+            lambda event: self.scrape_tables_canvas.itemconfigure(self.scrape_tables_window, width=event.width),
+        )
 
     def _maximize_window(self) -> None:
         try:
@@ -888,7 +1106,8 @@ class ReportAppV2:
         self.category_rows.clear()
         for child in self.inner_frame.winfo_children():
             child.destroy()
-        self._refresh_scrape_tree()
+        self.active_scrape_key = None
+        self._refresh_scrape_results()
         self._clear_scrape_preview()
 
     def load_pdfs(self) -> None:
@@ -1065,77 +1284,143 @@ class ReportAppV2:
                 row.refresh()
 
         self.inner_frame.columnconfigure(0, weight=1)
-        self._refresh_scrape_tree()
+        self._refresh_scrape_results()
 
-    def _refresh_scrape_tree(self) -> None:
-        if not hasattr(self, "scrape_tree"):
+    def _refresh_scrape_results(self) -> None:
+        if not hasattr(self, "scrape_tables_inner"):
             return
-        for item in self.scrape_tree.get_children(""):
-            self.scrape_tree.delete(item)
-        self.scrape_tree_items.clear()
+        for panel in self.scrape_panels.values():
+            panel.destroy()
+        self.scrape_panels.clear()
+        for child in self.scrape_tables_inner.winfo_children():
+            child.destroy()
+
         if not self.pdf_entries:
             self._clear_scrape_preview()
+            ttk.Label(
+                self.scrape_tables_inner,
+                text="Load PDFs and choose pages to prepare scraping results.",
+                foreground="#666666",
+            ).pack(anchor="w", padx=12, pady=12)
             return
+
+        company = self.company_var.get().strip()
+        default_entry: Optional[PDFEntry] = None
+        default_category: Optional[str] = None
+
         for entry in self.pdf_entries:
-            parent_id = self.scrape_tree.insert("", "end", text=entry.path.name)
-            self.scrape_tree.item(parent_id, open=True)
+            if company:
+                target_base = self.companies_dir / company / "openapiscrape" / entry.path.stem
+            else:
+                target_base = entry.path.parent / "openapiscrape" / entry.path.stem
             for category in COLUMNS:
                 pages = self._get_selected_pages(entry, category)
-                if pages:
-                    page_text = ", ".join(str(page + 1) for page in pages)
-                    label = f"{category}: {page_text}"
-                else:
-                    label = f"{category}: none"
-                item_id = self.scrape_tree.insert(parent_id, "end", text=label)
-                self.scrape_tree_items[item_id] = (entry, category)
+                csv_path = target_base / f"{category}.csv"
+                multiplier_path = target_base / f"{category}_multiplier.txt"
+                if not pages and not csv_path.exists() and not multiplier_path.exists():
+                    continue
+                panel = ScrapeResultPanel(self.scrape_tables_inner, self, entry, category, target_base)
+                panel.load_from_files()
+                key = (entry.path, category)
+                self.scrape_panels[key] = panel
+                if panel.has_csv_data or pages:
+                    if default_entry is None:
+                        default_entry = entry
+                        default_category = category
+
+        if not self.scrape_panels:
+            ttk.Label(
+                self.scrape_tables_inner,
+                text="Select pages in the Review tab to stage AIScrape jobs.",
+                foreground="#666666",
+            ).pack(anchor="w", padx=12, pady=12)
+            self._clear_scrape_preview()
+            self.active_scrape_key = None
+            return
+
+        if default_entry is None or default_category is None:
+            first_panel = next(iter(self.scrape_panels.values()))
+            default_entry = first_panel.entry
+            default_category = first_panel.category
+
+        self.set_active_scrape_panel(default_entry, default_category)
 
     def _clear_scrape_preview(self) -> None:
-        if not hasattr(self, "scrape_preview_inner"):
+        if not hasattr(self, "scrape_preview_label"):
             return
-        for child in self.scrape_preview_inner.winfo_children():
-            child.destroy()
-        self.scrape_preview_images.clear()
-        bbox = self.scrape_preview_canvas.bbox("all")
-        if bbox is None:
-            self.scrape_preview_canvas.configure(scrollregion=(0, 0, 0, 0))
-        else:
-            self.scrape_preview_canvas.configure(scrollregion=bbox)
+        self.scrape_preview_photo = None
+        self.scrape_preview_label.configure(image="", text="Select a section to preview.", background="#f0f0f0")
+        if hasattr(self, "scrape_preview_title_var"):
+            self.scrape_preview_title_var.set("Select a section to preview.")
+        if hasattr(self, "scrape_preview_page_var"):
+            self.scrape_preview_page_var.set("")
+        self.scrape_preview_pages = []
+        self.scrape_preview_entry = None
+        self.scrape_preview_category = None
+        self.scrape_preview_cycle_index = 0
 
-    def _on_scrape_tree_select(self, _: tk.Event) -> None:  # type: ignore[override]
-        selection = self.scrape_tree.selection()
-        if not selection:
-            return
-        item_id = selection[0]
-        mapping = self.scrape_tree_items.get(item_id)
-        if mapping is None:
-            return
-        entry, category = mapping
-        self._update_scrape_preview(entry, category)
+    def _on_scrape_panel_clicked(self, panel: ScrapeResultPanel) -> None:
+        self.set_active_scrape_panel(panel.entry, panel.category)
 
-    def _update_scrape_preview(self, entry: PDFEntry, category: str) -> None:
-        self._clear_scrape_preview()
-        pages = self._get_selected_pages(entry, category)
-        if not pages:
-            ttk.Label(self.scrape_preview_inner, text="No pages selected for this category.").pack(
-                anchor="w", padx=8, pady=8
+    def set_active_scrape_panel(self, entry: PDFEntry, category: str) -> None:
+        key = (entry.path, category)
+        if key not in self.scrape_panels:
+            return
+        self.active_scrape_key = key
+        for panel_key, panel in self.scrape_panels.items():
+            panel.set_active(panel_key == key)
+        self._show_scrape_preview(entry, category)
+
+    def _show_scrape_preview(self, entry: PDFEntry, category: str) -> None:
+        self.scrape_preview_entry = entry
+        self.scrape_preview_category = category
+        self.scrape_preview_pages = self._get_selected_pages(entry, category)
+        self.scrape_preview_cycle_index = 0
+        title = f"{entry.path.name} – {category}"
+        self.scrape_preview_title_var.set(title)
+        if not self.scrape_preview_pages:
+            self.scrape_preview_label.configure(
+                image="",
+                text="No pages selected for this category.",
+                background="#f0f0f0",
             )
+            self.scrape_preview_page_var.set("")
+            self.scrape_preview_photo = None
             return
+        self._display_scrape_preview_page()
 
+    def _display_scrape_preview_page(self) -> None:
+        if not self.scrape_preview_entry or not self.scrape_preview_pages:
+            self._clear_scrape_preview()
+            return
+        page_count = len(self.scrape_preview_pages)
+        self.scrape_preview_cycle_index %= max(page_count, 1)
+        page_index = self.scrape_preview_pages[self.scrape_preview_cycle_index]
         display_width = max(self.thumbnail_width_var.get(), 360)
-        for page_index in pages:
-            frame = ttk.Frame(self.scrape_preview_inner, padding=8)
-            frame.pack(fill=tk.X, expand=True)
-            ttk.Label(frame, text=f"Page {page_index + 1}", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
-            photo = self.render_page(entry.doc, page_index, target_width=display_width)
-            if photo is not None:
-                self.scrape_preview_images.append(photo)
-                ttk.Label(frame, image=photo).pack(anchor="center", pady=(4, 0))
-            else:
-                ttk.Label(frame, text="Preview unavailable").pack(anchor="w", pady=(4, 0))
-        bbox = self.scrape_preview_canvas.bbox("all")
-        if bbox is not None:
-            self.scrape_preview_canvas.configure(scrollregion=bbox)
-        self.scrape_preview_canvas.yview_moveto(0)
+        photo = self.render_page(self.scrape_preview_entry.doc, page_index, target_width=display_width)
+        if photo is None:
+            self.scrape_preview_label.configure(image="", text="Preview unavailable", background="#f0f0f0")
+            self.scrape_preview_photo = None
+        else:
+            self.scrape_preview_photo = photo
+            self.scrape_preview_label.configure(image=photo, text="", background="#000000")
+        self.scrape_preview_page_var.set(
+            f"Page {page_index + 1} ({self.scrape_preview_cycle_index + 1}/{page_count})"
+        )
+
+    def _on_scrape_preview_click(self, event: tk.Event) -> None:  # type: ignore[override]
+        try:
+            state = int(event.state)
+        except Exception:
+            state = 0
+        if state & CONTROL_MASK:
+            self._cycle_scrape_preview()
+
+    def _cycle_scrape_preview(self) -> None:
+        if len(self.scrape_preview_pages) < 2:
+            return
+        self.scrape_preview_cycle_index = (self.scrape_preview_cycle_index + 1) % len(self.scrape_preview_pages)
+        self._display_scrape_preview_page()
 
     # ------------------------------------------------------------------ Interactions
     def _bind_review_mousewheel(self, _: tk.Event) -> None:  # type: ignore[override]
@@ -1189,7 +1474,7 @@ class ReportAppV2:
         row = self.category_rows.get((entry.path, category))
         if row is not None:
             row.update_selection()
-        self._refresh_scrape_tree()
+        self._refresh_scrape_results()
 
     def manual_select(self, entry: PDFEntry, category: str) -> None:
         self.open_pdf(entry.path)
@@ -1216,7 +1501,7 @@ class ReportAppV2:
         row = self.category_rows.get((entry.path, category))
         if row is not None:
             row.refresh()
-        self._refresh_scrape_tree()
+        self._refresh_scrape_results()
 
     def open_pdf(self, path: Path) -> None:
         try:
@@ -1650,7 +1935,12 @@ class ReportAppV2:
 
         self._save_pattern_config()
 
-        tasks: List[Tuple[PDFEntry, str, List[int], str, str]] = []
+        scrape_root = self.companies_dir / company / "openapiscrape"
+        scrape_root.mkdir(parents=True, exist_ok=True)
+
+        jobs: List[ScrapeJob] = []
+        prep_errors: List[str] = []
+
         for entry in self.pdf_entries:
             for category in COLUMNS:
                 pages = self._get_selected_pages(entry, category)
@@ -1661,87 +1951,139 @@ class ReportAppV2:
                     continue
                 model_var = self.openai_model_vars.get(category)
                 model_name = model_var.get() if model_var is not None else DEFAULT_OPENAI_MODEL
-                tasks.append((entry, category, pages, prompt_text, model_name))
+                temp_pdf = self._export_pages_to_pdf(entry.doc, pages)
+                if temp_pdf is None:
+                    prep_errors.append(f"{entry.path.name} - {category}: Unable to prepare selected pages")
+                    continue
+                target_dir = scrape_root / entry.path.stem
+                jobs.append(
+                    ScrapeJob(
+                        entry=entry,
+                        category=category,
+                        pages=pages,
+                        prompt_text=prompt_text,
+                        model_name=model_name,
+                        temp_pdf=temp_pdf,
+                        target_dir=target_dir,
+                    )
+                )
+                panel = self.scrape_panels.get((entry.path, category))
+                if panel is not None and not panel.has_csv_data:
+                    panel.mark_loading()
 
-        if not tasks:
+        if prep_errors and not jobs:
+            messagebox.showerror("AIScrape", "\n".join(prep_errors))
+            return
+        if not jobs:
             messagebox.showinfo("AIScrape", "Select pages before running AIScrape.")
             return
 
         self.scrape_button.configure(state="disabled")
-        self.scrape_progress.configure(value=0, maximum=len(tasks))
-        self.root.update_idletasks()
+        self.scrape_progress.configure(value=0, maximum=len(jobs))
 
-        scrape_root = self.companies_dir / company / "openapiscrape"
-        scrape_root.mkdir(parents=True, exist_ok=True)
+        thread = threading.Thread(
+            target=self._run_scrape_jobs,
+            args=(jobs, api_key, prep_errors),
+            daemon=True,
+        )
+        self._scrape_thread = thread
+        thread.start()
 
-        errors: List[str] = []
-        completed = 0
-
-        for entry, category, pages, prompt_text, model_name in tasks:
-            temp_pdf: Optional[Path] = None
+    def _run_scrape_jobs(
+        self,
+        jobs: List[ScrapeJob],
+        api_key: str,
+        prep_errors: List[str],
+    ) -> None:
+        errors: List[str] = list(prep_errors)
+        total = len(jobs)
+        for index, job in enumerate(jobs, start=1):
+            multiplier: Optional[str] = None
+            success = False
             try:
                 logger.info(
                     "AIScrape starting for %s | %s | pages=%s | model=%s",
-                    entry.path.name,
-                    category,
-                    pages,
-                    model_name,
+                    job.entry.path.name,
+                    job.category,
+                    job.pages,
+                    job.model_name,
                 )
-                temp_pdf = self._export_pages_to_pdf(entry.doc, pages)
-                if temp_pdf is None:
-                    raise ValueError("Unable to prepare the selected pages for upload")
-
                 response_text = self._call_openai_with_pdfs(
-                    api_key, prompt_text, [temp_pdf], model_name
+                    api_key,
+                    job.prompt_text,
+                    [job.temp_pdf],
+                    job.model_name,
                 )
                 multiplier, rows = self._parse_multiplier_response(response_text)
                 logger.info(
                     "AIScrape completed for %s | %s | multiplier=%s | rows=%s",
-                    entry.path.name,
-                    category,
+                    job.entry.path.name,
+                    job.category,
                     multiplier,
                     len(rows),
                 )
 
-                target_dir = scrape_root / entry.path.stem
-                target_dir.mkdir(parents=True, exist_ok=True)
-
+                job.target_dir.mkdir(parents=True, exist_ok=True)
                 if multiplier is not None:
-                    multiplier_path = target_dir / f"{category}_multiplier.txt"
+                    multiplier_path = job.target_dir / f"{job.category}_multiplier.txt"
                     multiplier_path.write_text(str(multiplier).strip(), encoding="utf-8")
 
-                csv_path = target_dir / f"{category}.csv"
+                csv_path = job.target_dir / f"{job.category}.csv"
                 if rows:
                     with csv_path.open("w", encoding="utf-8", newline="") as fh:
                         writer = csv.writer(fh)
-                        for row in rows:
-                            writer.writerow(row)
+                        writer.writerows(rows)
                 else:
                     csv_path.write_text("", encoding="utf-8")
+                success = True
             except Exception as exc:
                 logger.exception(
-                    "AIScrape failed for %s | %s", entry.path.name, category
+                    "AIScrape failed for %s | %s", job.entry.path.name, job.category
                 )
-                errors.append(f"{entry.path.name} - {category}: {exc}")
+                errors.append(f"{job.entry.path.name} - {job.category}: {exc}")
             finally:
-                if temp_pdf is not None:
-                    try:
-                        temp_pdf.unlink()
-                    except Exception:
-                        pass
-                completed += 1
-                self.scrape_progress.configure(value=completed)
-                self.root.update_idletasks()
+                try:
+                    job.temp_pdf.unlink()
+                except Exception:
+                    pass
+                self.root.after(
+                    0,
+                    self._on_scrape_job_progress,
+                    job,
+                    index,
+                    success,
+                    multiplier,
+                )
+        self.root.after(0, self._on_scrape_jobs_finished, total, errors)
 
+    def _on_scrape_job_progress(
+        self,
+        job: ScrapeJob,
+        completed: int,
+        _success: bool,
+        _multiplier: Optional[str],
+    ) -> None:
+        self.scrape_progress.configure(value=completed)
+        panel = self.scrape_panels.get((job.entry.path, job.category))
+        if panel is not None:
+            panel.load_from_files()
+            panel.set_active(self.active_scrape_key == (job.entry.path, job.category))
+        if self.active_scrape_key == (job.entry.path, job.category):
+            if self.scrape_preview_pages:
+                self._display_scrape_preview_page()
+            else:
+                self._show_scrape_preview(job.entry, job.category)
+
+    def _on_scrape_jobs_finished(self, total: int, errors: List[str]) -> None:
         self.scrape_button.configure(state="normal")
         self.scrape_progress.configure(value=0)
-
+        self._scrape_thread = None
         if errors:
             messagebox.showerror("AIScrape", "\n".join(errors))
         else:
             messagebox.showinfo(
                 "AIScrape",
-                f"Saved {len(tasks)} OpenAI response(s) to 'openapiscrape'.",
+                f"Saved {total} OpenAI response(s) to 'openapiscrape'.",
             )
 
     # ------------------------------------------------------------------ Company creation
