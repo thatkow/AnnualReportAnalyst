@@ -8009,13 +8009,16 @@ class ReportApp:
             messagebox.showwarning("Save Patterns", f"Could not save pattern configuration: {exc}")
 
     def scrape_selections(self) -> None:
+        logger.info("AIScrape invoked | pdf_entries=%d", len(self.pdf_entries))
         if not self.pdf_entries:
             messagebox.showinfo("No PDFs", "Load PDFs before running AIScrape.")
+            logger.info("AIScrape aborted | reason=no_pdfs")
             return
 
         company = self.company_var.get()
         if not company:
             messagebox.showinfo("Select Company", "Please choose a company before running AIScrape.")
+            logger.info("AIScrape aborted | reason=no_company_selected")
             return
 
         if hasattr(self, "scrape_progress"):
@@ -8025,6 +8028,7 @@ class ReportApp:
         if not api_key:
             messagebox.showwarning("API Key Required", "Enter an API key and press Enter before running AIScrape.")
             self.api_key_entry.focus_set()
+            logger.info("AIScrape aborted | reason=no_api_key")
             return
         if api_key != self.api_key_var.get():
             self.api_key_var.set(api_key)
@@ -8041,12 +8045,21 @@ class ReportApp:
                 "Missing Prompts",
                 "Prompt files not found for: " + ", ".join(missing_prompts),
             )
+            logger.info(
+                "AIScrape aborted | reason=missing_prompts | missing=%s",
+                ",".join(sorted(missing_prompts)),
+            )
             return
 
         self._save_api_key()
 
         scrape_root = self.companies_dir / company / "openapiscrape"
         scrape_root.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "AIScrape preparing jobs | company=%s | scrape_root=%s",
+            company,
+            scrape_root,
+        )
 
         errors: List[str] = []
         pending: List[Tuple[PDFEntry, List[Tuple[str, List[int]]]]] = []
@@ -8105,17 +8118,25 @@ class ReportApp:
                 entry_tasks.append((category, normalized_indexes))
 
             if entry_tasks:
+                logger.info(
+                    "AIScrape pending entry | entry=%s | year=%s | tasks=%d",
+                    entry.path.name,
+                    entry.year,
+                    len(entry_tasks),
+                )
                 pending.append((entry, entry_tasks))
 
         total_tasks = sum(len(items) for _, items in pending)
         if not total_tasks:
             messagebox.showinfo("AIScrape", "All selected sections already have scraped files.")
+            logger.info("AIScrape aborted | reason=no_pending_tasks")
             return
 
         if hasattr(self, "scrape_button"):
             self.scrape_button.state(["disabled"])
         if hasattr(self, "scrape_progress"):
             self.scrape_progress.configure(maximum=total_tasks, value=0)
+        logger.info("AIScrape starting | jobs=%d", total_tasks)
 
         successful = 0
         attempted = 0
@@ -8124,6 +8145,12 @@ class ReportApp:
         jobs: List[ScrapeTask] = []
 
         def _run_job(job: ScrapeTask) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+            logger.info(
+                "AIScrape job started | entry=%s | category=%s | page_count=%d",
+                job.entry_name,
+                job.category,
+                len(job.page_indexes),
+            )
             try:
                 response_text = self._call_openai(api_key, job.prompt_text, job.page_text)
             except (APIConnectionError, APIError, APIStatusError, RateLimitError) as exc:
@@ -8158,6 +8185,12 @@ class ReportApp:
                 "page_indexes": list(job.page_indexes),
                 "year": job.entry_year,
             }
+            logger.info(
+                "AIScrape job completed | entry=%s | category=%s | response_chars=%d",
+                job.entry_name,
+                job.category,
+                len(response_text),
+            )
             return True, metadata_entry, None
 
         try:
@@ -8209,9 +8242,16 @@ class ReportApp:
                             scrape_root=scrape_root,
                         )
                     )
+                    logger.info(
+                        "AIScrape job queued | entry=%s | category=%s | pages=%s",
+                        entry.path.name,
+                        category,
+                        ",".join(str(idx) for idx in successful_pages),
+                    )
 
             if jobs:
                 max_workers = min(8, max(2, os.cpu_count() or 4))
+                logger.info("AIScrape executing | queued_jobs=%d | max_workers=%d", len(jobs), max_workers)
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     future_map = {executor.submit(_run_job, job): job for job in jobs}
                     for future in as_completed(future_map):
@@ -8223,8 +8263,21 @@ class ReportApp:
                             success, metadata_entry, error_message = future.result()
                         except Exception as exc:
                             error_message = f"{job.entry_name} - {job.category}: {exc}"
+                            logger.exception(
+                                "AIScrape job crashed | entry=%s | category=%s",
+                                job.entry_name,
+                                job.category,
+                            )
 
                         attempted += 1
+                        logger.info(
+                            "AIScrape job finished | entry=%s | category=%s | success=%s | attempted=%d/%d",
+                            job.entry_name,
+                            job.category,
+                            success,
+                            attempted,
+                            total_tasks,
+                        )
 
                         if success and metadata_entry is not None:
                             metadata = metadata_cache.get(job.entry_path, {})
@@ -8234,8 +8287,20 @@ class ReportApp:
                             metadata[job.category] = metadata_entry
                             metadata_changed[job.entry_path] = True
                             successful += 1
+                            logger.info(
+                                "AIScrape job success | entry=%s | category=%s | successful=%d",
+                                job.entry_name,
+                                job.category,
+                                successful,
+                            )
                         elif error_message:
                             errors.append(error_message)
+                            logger.warning(
+                                "AIScrape job error | entry=%s | category=%s | message=%s",
+                                job.entry_name,
+                                job.category,
+                                error_message,
+                            )
 
                         if hasattr(self, "scrape_progress"):
                             self.scrape_progress["value"] = attempted
@@ -8250,12 +8315,23 @@ class ReportApp:
                 metadata_path = metadata_path_map.get(entry_path)
                 if metadata_path is None:
                     continue
+                logger.info(
+                    "AIScrape writing metadata | entry=%s | path=%s",
+                    entry_path.name,
+                    metadata_path,
+                )
                 self._write_doc_metadata(metadata_path, metadata)
         finally:
             if hasattr(self, "scrape_button"):
                 self.scrape_button.state(["!disabled"])
             if hasattr(self, "scrape_progress"):
                 self.scrape_progress["value"] = 0
+            logger.info(
+                "AIScrape completed | attempted=%d | successful=%d | errors=%d",
+                attempted,
+                successful,
+                len(errors),
+            )
 
         self._refresh_scraped_tab()
         if successful:
