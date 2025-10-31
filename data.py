@@ -431,6 +431,7 @@ class ReportApp:
         self.assigned_pages_path: Optional[Path] = None
         self.scraped_images: List[ImageTk.PhotoImage] = []
         self.scraped_preview_states: Dict[tk.Widget, Dict[str, Any]] = {}
+        self.active_scraped_preview_widget: Optional[tk.Widget] = None
         self._thumbnail_resize_job: Optional[str] = None
         self.company_tabs: Dict[str, "ReportApp"] = {}
         self.company_frames: Dict[str, ttk.Frame] = {}
@@ -489,6 +490,7 @@ class ReportApp:
         )
         self._combined_zoom_save_job: Optional[str] = None
         self._combined_blank_notification_shown = False
+        self._scraped_page_navigation_bound = False
         self.type_color_map: Dict[str, str] = {}
         self.type_color_labels: Dict[str, str] = {}
         self.category_color_map: Dict[str, str] = {}
@@ -637,6 +639,7 @@ class ReportApp:
         self.scraped_canvas.configure(yscrollcommand=scraped_scrollbar.set)
         self.scraped_inner = ttk.Frame(self.scraped_canvas)
         self.scraped_window = self.scraped_canvas.create_window((0, 0), window=self.scraped_inner, anchor="nw")
+        self._register_scraped_page_navigation()
         self.scraped_inner.bind("<Configure>", lambda _e: self.scraped_canvas.configure(scrollregion=self.scraped_canvas.bbox("all")))
         self.scraped_canvas.bind("<Configure>", lambda e: self.scraped_canvas.itemconfigure(self.scraped_window, width=e.width))
 
@@ -745,10 +748,89 @@ class ReportApp:
         except Exception:
             return False
 
+    def _register_scraped_page_navigation(self) -> None:
+        if self._scraped_page_navigation_bound:
+            return
+        try:
+            self.root.bind_all("<Prior>", self._on_scraped_page_up, add="+")
+            self.root.bind_all("<Next>", self._on_scraped_page_down, add="+")
+        except Exception:
+            return
+        self._scraped_page_navigation_bound = True
+
+    def _on_scraped_page_up(self, event: tk.Event) -> str:
+        return self._handle_scraped_page_key(event, -1)
+
+    def _on_scraped_page_down(self, event: tk.Event) -> str:
+        return self._handle_scraped_page_key(event, 1)
+
+    def _handle_scraped_page_key(self, event: tk.Event, direction: int) -> str:
+        if not self._is_scraped_tab_active():
+            return ""
+        widget = self._preview_widget_for_event(event)
+        if widget is None:
+            widget = self._current_scraped_preview_widget()
+        if widget is None:
+            return ""
+        self.active_scraped_preview_widget = widget
+        self._cycle_scraped_preview(widget, direction)
+        return "break"
+
+    def _preview_widget_for_event(self, event: tk.Event) -> Optional[tk.Widget]:
+        widget = getattr(event, "widget", None)
+        if not isinstance(widget, tk.Widget):
+            return None
+        if widget in self.scraped_preview_states:
+            return widget
+        info = self.scraped_table_sources.get(widget)
+        if isinstance(info, dict):
+            preview = info.get("preview_widget")
+            if isinstance(preview, tk.Widget):
+                return preview
+        parent = widget.master
+        while isinstance(parent, tk.Widget):
+            if parent in self.scraped_preview_states:
+                return parent
+            info = self.scraped_table_sources.get(parent)
+            if isinstance(info, dict):
+                preview = info.get("preview_widget")
+                if isinstance(preview, tk.Widget):
+                    return preview
+            parent = parent.master
+        return None
+
+    def _is_scraped_tab_active(self) -> bool:
+        if not hasattr(self, "notebook") or not hasattr(self, "scraped_frame"):
+            return False
+        try:
+            current = self.notebook.select()
+        except tk.TclError:
+            return False
+        return current == str(self.scraped_frame)
+
+    def _current_scraped_preview_widget(self) -> Optional[tk.Widget]:
+        widget = getattr(self, "active_scraped_preview_widget", None)
+        if widget is not None and widget in self.scraped_preview_states and self._widget_exists(widget):
+            return widget
+        for candidate in self.scraped_preview_states:
+            if self._widget_exists(candidate):
+                self.active_scraped_preview_widget = candidate
+                return candidate
+        self.active_scraped_preview_widget = None
+        return None
+
+    def _widget_exists(self, widget: tk.Widget) -> bool:
+        try:
+            return bool(widget.winfo_exists())
+        except tk.TclError:
+            return False
+
     def _on_scraped_image_click(self, event: tk.Event, widget: tk.Widget) -> Optional[str]:
         state = self.scraped_preview_states.get(widget)
         if not state:
+            self.active_scraped_preview_widget = None
             return None
+        self.active_scraped_preview_widget = widget
         if self._event_has_control(event):
             self._cycle_scraped_preview(widget)
             return "break"
@@ -775,6 +857,7 @@ class ReportApp:
         state = self.scraped_preview_states.get(widget)
         if not state:
             return
+        self.active_scraped_preview_widget = widget
         page_indexes: List[int] = state.get("page_indexes", [])
         if len(page_indexes) <= 1:
             return
@@ -3749,6 +3832,7 @@ class ReportApp:
         self.scraped_images.clear()
         self.scraped_table_sources = {}
         self.scraped_preview_states = {}
+        self.active_scraped_preview_widget = None
         self._clear_combined_tab()
         if hasattr(self, "scrape_progress"):
             self.scrape_progress["value"] = 0
@@ -3981,6 +4065,8 @@ class ReportApp:
                         "title_label": title_label,
                         "title_base_text": base_header_text,
                     }
+                    if self.active_scraped_preview_widget is None:
+                        self.active_scraped_preview_widget = image_label
                     preview_widget = image_label
                     image_frame.bind(
                         "<Configure>",
