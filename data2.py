@@ -290,6 +290,7 @@ class ReportAppV2:
         self.app_root = Path(__file__).resolve().parent
         self.companies_dir = self.app_root / "companies"
         self.config_path = self.app_root / "data2_config.json"
+        self.pattern_config_path = self.app_root / "pattern_config.json"
         self.prompts_dir = self.app_root / "prompts"
 
         self.company_var = tk.StringVar(master=self.root)
@@ -303,6 +304,7 @@ class ReportAppV2:
         self.year_pattern_text: Optional[tk.Text] = None
         self.year_case_insensitive_var = tk.BooleanVar(master=self.root, value=True)
         self.year_whitespace_as_space_var = tk.BooleanVar(master=self.root, value=True)
+        self.openai_model_vars: Dict[str, tk.StringVar] = {}
 
         self.pdf_entries: List[PDFEntry] = []
         self.category_rows: Dict[Tuple[Path, str], CategoryRow] = {}
@@ -320,6 +322,7 @@ class ReportAppV2:
         self.recent_download_minutes = tk.IntVar(master=self.root, value=5)
 
         self._build_ui()
+        self._load_pattern_config()
         self._load_config()
         self._refresh_company_options()
 
@@ -374,6 +377,9 @@ class ReportAppV2:
             defaults = DEFAULT_PATTERNS.get(column, [])
             text_widget.insert("1.0", "\n".join(defaults))
             self.pattern_texts[column] = text_widget
+
+            model_var = tk.StringVar(master=self.root, value=DEFAULT_OPENAI_MODEL)
+            self.openai_model_vars[column] = model_var
 
             case_var = tk.BooleanVar(master=self.root, value=True)
             self.case_insensitive_vars[column] = case_var
@@ -454,6 +460,15 @@ class ReportAppV2:
         self.scrape_progress = ttk.Progressbar(scrape_controls, orient=tk.HORIZONTAL, mode="determinate", length=200)
         self.scrape_progress.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
 
+        model_frame = ttk.LabelFrame(scrape_tab, text="OpenAI models", padding=8)
+        model_frame.pack(fill=tk.X, padx=8)
+        for column in COLUMNS:
+            row = ttk.Frame(model_frame)
+            row.pack(fill=tk.X, pady=2)
+            ttk.Label(row, text=f"{column}:").pack(side=tk.LEFT)
+            entry = ttk.Entry(row, textvariable=self.openai_model_vars[column])
+            entry.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
+
         scrape_body = ttk.Frame(scrape_tab, padding=(8, 0, 8, 8))
         scrape_body.pack(fill=tk.BOTH, expand=True)
 
@@ -501,6 +516,106 @@ class ReportAppV2:
                 pass
 
     # ------------------------------------------------------------------ Config
+    def _collect_pattern_config_payload(self) -> Dict[str, Any]:
+        patterns = {
+            column: [line for line in self._read_text_lines(widget)]
+            for column, widget in self.pattern_texts.items()
+        }
+        case_flags = {column: bool(var.get()) for column, var in self.case_insensitive_vars.items()}
+        whitespace_flags = {
+            column: bool(var.get()) for column, var in self.whitespace_as_space_vars.items()
+        }
+        year_patterns = []
+        if self.year_pattern_text is not None:
+            year_patterns = [line for line in self._read_text_lines(self.year_pattern_text)]
+        openai_models: Dict[str, str] = {}
+        for column in COLUMNS:
+            var = self.openai_model_vars.get(column)
+            if var is not None:
+                value = var.get().strip()
+            else:
+                value = ""
+            openai_models[column] = value or DEFAULT_OPENAI_MODEL
+        payload = {
+            "patterns": patterns,
+            "case_insensitive": case_flags,
+            "space_as_whitespace": whitespace_flags,
+            "year_patterns": year_patterns,
+            "year_case_insensitive": bool(self.year_case_insensitive_var.get()),
+            "year_space_as_whitespace": bool(self.year_whitespace_as_space_var.get()),
+            "downloads_minutes": int(self.recent_download_minutes.get()),
+            "openai_models": openai_models,
+        }
+        return payload
+
+    def _save_pattern_config(self) -> None:
+        payload = self._collect_pattern_config_payload()
+        try:
+            with self.pattern_config_path.open("w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+        except OSError:
+            messagebox.showwarning("Save Patterns", "Unable to save pattern configuration to disk.")
+
+    def _load_pattern_config(self) -> None:
+        if not self.pattern_config_path.exists():
+            return
+        try:
+            with self.pattern_config_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            messagebox.showwarning("Load Patterns", "Unable to read pattern configuration; using defaults.")
+            return
+
+        if not isinstance(data, dict):
+            messagebox.showwarning("Load Patterns", "Pattern configuration format is invalid; using defaults.")
+            return
+
+        patterns = data.get("patterns", {})
+        if isinstance(patterns, dict):
+            for column, widget in self.pattern_texts.items():
+                values = patterns.get(column)
+                if isinstance(values, list):
+                    widget.delete("1.0", tk.END)
+                    widget.insert(
+                        "1.0",
+                        "\n".join(str(item) for item in values if isinstance(item, str)),
+                    )
+
+        case_flags = data.get("case_insensitive", {})
+        if isinstance(case_flags, dict):
+            for column, var in self.case_insensitive_vars.items():
+                if column in case_flags:
+                    var.set(bool(case_flags[column]))
+
+        whitespace_flags = data.get("space_as_whitespace", {})
+        if isinstance(whitespace_flags, dict):
+            for column, var in self.whitespace_as_space_vars.items():
+                if column in whitespace_flags:
+                    var.set(bool(whitespace_flags[column]))
+
+        year_patterns = data.get("year_patterns")
+        if isinstance(year_patterns, list) and self.year_pattern_text is not None:
+            self.year_pattern_text.delete("1.0", tk.END)
+            self.year_pattern_text.insert(
+                "1.0", "\n".join(str(item) for item in year_patterns if isinstance(item, str))
+            )
+
+        if "year_case_insensitive" in data:
+            self.year_case_insensitive_var.set(bool(data["year_case_insensitive"]))
+        if "year_space_as_whitespace" in data:
+            self.year_whitespace_as_space_var.set(bool(data["year_space_as_whitespace"]))
+
+        downloads_minutes = data.get("downloads_minutes")
+        if isinstance(downloads_minutes, int) and downloads_minutes > 0:
+            self.recent_download_minutes.set(downloads_minutes)
+
+        models = data.get("openai_models")
+        if isinstance(models, dict):
+            for column, var in self.openai_model_vars.items():
+                model_name = models.get(column)
+                if isinstance(model_name, str) and model_name.strip():
+                    var.set(model_name.strip())
+
     def _load_config(self) -> None:
         if not self.config_path.exists():
             return
@@ -514,30 +629,14 @@ class ReportAppV2:
         if isinstance(downloads, str):
             self.downloads_dir.set(downloads)
 
-        minutes = data.get("downloads_minutes")
-        if isinstance(minutes, int) and minutes > 0:
-            self.recent_download_minutes.set(minutes)
-
         last_company = data.get("last_company")
         if isinstance(last_company, str):
             self.company_var.set(last_company)
 
-        patterns = data.get("patterns", {})
-        for column, values in patterns.items():
-            widget = self.pattern_texts.get(column)
-            if widget is not None and isinstance(values, list):
-                widget.delete("1.0", tk.END)
-                widget.insert("1.0", "\n".join(str(item) for item in values if isinstance(item, str)))
-
     def _save_config(self) -> None:
         data = {
             "downloads_dir": self.downloads_dir.get().strip(),
-            "downloads_minutes": self.recent_download_minutes.get(),
             "last_company": self.company_var.get().strip(),
-            "patterns": {
-                column: [line for line in self._read_text_lines(widget)]
-                for column, widget in self.pattern_texts.items()
-            },
         }
         try:
             with self.config_path.open("w", encoding="utf-8") as fh:
@@ -660,6 +759,7 @@ class ReportAppV2:
                     messagebox.showerror("Invalid Year Pattern", f"Could not compile '{line}': {exc}")
                     year_patterns.clear()
                     break
+        self._save_pattern_config()
         return pattern_map, year_patterns
 
     # ------------------------------------------------------------------ PDF loading
@@ -1239,12 +1339,16 @@ class ReportAppV2:
             rows.append([segment.strip() for segment in line.split(",")])
         return multiplier, rows
 
-    def _call_openai_with_images(self, api_key: str, prompt: str, images: List[bytes]) -> str:
+    def _call_openai_with_images(
+        self, api_key: str, prompt: str, images: List[bytes], model_name: str
+    ) -> str:
         sanitized_key = api_key.strip()
         if not sanitized_key:
             raise ValueError("API key is required")
         if not images:
             raise ValueError("No rendered pages available for OpenAI request")
+
+        selected_model = model_name.strip() or DEFAULT_OPENAI_MODEL
 
         client = OpenAI(api_key=sanitized_key)
         user_content: List[Dict[str, Any]] = [
@@ -1265,7 +1369,7 @@ class ReportAppV2:
             )
 
         response = client.responses.create(
-            model=DEFAULT_OPENAI_MODEL,
+            model=selected_model,
             input=
             [
                 {"role": "system", "content": [{"type": "text", "text": prompt}]},
@@ -1340,7 +1444,9 @@ class ReportAppV2:
             )
             return
 
-        tasks: List[Tuple[PDFEntry, str, List[int], str]] = []
+        self._save_pattern_config()
+
+        tasks: List[Tuple[PDFEntry, str, List[int], str, str]] = []
         for entry in self.pdf_entries:
             for category in COLUMNS:
                 pages = self._get_selected_pages(entry, category)
@@ -1349,7 +1455,9 @@ class ReportAppV2:
                 prompt_text = prompts.get(category)
                 if not prompt_text:
                     continue
-                tasks.append((entry, category, pages, prompt_text))
+                model_var = self.openai_model_vars.get(category)
+                model_name = model_var.get() if model_var is not None else DEFAULT_OPENAI_MODEL
+                tasks.append((entry, category, pages, prompt_text, model_name))
 
         if not tasks:
             messagebox.showinfo("AIScrape", "Select pages before running AIScrape.")
@@ -1365,7 +1473,7 @@ class ReportAppV2:
         errors: List[str] = []
         completed = 0
 
-        for entry, category, pages, prompt_text in tasks:
+        for entry, category, pages, prompt_text, model_name in tasks:
             try:
                 rendered_pages: List[bytes] = []
                 for page_index in pages:
@@ -1375,7 +1483,9 @@ class ReportAppV2:
                 if not rendered_pages:
                     raise ValueError("Unable to render the selected pages")
 
-                response_text = self._call_openai_with_images(api_key, prompt_text, rendered_pages)
+                response_text = self._call_openai_with_images(
+                    api_key, prompt_text, rendered_pages, model_name
+                )
                 multiplier, rows = self._parse_multiplier_response(response_text)
 
                 target_dir = scrape_root / entry.path.stem
@@ -1511,7 +1621,7 @@ class ReportAppV2:
         if minutes <= 0:
             minutes = 5
             self.recent_download_minutes.set(minutes)
-            self._save_config()
+            self._save_pattern_config()
         cutoff_ts = (datetime.now() - timedelta(minutes=minutes)).timestamp()
 
         recent: List[Tuple[float, Path]] = []
