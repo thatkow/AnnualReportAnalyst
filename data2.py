@@ -59,6 +59,27 @@ SHIFT_MASK = 0x0001
 CONTROL_MASK = 0x0004
 
 
+def normalize_header_row(cells: List[str]) -> Optional[List[str]]:
+    normalized = [cell.strip() for cell in cells]
+    if not any(normalized):
+        return None
+
+    lower_values = [cell.lower() for cell in normalized]
+    expected_lower = [column.lower() for column in SCRAPE_EXPECTED_COLUMNS]
+
+    prefix_length = min(len(lower_values), len(expected_lower))
+    prefix_matches = all(
+        lower_values[idx] == expected_lower[idx] for idx in range(prefix_length)
+    )
+    if prefix_matches:
+        return normalized[: len(lower_values)]
+
+    if lower_values[0] == "category":
+        return normalized
+
+    return None
+
+
 @dataclass
 class Match:
     page_index: int
@@ -354,16 +375,15 @@ class ScrapeResultPanel:
 
         table_container = ttk.Frame(self.frame)
         table_container.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        self.current_columns: List[str] = list(SCRAPE_EXPECTED_COLUMNS)
+        self._column_ids: List[str] = [f"col{idx}" for idx in range(len(self.current_columns))]
         self.table = ttk.Treeview(
             table_container,
-            columns=SCRAPE_EXPECTED_COLUMNS,
+            columns=self._column_ids,
             show="headings",
             height=SCRAPE_PLACEHOLDER_ROWS,
         )
-        for column in SCRAPE_EXPECTED_COLUMNS:
-            self.table.heading(column, text=column)
-            anchor = tk.W if column in {"CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"} else tk.E
-            self.table.column(column, anchor=anchor, width=140, stretch=True)
+        self._apply_table_columns(self.current_columns)
         self.table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar = ttk.Scrollbar(table_container, orient=tk.VERTICAL, command=self.table.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -437,8 +457,29 @@ class ScrapeResultPanel:
         self.app.unregister_panel_rows(self)
         self.container.destroy()
 
+    def _apply_table_columns(self, columns: List[str]) -> None:
+        headings = []
+        for idx, column in enumerate(columns):
+            text = column.strip()
+            headings.append(text if text else f"Column {idx + 1}")
+
+        if not headings:
+            headings = list(SCRAPE_EXPECTED_COLUMNS)
+
+        self.current_columns = headings
+        self._column_ids = [f"col{idx}" for idx in range(len(headings))]
+        self.table.configure(columns=self._column_ids, displaycolumns=self._column_ids)
+
+        text_columns = {"category", "subcategory", "item", "note"}
+        for idx, column_id in enumerate(self._column_ids):
+            heading_text = headings[idx]
+            anchor = tk.W if heading_text.lower() in text_columns else tk.E
+            self.table.heading(column_id, text=heading_text)
+            self.table.column(column_id, anchor=anchor, width=140, stretch=True)
+
     def set_placeholder(self, fill: str) -> None:
-        rows = [[fill for _ in SCRAPE_EXPECTED_COLUMNS] for _ in range(SCRAPE_PLACEHOLDER_ROWS)]
+        column_count = len(self._column_ids)
+        rows = [[fill for _ in range(column_count)] for _ in range(SCRAPE_PLACEHOLDER_ROWS)]
         self._populate(rows, register=False)
         self.has_csv_data = False
         self._update_action_states()
@@ -446,7 +487,8 @@ class ScrapeResultPanel:
     def mark_loading(self) -> None:
         if self.has_csv_data:
             return
-        rows = [["?" for _ in SCRAPE_EXPECTED_COLUMNS] for _ in range(SCRAPE_PLACEHOLDER_ROWS)]
+        column_count = len(self._column_ids)
+        rows = [["?" for _ in range(column_count)] for _ in range(SCRAPE_PLACEHOLDER_ROWS)]
         self._populate(rows, register=False)
         self._update_action_states()
 
@@ -462,9 +504,19 @@ class ScrapeResultPanel:
             except OSError:
                 rows = []
 
+        header: Optional[List[str]] = None
+        data_rows: List[List[str]] = []
         if rows:
-            self._populate(rows, register=True)
-            self.has_csv_data = True
+            candidate = normalize_header_row(rows[0])
+            if candidate is not None:
+                header = candidate
+                data_rows = rows[1:]
+            else:
+                data_rows = rows
+
+        if data_rows or header is not None:
+            self._populate(data_rows, register=True, header=header)
+            self.has_csv_data = bool(data_rows)
         else:
             self.set_placeholder("-")
 
@@ -523,20 +575,32 @@ class ScrapeResultPanel:
             f"{self.entry.path.name} – {self.category} raw response",
         )
 
-    def _populate(self, rows: List[List[str]], register: bool) -> None:
+    def _populate(
+        self,
+        rows: List[List[str]],
+        register: bool,
+        header: Optional[List[str]] = None,
+    ) -> None:
         self.app.unregister_panel_rows(self)
         self.row_states.clear()
         self.row_keys.clear()
         for item in self.table.get_children(""):
             self.table.delete(item)
-        column_count = len(SCRAPE_EXPECTED_COLUMNS)
+        if header is not None:
+            self._apply_table_columns(header)
+
+        column_count = len(self._column_ids)
         for row in rows:
             values = list(row[:column_count])
             if len(values) < column_count:
                 values.extend([""] * (column_count - len(values)))
             item_id = self.table.insert("", "end", values=values)
             if register:
-                key = (values[0], values[1], values[2])
+                key = (
+                    values[0] if column_count > 0 else "",
+                    values[1] if column_count > 1 else "",
+                    values[2] if column_count > 2 else "",
+                )
                 self.row_keys[item_id] = key
                 self.app.register_scrape_row(self, item_id, key)
                 initial_state = self.app.scrape_row_state_by_key.get(key)
@@ -833,6 +897,10 @@ class ReportAppV2:
         self.api_key_entry.pack(side=tk.LEFT, padx=(4, 8))
         self.scrape_button = ttk.Button(scrape_controls, text="AIScrape", command=self.scrape_selected_pages)
         self.scrape_button.pack(side=tk.LEFT)
+        self.open_scrape_dir_button = ttk.Button(
+            scrape_controls, text="Open Folder", command=self.open_scrape_folder
+        )
+        self.open_scrape_dir_button.pack(side=tk.LEFT, padx=(6, 0))
         self.scrape_progress = ttk.Progressbar(scrape_controls, orient=tk.HORIZONTAL, mode="determinate", length=200)
         self.scrape_progress.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
 
@@ -1896,6 +1964,30 @@ class ReportAppV2:
     def open_file_path(self, path: Path) -> None:
         self._open_with_default_app(path, "Open File")
 
+    def open_scrape_folder(self) -> None:
+        company = self.company_var.get().strip()
+        target: Optional[Path] = None
+        if company:
+            target = self.companies_dir / company / "openapiscrape"
+        elif self.pdf_entries:
+            target = self.pdf_entries[0].path.parent / "openapiscrape"
+        else:
+            messagebox.showinfo(
+                "Open Scrape Folder",
+                "Load PDFs or select a company before opening the scrape folder.",
+            )
+            return
+
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            messagebox.showwarning(
+                "Open Scrape Folder", "Unable to prepare the OpenAI scrape folder for viewing."
+            )
+            return
+
+        self.open_file_path(target)
+
     def show_raw_text_dialog(self, path: Path, title: str) -> None:
         try:
             content = path.read_text(encoding="utf-8")
@@ -2241,7 +2333,9 @@ class ReportAppV2:
             return fence.group(1)
         return text
 
-    def _parse_multiplier_response(self, response: str) -> Tuple[Optional[str], List[List[str]]]:
+    def _parse_multiplier_response(
+        self, response: str
+    ) -> Tuple[Optional[str], Optional[List[str]], List[List[str]]]:
         cleaned = self._strip_code_fence(response)
         raw_lines = [line for line in cleaned.splitlines() if line.strip()]
         multiplier: Optional[str] = None
@@ -2264,7 +2358,28 @@ class ReportAppV2:
             except csv.Error:
                 rows.extend([line.split(",") for line in data_lines])
                 rows = [[cell.strip() for cell in row] for row in rows]
-        return multiplier, rows
+        header: Optional[List[str]] = None
+        data_rows: List[List[str]] = []
+        if rows:
+            candidate = normalize_header_row(rows[0])
+            if candidate is not None:
+                header = candidate
+                data_rows = rows[1:]
+            else:
+                data_rows = rows
+        column_count = len(header) if header is not None else len(SCRAPE_EXPECTED_COLUMNS)
+        normalized_rows: List[List[str]] = []
+        for row in data_rows:
+            values = list(row[:column_count])
+            if len(values) < column_count:
+                values.extend([""] * (column_count - len(values)))
+            normalized_rows.append(values)
+        if header is not None:
+            if len(header) > column_count:
+                header = header[:column_count]
+            elif len(header) < column_count:
+                header = header + [""] * (column_count - len(header))
+        return multiplier, header, normalized_rows
 
     def _call_openai_with_pdfs(
         self, api_key: str, prompt: str, pdf_paths: List[Path], model_name: str
@@ -2539,7 +2654,7 @@ class ReportAppV2:
                 )
                 logger.info("AIScrape mode=%s", job.upload_mode)
                 response_text = self._call_openai_for_job(job, api_key)
-                multiplier, rows = self._parse_multiplier_response(response_text)
+                multiplier, header, rows = self._parse_multiplier_response(response_text)
                 logger.info(
                     "AIScrape completed for %s | %s | multiplier=%s | rows=%s",
                     job.entry.path.name,
@@ -2556,12 +2671,12 @@ class ReportAppV2:
                     multiplier_path.write_text(str(multiplier).strip(), encoding="utf-8")
 
                 csv_path = job.target_dir / f"{job.category}.csv"
-                if rows:
-                    with csv_path.open("w", encoding="utf-8", newline="") as fh:
-                        writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
+                header_row = header or SCRAPE_EXPECTED_COLUMNS
+                with csv_path.open("w", encoding="utf-8", newline="") as fh:
+                    writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
+                    writer.writerow(header_row)
+                    if rows:
                         writer.writerows(rows)
-                else:
-                    csv_path.write_text("", encoding="utf-8")
                 success = True
             except Exception as exc:
                 logger.exception(
