@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import threading
 import io
 import json
 import logging
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import tkinter as tk
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
@@ -7249,12 +7251,38 @@ class ReportApp:
         return None
 
     def _call_openai(self, api_key: str, prompt: str, page_text: str) -> str:
+        thread_name = threading.current_thread().name
+        sanitized_key = api_key.strip()
+        if not sanitized_key:
+            logger.error(
+                "OpenAI call aborted | thread=%s | reason=missing_api_key",
+                thread_name,
+            )
+            raise ValueError("OpenAI API key is missing")
+
         model_name = self.openai_model_var.get().strip() or DEFAULT_OPENAI_MODEL
-        client = OpenAI(api_key=api_key.strip())
         prompt_length = len(prompt)
         page_text_length = len(page_text)
         logger.info(
-            "OpenAI request initiated | model=%s | prompt_chars=%d | page_chars=%d",
+            "OpenAI call starting | thread=%s | model=%s | prompt_chars=%d | page_chars=%d",
+            thread_name,
+            model_name,
+            prompt_length,
+            page_text_length,
+        )
+
+        client_start = time.perf_counter()
+        client = OpenAI(api_key=sanitized_key)
+        logger.info(
+            "OpenAI client initialized | thread=%s | elapsed_ms=%.2f",
+            thread_name,
+            (time.perf_counter() - client_start) * 1000,
+        )
+
+        request_started = time.perf_counter()
+        logger.info(
+            "OpenAI request initiated | thread=%s | model=%s | prompt_chars=%d | page_chars=%d",
+            thread_name,
             model_name,
             prompt_length,
             page_text_length,
@@ -7280,13 +7308,15 @@ class ReportApp:
         completion_tokens = getattr(usage, "completion_tokens", None) if usage else None
         total_tokens = getattr(usage, "total_tokens", None) if usage else None
         logger.info(
-            "OpenAI response received | model=%s | status=success | completion_id=%s | "
-            "prompt_tokens=%s | completion_tokens=%s | total_tokens=%s",
+            "OpenAI response received | thread=%s | model=%s | status=success | completion_id=%s | "
+            "prompt_tokens=%s | completion_tokens=%s | total_tokens=%s | latency_ms=%.2f",
+            thread_name,
             model_name,
             getattr(response, "id", ""),
             prompt_tokens,
             completion_tokens,
             total_tokens,
+            (time.perf_counter() - request_started) * 1000,
         )
 
         choices = getattr(response, "choices", None)
