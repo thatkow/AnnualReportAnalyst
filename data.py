@@ -76,6 +76,8 @@ SPECIAL_KEYSYM_ALIASES = {
     " ": "space",
 }
 
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+
 
 @dataclass
 class Match:
@@ -387,6 +389,7 @@ class ReportApp:
         if company_name:
             self.company_var.set(company_name)
         self.api_key_var = tk.StringVar(master=self.root)
+        self.openai_model_var = tk.StringVar(master=self.root, value=DEFAULT_OPENAI_MODEL)
         self.thumbnail_width_var = tk.IntVar(master=self.root, value=220)
         self.review_primary_match_filter_var = tk.BooleanVar(master=self.root, value=False)
         self.pattern_texts: Dict[str, tk.Text] = {}
@@ -1196,6 +1199,10 @@ class ReportApp:
             command=self._set_download_window,
         )
         configuration_menu.add_command(
+            label="Set OpenAI Model",
+            command=self._set_openai_model,
+        )
+        configuration_menu.add_command(
             label="Configure Combined Note Keys",
             command=self._configure_note_key_bindings,
         )
@@ -1250,6 +1257,28 @@ class ReportApp:
             return
         self.recent_download_minutes_var.set(value)
         self.config_data["downloads_minutes"] = int(value)
+        self._write_config()
+
+    def _set_openai_model(self) -> None:
+        current_value = self.openai_model_var.get().strip() or DEFAULT_OPENAI_MODEL
+        try:
+            value = simpledialog.askstring(
+                "OpenAI Model",
+                "Enter the OpenAI model name to use:",
+                parent=self.root,
+                initialvalue=current_value,
+            )
+        except tk.TclError:
+            return
+        if value is None:
+            return
+        cleaned = value.strip()
+        if not cleaned:
+            self.openai_model_var.set(DEFAULT_OPENAI_MODEL)
+            self.config_data.pop("openai_model", None)
+        else:
+            self.openai_model_var.set(cleaned)
+            self.config_data["openai_model"] = cleaned
         self._write_config()
 
     def _normalize_note_binding_value(self, value: str) -> str:
@@ -7210,8 +7239,9 @@ class ReportApp:
     def _call_openai(self, api_key: str, prompt: str, page_text: str) -> str:
         url = "https://api.openai.com/v1/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        model_name = self.openai_model_var.get().strip() or DEFAULT_OPENAI_MODEL
         payload = {
-            "model": "gpt-4o-mini",
+            "model": model_name,
             "messages": [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": page_text},
@@ -7475,6 +7505,11 @@ class ReportApp:
         self.last_company_preference = data.get("last_company", "")
         if "api_key" in data:
             self.api_key_var.set(str(data.get("api_key", "")))
+        raw_model = data.get("openai_model")
+        if isinstance(raw_model, str) and raw_model.strip():
+            self.openai_model_var.set(raw_model.strip())
+        else:
+            self.openai_model_var.set(DEFAULT_OPENAI_MODEL)
         self._ensure_download_settings()
         self._apply_last_company_selection()
         self._config_loaded = True
@@ -7780,6 +7815,11 @@ class ReportApp:
 
     def _write_config(self) -> None:
         self._update_note_settings_config_entries()
+        model_name = self.openai_model_var.get().strip()
+        if model_name and model_name != DEFAULT_OPENAI_MODEL:
+            self.config_data["openai_model"] = model_name
+        else:
+            self.config_data.pop("openai_model", None)
         self.config_data["combined_base_column_widths"] = {
             column: int(width)
             for column, width in self.combined_base_column_widths.items()
