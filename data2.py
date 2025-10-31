@@ -312,6 +312,10 @@ class ScrapeResultPanel:
         self.has_csv_data = False
         self._updating_multiplier = False
 
+        self.row_states: Dict[str, str] = {}
+        self.row_keys: Dict[str, Tuple[str, str, str]] = {}
+        self._context_item: Optional[str] = None
+
         self.container = tk.Frame(
             parent,
             highlightbackground="#c3c3c3",
@@ -364,6 +368,57 @@ class ScrapeResultPanel:
         scrollbar = ttk.Scrollbar(table_container, orient=tk.VERTICAL, command=self.table.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.table.configure(yscrollcommand=scrollbar.set)
+        self.table.tag_configure("state-negated", background="#FFE6E6")
+        self.table.tag_configure("state-excluded", background="#E8E8E8", foreground="#666666")
+        self.table.tag_configure("state-share_count", background="#E0F3FF")
+
+        self._row_state_var = tk.StringVar(master=self.frame, value="asis")
+        self._context_menu = tk.Menu(self.table, tearoff=False)
+        self._context_menu.add_radiobutton(
+            label="As is",
+            variable=self._row_state_var,
+            value="asis",
+            command=lambda: self._set_row_state("asis", apply_all=False),
+        )
+        self._context_menu.add_radiobutton(
+            label="Negated",
+            variable=self._row_state_var,
+            value="negated",
+            command=lambda: self._set_row_state("negated", apply_all=False),
+        )
+        self._context_menu.add_radiobutton(
+            label="Excluded",
+            variable=self._row_state_var,
+            value="excluded",
+            command=lambda: self._set_row_state("excluded", apply_all=False),
+        )
+        self._context_menu.add_radiobutton(
+            label="Share count",
+            variable=self._row_state_var,
+            value="share_count",
+            command=lambda: self._set_row_state("share_count", apply_all=False),
+        )
+        self._context_menu.add_separator()
+        self._context_menu.add_command(
+            label="As is (all)",
+            command=lambda: self._set_row_state("asis", apply_all=True),
+        )
+        self._context_menu.add_command(
+            label="Negated (all)",
+            command=lambda: self._set_row_state("negated", apply_all=True),
+        )
+        self._context_menu.add_command(
+            label="Excluded (all)",
+            command=lambda: self._set_row_state("excluded", apply_all=True),
+        )
+        self._context_menu.add_command(
+            label="Share count (all)",
+            command=lambda: self._set_row_state("share_count", apply_all=True),
+        )
+        self.table.bind("<Button-3>", self._on_table_right_click)
+        if sys.platform == "darwin":
+            # macOS sends Control-Button-1 for context menus
+            self.table.bind("<Control-Button-1>", self._on_table_right_click)
 
         for widget in (
             self.container,
@@ -379,11 +434,12 @@ class ScrapeResultPanel:
         self._update_action_states()
 
     def destroy(self) -> None:
+        self.app.unregister_panel_rows(self)
         self.container.destroy()
 
     def set_placeholder(self, fill: str) -> None:
         rows = [[fill for _ in SCRAPE_EXPECTED_COLUMNS] for _ in range(SCRAPE_PLACEHOLDER_ROWS)]
-        self._populate(rows)
+        self._populate(rows, register=False)
         self.has_csv_data = False
         self._update_action_states()
 
@@ -391,7 +447,7 @@ class ScrapeResultPanel:
         if self.has_csv_data:
             return
         rows = [["?" for _ in SCRAPE_EXPECTED_COLUMNS] for _ in range(SCRAPE_PLACEHOLDER_ROWS)]
-        self._populate(rows)
+        self._populate(rows, register=False)
         self._update_action_states()
 
     def load_from_files(self) -> None:
@@ -407,7 +463,7 @@ class ScrapeResultPanel:
                 rows = []
 
         if rows:
-            self._populate(rows)
+            self._populate(rows, register=True)
             self.has_csv_data = True
         else:
             self.set_placeholder("-")
@@ -467,7 +523,10 @@ class ScrapeResultPanel:
             f"{self.entry.path.name} – {self.category} raw response",
         )
 
-    def _populate(self, rows: List[List[str]]) -> None:
+    def _populate(self, rows: List[List[str]], register: bool) -> None:
+        self.app.unregister_panel_rows(self)
+        self.row_states.clear()
+        self.row_keys.clear()
         for item in self.table.get_children(""):
             self.table.delete(item)
         column_count = len(SCRAPE_EXPECTED_COLUMNS)
@@ -475,12 +534,73 @@ class ScrapeResultPanel:
             values = list(row[:column_count])
             if len(values) < column_count:
                 values.extend([""] * (column_count - len(values)))
-            self.table.insert("", "end", values=values)
+            item_id = self.table.insert("", "end", values=values)
+            if register:
+                key = (values[0], values[1], values[2])
+                self.row_keys[item_id] = key
+                self.app.register_scrape_row(self, item_id, key)
+                initial_state = self.app.scrape_row_state_by_key.get(key)
+                if initial_state:
+                    self.update_row_state(item_id, initial_state)
         display_rows = max(len(rows), 1)
         self.table.configure(height=display_rows)
 
     def _handle_activate(self, _: tk.Event) -> None:  # type: ignore[override]
         self.app._on_scrape_panel_clicked(self)
+
+    def _on_table_right_click(self, event: tk.Event) -> None:  # type: ignore[override]
+        row_id = self.table.identify_row(event.y)
+        if not row_id:
+            return
+        self.table.selection_set(row_id)
+        self._context_item = row_id
+        state_value = self.row_states.get(row_id, "asis")
+        if not state_value:
+            state_value = "asis"
+        self._row_state_var.set(state_value)
+        try:
+            self._context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._context_menu.grab_release()
+        return "break"
+
+    def _set_row_state(self, state_label: str, apply_all: bool) -> None:
+        item_id = self._context_item
+        if not item_id:
+            return
+        normalized = self._normalize_state_label(state_label)
+        if apply_all:
+            key = self.row_keys.get(item_id)
+            if key:
+                self.app.apply_row_state_to_all(key, normalized)
+            else:
+                self.update_row_state(item_id, normalized)
+        else:
+            self.update_row_state(item_id, normalized)
+
+    def update_row_state(self, item_id: str, state: Optional[str]) -> None:
+        if state in (None, ""):
+            if item_id in self.row_states:
+                self.row_states.pop(item_id, None)
+            self._apply_state_to_item(item_id, None)
+            if self._context_item == item_id:
+                self._row_state_var.set("asis")
+        else:
+            self.row_states[item_id] = state
+            self._apply_state_to_item(item_id, state)
+            if self._context_item == item_id:
+                self._row_state_var.set(state)
+
+    def _apply_state_to_item(self, item_id: str, state: Optional[str]) -> None:
+        existing_tags = list(self.table.item(item_id, "tags"))
+        filtered_tags = [tag for tag in existing_tags if not tag.startswith("state-")]
+        if state:
+            filtered_tags.append(f"state-{state}")
+        self.table.item(item_id, tags=filtered_tags)
+
+    @staticmethod
+    def _normalize_state_label(state_label: str) -> Optional[str]:
+        return None if state_label == "asis" else state_label
 
     def _on_multiplier_changed(self, _: tk.Event) -> None:  # type: ignore[override]
         self.save_multiplier()
@@ -559,6 +679,8 @@ class ReportAppV2:
 
         self.scrape_panels: Dict[Tuple[Path, str], ScrapeResultPanel] = {}
         self.active_scrape_key: Optional[Tuple[Path, str]] = None
+        self.scrape_row_registry: Dict[Tuple[str, str, str], List[Tuple[ScrapeResultPanel, str]]] = {}
+        self.scrape_row_state_by_key: Dict[Tuple[str, str, str], str] = {}
         self.scrape_preview_photo: Optional[ImageTk.PhotoImage] = None
         self.scrape_preview_pages: List[int] = []
         self.scrape_preview_entry: Optional[PDFEntry] = None
@@ -1509,6 +1631,33 @@ class ReportAppV2:
 
     def _on_scrape_panel_clicked(self, panel: ScrapeResultPanel) -> None:
         self.set_active_scrape_panel(panel.entry, panel.category)
+
+    def register_scrape_row(
+        self, panel: ScrapeResultPanel, item_id: str, key: Tuple[str, str, str]
+    ) -> None:
+        entries = self.scrape_row_registry.setdefault(key, [])
+        entries = [entry for entry in entries if entry[0] is not panel or entry[1] != item_id]
+        entries.append((panel, item_id))
+        self.scrape_row_registry[key] = entries
+
+    def unregister_panel_rows(self, panel: ScrapeResultPanel) -> None:
+        to_remove: List[Tuple[str, str, str]] = []
+        for key, entries in self.scrape_row_registry.items():
+            filtered = [entry for entry in entries if entry[0] is not panel]
+            if filtered:
+                self.scrape_row_registry[key] = filtered
+            else:
+                to_remove.append(key)
+        for key in to_remove:
+            self.scrape_row_registry.pop(key, None)
+
+    def apply_row_state_to_all(self, key: Tuple[str, str, str], state: Optional[str]) -> None:
+        if state in (None, ""):
+            self.scrape_row_state_by_key.pop(key, None)
+        else:
+            self.scrape_row_state_by_key[key] = state
+        for panel, item_id in list(self.scrape_row_registry.get(key, [])):
+            panel.update_row_state(item_id, state)
 
     def set_active_scrape_panel(self, entry: PDFEntry, category: str) -> None:
         key = (entry.path, category)
