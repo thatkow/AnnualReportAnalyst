@@ -18,7 +18,7 @@ from bisect import bisect_left
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import json
 import os
@@ -624,6 +624,8 @@ class FinanceDataset:
         self.share_price_symbol: Optional[str] = None
         self._period_share_price_map: Optional[Dict[str, float]] = None
         self._share_price_error: Optional[str] = None
+        self.share_multiplier_map: Dict[str, float] = {}
+        self.share_multiplier_missing: List[str] = []
         self._period_index: Dict[str, int] = {}
         self._period_token_index: Dict[Tuple[str, int, int, str], int] = {}
         self._normalization_mode = self.NORMALIZATION_REPORTED
@@ -829,6 +831,16 @@ class FinanceDataset:
                 segment.values = [segment.values[idx] for idx in sort_indices]
                 segment.periods = [self.periods[idx] for idx in sort_indices]
                 segment.raw_values = list(segment.values)
+
+            share_multiplier_map = self._load_share_multipliers()
+            if share_multiplier_map:
+                scaled_counts, missing = self._apply_share_multiplier_map(share_counts, share_multiplier_map)
+                self.share_multiplier_map = share_multiplier_map
+                self.share_multiplier_missing = missing
+                share_counts = scaled_counts
+            else:
+                self.share_multiplier_map = {}
+                self.share_multiplier_missing = []
 
             self.share_counts = list(share_counts)
             self.share_prices = list(share_prices) if share_prices is not None else []
@@ -1124,6 +1136,89 @@ class FinanceDataset:
         self, periods: Sequence[str]
     ) -> Tuple[List[float], List[bool]]:
         return self._build_share_price_list(periods)
+
+    def missing_share_multiplier_periods(self) -> List[str]:
+        return list(self.share_multiplier_missing)
+
+    @classmethod
+    def parse_share_multiplier_file(cls, path: Path) -> Dict[str, float]:
+        with path.open(newline="", encoding="utf-8") as csv_file:
+            reader = csv.reader(csv_file)
+            entries = cls.parse_share_multiplier_rows(reader)
+        mapping: Dict[str, float] = {}
+        for date_value, multiplier in entries:
+            mapping[date_value] = multiplier
+        return mapping
+
+    @staticmethod
+    def parse_share_multiplier_rows(rows: Iterable[Sequence[str]]) -> List[Tuple[str, float]]:
+        iterator = iter(rows)
+        try:
+            header = next(iterator)
+        except StopIteration as exc:
+            raise ValueError("Share multiplier CSV is empty") from exc
+
+        header_map: Dict[str, int] = {}
+        for idx, column_name in enumerate(header):
+            normalized = str(column_name).strip().lower()
+            if normalized and normalized not in header_map:
+                header_map[normalized] = idx
+
+        if "date" not in header_map or "multiplier" not in header_map:
+            raise ValueError("Share multiplier CSV must contain 'Date' and 'Multiplier' columns")
+
+        date_index = header_map["date"]
+        multiplier_index = header_map["multiplier"]
+
+        entries: List[Tuple[str, float]] = []
+        for row_number, row in enumerate(iterator, start=2):
+            if not any(str(cell).strip() for cell in row):
+                continue
+            if date_index >= len(row) or multiplier_index >= len(row):
+                raise ValueError(
+                    f"Row {row_number} in share multiplier CSV does not include both Date and Multiplier values"
+                )
+            date_value = str(row[date_index]).strip()
+            multiplier_text = str(row[multiplier_index]).strip()
+            if not date_value:
+                raise ValueError(f"Row {row_number} in share multiplier CSV has an empty Date value")
+            if not multiplier_text:
+                raise ValueError(
+                    f"Row {row_number} in share multiplier CSV for '{date_value}' has an empty Multiplier value"
+                )
+            try:
+                multiplier = float(multiplier_text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Row {row_number} in share multiplier CSV for '{date_value}' has an invalid Multiplier"
+                ) from exc
+            entries.append((date_value, multiplier))
+
+        return entries
+
+    def _load_share_multipliers(self) -> Dict[str, float]:
+        path = self.company_root / "share_multipliers.csv"
+        if not path.exists():
+            return {}
+        try:
+            return self.parse_share_multiplier_file(path)
+        except ValueError as exc:
+            raise ValueError(f"Invalid share multiplier CSV ({path.name}): {exc}") from exc
+
+    def _apply_share_multiplier_map(
+        self, share_counts: Sequence[float], mapping: Dict[str, float]
+    ) -> Tuple[List[float], List[str]]:
+        scaled: List[float] = []
+        missing: List[str] = []
+        for idx, label in enumerate(self.periods):
+            count = share_counts[idx] if idx < len(share_counts) else 0.0
+            multiplier = _lookup_period_value(mapping, str(label))
+            if multiplier is None:
+                missing.append(str(label))
+                scaled.append(count)
+            else:
+                scaled.append(count * multiplier)
+        return scaled, missing
 
     def aggregate_raw_totals(
         self, periods: Sequence[str], *, series: str

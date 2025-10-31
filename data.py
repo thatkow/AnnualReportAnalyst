@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import threading
 import io
 import json
 import logging
@@ -11,13 +12,14 @@ import subprocess
 import sys
 import tempfile
 import tkinter as tk
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:
     import fitz  # type: ignore[import-untyped]
@@ -32,9 +34,15 @@ PYMUPDF_REQUIRED_MESSAGE = (
 
 from PIL import Image, ImageTk
 import webbrowser
-import requests
+from openai import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    OpenAI,
+    RateLimitError,
+)
 
-from analyst import FinanceDataset, FinancePlotFrame
+from analyst import FinanceDataset, FinancePlotFrame, _lookup_period_value
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -75,6 +83,9 @@ SPECIAL_KEYSYM_ALIASES = {
     "`": "grave",
     " ": "space",
 }
+
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+SHARE_MULTIPLIER_FILENAME = "share_multipliers.csv"
 
 
 @dataclass
@@ -387,6 +398,10 @@ class ReportApp:
         if company_name:
             self.company_var.set(company_name)
         self.api_key_var = tk.StringVar(master=self.root)
+        self.openai_model_vars: Dict[str, tk.StringVar] = {
+            column: tk.StringVar(master=self.root, value=DEFAULT_OPENAI_MODEL)
+            for column in COLUMNS
+        }
         self.thumbnail_width_var = tk.IntVar(master=self.root, value=220)
         self.review_primary_match_filter_var = tk.BooleanVar(master=self.root, value=False)
         self.pattern_texts: Dict[str, tk.Text] = {}
@@ -404,17 +419,20 @@ class ReportApp:
         self.companies_dir = self.app_root / "companies"
         self.prompts_dir = self.app_root / "prompts"
         self.pattern_config_path = self.app_root / "pattern_config.json"
+        self.local_config_path = self.app_root / "local_config.json"
         self.type_item_category_path = self.app_root / "type_item_category.csv"
         self.combined_order_path = self.app_root / "combined_order.csv"
         self.type_category_sort_order_path = self.combined_order_path
         self.global_note_assignments_path = self.app_root / "type_category_item_assignments.csv"
         self.config_data: Dict[str, Any] = {}
+        self.local_config_data: Dict[str, Any] = {}
         self.last_company_preference: str = ""
         self._config_loaded = False
         self.assigned_pages: Dict[str, Dict[str, Any]] = {}
         self.assigned_pages_path: Optional[Path] = None
         self.scraped_images: List[ImageTk.PhotoImage] = []
         self.scraped_preview_states: Dict[tk.Widget, Dict[str, Any]] = {}
+        self.active_scraped_preview_widget: Optional[tk.Widget] = None
         self._thumbnail_resize_job: Optional[str] = None
         self.company_tabs: Dict[str, "ReportApp"] = {}
         self.company_frames: Dict[str, ttk.Frame] = {}
@@ -473,6 +491,7 @@ class ReportApp:
         )
         self._combined_zoom_save_job: Optional[str] = None
         self._combined_blank_notification_shown = False
+        self._scraped_page_navigation_bound = False
         self.type_color_map: Dict[str, str] = {}
         self.type_color_labels: Dict[str, str] = {}
         self.category_color_map: Dict[str, str] = {}
@@ -485,7 +504,9 @@ class ReportApp:
         self.note_display_labels: Dict[str, str] = DEFAULT_NOTE_LABELS.copy()
 
         self.chart_plot_frame: Optional[FinancePlotFrame] = None
+        self._share_multiplier_warning_state: Optional[Tuple[str, Tuple[str, ...]]] = None
 
+        self._load_local_config()
         self._build_ui()
         self._load_pattern_config()
         self._apply_configured_note_key_bindings()
@@ -620,6 +641,7 @@ class ReportApp:
         self.scraped_canvas.configure(yscrollcommand=scraped_scrollbar.set)
         self.scraped_inner = ttk.Frame(self.scraped_canvas)
         self.scraped_window = self.scraped_canvas.create_window((0, 0), window=self.scraped_inner, anchor="nw")
+        self._register_scraped_page_navigation()
         self.scraped_inner.bind("<Configure>", lambda _e: self.scraped_canvas.configure(scrollregion=self.scraped_canvas.bbox("all")))
         self.scraped_canvas.bind("<Configure>", lambda e: self.scraped_canvas.itemconfigure(self.scraped_window, width=e.width))
 
@@ -685,6 +707,13 @@ class ReportApp:
         notebook.add(chart_container, text="Chart")
         chart_content = ttk.Frame(chart_container, padding=8)
         chart_content.pack(fill=tk.BOTH, expand=True)
+        chart_controls = ttk.Frame(chart_content)
+        chart_controls.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(
+            chart_controls,
+            text="Configure Share Multipliers",
+            command=self._open_share_multiplier_dialog,
+        ).pack(side=tk.LEFT)
         chart_frame = FinancePlotFrame(chart_content)
         chart_frame.pack(fill=tk.BOTH, expand=True)
         chart_frame.set_display_mode(FinancePlotFrame.MODE_STACKED)
@@ -728,10 +757,89 @@ class ReportApp:
         except Exception:
             return False
 
+    def _register_scraped_page_navigation(self) -> None:
+        if self._scraped_page_navigation_bound:
+            return
+        try:
+            self.root.bind_all("<Prior>", self._on_scraped_page_up, add="+")
+            self.root.bind_all("<Next>", self._on_scraped_page_down, add="+")
+        except Exception:
+            return
+        self._scraped_page_navigation_bound = True
+
+    def _on_scraped_page_up(self, event: tk.Event) -> str:
+        return self._handle_scraped_page_key(event, -1)
+
+    def _on_scraped_page_down(self, event: tk.Event) -> str:
+        return self._handle_scraped_page_key(event, 1)
+
+    def _handle_scraped_page_key(self, event: tk.Event, direction: int) -> str:
+        if not self._is_scraped_tab_active():
+            return ""
+        widget = self._preview_widget_for_event(event)
+        if widget is None:
+            widget = self._current_scraped_preview_widget()
+        if widget is None:
+            return ""
+        self.active_scraped_preview_widget = widget
+        self._cycle_scraped_preview(widget, direction)
+        return "break"
+
+    def _preview_widget_for_event(self, event: tk.Event) -> Optional[tk.Widget]:
+        widget = getattr(event, "widget", None)
+        if not isinstance(widget, tk.Widget):
+            return None
+        if widget in self.scraped_preview_states:
+            return widget
+        info = self.scraped_table_sources.get(widget)
+        if isinstance(info, dict):
+            preview = info.get("preview_widget")
+            if isinstance(preview, tk.Widget):
+                return preview
+        parent = widget.master
+        while isinstance(parent, tk.Widget):
+            if parent in self.scraped_preview_states:
+                return parent
+            info = self.scraped_table_sources.get(parent)
+            if isinstance(info, dict):
+                preview = info.get("preview_widget")
+                if isinstance(preview, tk.Widget):
+                    return preview
+            parent = parent.master
+        return None
+
+    def _is_scraped_tab_active(self) -> bool:
+        if not hasattr(self, "notebook") or not hasattr(self, "scraped_frame"):
+            return False
+        try:
+            current = self.notebook.select()
+        except tk.TclError:
+            return False
+        return current == str(self.scraped_frame)
+
+    def _current_scraped_preview_widget(self) -> Optional[tk.Widget]:
+        widget = getattr(self, "active_scraped_preview_widget", None)
+        if widget is not None and widget in self.scraped_preview_states and self._widget_exists(widget):
+            return widget
+        for candidate in self.scraped_preview_states:
+            if self._widget_exists(candidate):
+                self.active_scraped_preview_widget = candidate
+                return candidate
+        self.active_scraped_preview_widget = None
+        return None
+
+    def _widget_exists(self, widget: tk.Widget) -> bool:
+        try:
+            return bool(widget.winfo_exists())
+        except tk.TclError:
+            return False
+
     def _on_scraped_image_click(self, event: tk.Event, widget: tk.Widget) -> Optional[str]:
         state = self.scraped_preview_states.get(widget)
         if not state:
+            self.active_scraped_preview_widget = None
             return None
+        self.active_scraped_preview_widget = widget
         if self._event_has_control(event):
             self._cycle_scraped_preview(widget)
             return "break"
@@ -758,6 +866,7 @@ class ReportApp:
         state = self.scraped_preview_states.get(widget)
         if not state:
             return
+        self.active_scraped_preview_widget = widget
         page_indexes: List[int] = state.get("page_indexes", [])
         if len(page_indexes) <= 1:
             return
@@ -1114,8 +1223,11 @@ class ReportApp:
 
     def _save_api_key(self) -> None:
         api_key = self.api_key_var.get().strip()
-        self.config_data["api_key"] = api_key
-        self._write_config()
+        if api_key:
+            self.local_config_data["api_key"] = api_key
+        else:
+            self.local_config_data.pop("api_key", None)
+        self._write_local_config()
 
     def _load_pdfs_on_start(self) -> None:
         if self.embedded:
@@ -1196,6 +1308,10 @@ class ReportApp:
             command=self._set_download_window,
         )
         configuration_menu.add_command(
+            label="Set OpenAI Model",
+            command=self._set_openai_model,
+        )
+        configuration_menu.add_command(
             label="Configure Combined Note Keys",
             command=self._configure_note_key_bindings,
         )
@@ -1234,8 +1350,8 @@ class ReportApp:
         if not selected:
             return
         self.downloads_dir_var.set(selected)
-        self.config_data["downloads_dir"] = selected
-        self._write_config()
+        self.local_config_data["downloads_dir"] = selected
+        self._write_local_config()
 
     def _set_download_window(self) -> None:
         current_value = max(1, self.recent_download_minutes_var.get())
@@ -1251,6 +1367,59 @@ class ReportApp:
         self.recent_download_minutes_var.set(value)
         self.config_data["downloads_minutes"] = int(value)
         self._write_config()
+
+    def _set_openai_model(self) -> None:
+        try:
+            window = tk.Toplevel(self.root)
+        except tk.TclError:
+            return
+
+        window.title("Configure OpenAI Models")
+        window.transient(self.root)
+        window.grab_set()
+
+        container = ttk.Frame(window, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(1, weight=1)
+
+        entry_vars: Dict[str, tk.StringVar] = {}
+        for row_index, column in enumerate(COLUMNS):
+            ttk.Label(container, text=f"{column} model:").grid(
+                row=row_index, column=0, sticky="w", padx=(0, 8), pady=4
+            )
+            current_value = self.openai_model_vars[column].get().strip() or DEFAULT_OPENAI_MODEL
+            var = tk.StringVar(master=window, value=current_value)
+            entry = ttk.Entry(container, textvariable=var, width=40)
+            entry.grid(row=row_index, column=1, sticky="ew", pady=4)
+            entry_vars[column] = var
+
+        button_row = ttk.Frame(container)
+        button_row.grid(row=len(COLUMNS), column=0, columnspan=2, pady=(12, 0), sticky="e")
+
+        def _restore_defaults() -> None:
+            for column in COLUMNS:
+                entry_vars[column].set(DEFAULT_OPENAI_MODEL)
+
+        def _on_save() -> None:
+            for column, var in entry_vars.items():
+                cleaned = var.get().strip()
+                if cleaned:
+                    self.openai_model_vars[column].set(cleaned)
+                else:
+                    self.openai_model_vars[column].set(DEFAULT_OPENAI_MODEL)
+            self._write_config()
+            window.destroy()
+
+        ttk.Button(button_row, text="Restore Defaults", command=_restore_defaults).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        ttk.Button(button_row, text="Cancel", command=window.destroy).pack(side=tk.RIGHT)
+        ttk.Button(button_row, text="Save", command=_on_save).pack(side=tk.RIGHT, padx=(0, 8))
+
+        try:
+            window.wait_window()
+        except tk.TclError:
+            window.destroy()
 
     def _normalize_note_binding_value(self, value: str) -> str:
         if not value:
@@ -3672,6 +3841,7 @@ class ReportApp:
         self.scraped_images.clear()
         self.scraped_table_sources = {}
         self.scraped_preview_states = {}
+        self.active_scraped_preview_widget = None
         self._clear_combined_tab()
         if hasattr(self, "scrape_progress"):
             self.scrape_progress["value"] = 0
@@ -3904,6 +4074,8 @@ class ReportApp:
                         "title_label": title_label,
                         "title_base_text": base_header_text,
                     }
+                    if self.active_scraped_preview_widget is None:
+                        self.active_scraped_preview_widget = image_label
                     preview_widget = image_label
                     image_frame.bind(
                         "<Configure>",
@@ -3950,28 +4122,42 @@ class ReportApp:
                     table_rows: List[List[str]] = []
                     scalable_columns = self._scraped_scalable_column_indices(headings)
                     if data_rows:
-                        for data in data_rows:
-                            values = list(data)
+                        working_rows = [list(data) for data in data_rows]
+                        normalized_rows, rows_changed = self._normalize_scraped_item_rows(
+                            list(headings), working_rows
+                        )
+                        table_rows = normalized_rows
+                        if rows_changed and isinstance(csv_target_path, Path):
+                            if not self._write_scraped_csv_rows(
+                                csv_target_path,
+                                list(headings),
+                                normalized_rows,
+                                delimiter=csv_delimiter,
+                            ):
+                                logger.warning(
+                                    "Unable to persist unique ITEM values for %s",
+                                    csv_target_path,
+                                )
+                        for values in table_rows:
                             if len(values) < len(columns):
                                 values.extend([""] * (len(columns) - len(values)))
                             elif len(values) > len(columns):
                                 values = values[: len(columns)]
-                            table_rows.append(values.copy())
                             display_values = [self._format_table_value(value) for value in values]
                             tree.insert("", tk.END, values=display_values)
 
                     multiply_button = ttk.Button(
                         controls_frame,
-                        text="×10",
-                        command=lambda t=tree: self._scale_scraped_table(t, 10.0),
+                        text="×1000",
+                        command=lambda t=tree: self._scale_scraped_table(t, 1000.0),
                         width=12,
                     )
                     multiply_button.grid(row=0, column=1, sticky="e", padx=(0, 4))
 
                     divide_button = ttk.Button(
                         controls_frame,
-                        text="÷10",
-                        command=lambda t=tree: self._scale_scraped_table(t, 0.1),
+                        text="÷1000",
+                        command=lambda t=tree: self._scale_scraped_table(t, 0.001),
                         width=12,
                     )
                     divide_button.grid(row=0, column=2, sticky="e", padx=(0, 4))
@@ -3992,21 +4178,13 @@ class ReportApp:
                     )
                     relabel_button.grid(row=0, column=4, sticky="e", padx=(0, 4))
 
-                    dedupe_button = ttk.Button(
-                        controls_frame,
-                        text="Make Dates Unique",
-                        command=lambda t=tree: self._dedupe_scraped_headers(t),
-                        width=18,
-                    )
-                    dedupe_button.grid(row=0, column=5, sticky="e", padx=(0, 4))
-
                     dedupe_items_button = ttk.Button(
                         controls_frame,
                         text="Make Items Unique",
                         command=lambda t=tree: self._dedupe_scraped_items(t),
                         width=18,
                     )
-                    dedupe_items_button.grid(row=0, column=6, sticky="e", padx=(0, 4))
+                    dedupe_items_button.grid(row=0, column=5, sticky="e", padx=(0, 4))
 
                     delete_row_button = ttk.Button(
                         controls_frame,
@@ -4014,7 +4192,7 @@ class ReportApp:
                         command=lambda t=tree: self._delete_scraped_row(t),
                         width=12,
                     )
-                    delete_row_button.grid(row=0, column=7, sticky="e", padx=(0, 4))
+                    delete_row_button.grid(row=0, column=6, sticky="e", padx=(0, 4))
 
                     delete_column_button = tk.Menubutton(
                         controls_frame,
@@ -4023,7 +4201,7 @@ class ReportApp:
                         relief=tk.RAISED,
                         direction="below",
                     )
-                    delete_column_button.grid(row=0, column=8, sticky="e")
+                    delete_column_button.grid(row=0, column=7, sticky="e")
                     delete_column_menu = tk.Menu(delete_column_button, tearoff=False)
                     delete_column_button.configure(menu=delete_column_menu)
 
@@ -4040,7 +4218,6 @@ class ReportApp:
                         "scale_buttons": (multiply_button, divide_button),
                         "open_button": open_page_button,
                         "relabel_button": relabel_button,
-                        "dedupe_button": dedupe_button,
                         "dedupe_items_button": dedupe_items_button,
                         "delete_column_button": delete_column_button,
                         "delete_column_menu": delete_column_menu,
@@ -4070,6 +4247,83 @@ class ReportApp:
             if isinstance(value, str) and value.strip().lower() == "item":
                 return index
         return None
+
+    def _scraped_category_column_index(self, headings: List[str]) -> Optional[int]:
+        for index, value in enumerate(headings):
+            if isinstance(value, str) and value.strip().lower() == "category":
+                return index
+        return None
+
+    def _normalize_scraped_item_rows(
+        self, header: List[str], rows: List[List[str]]
+    ) -> Tuple[List[List[str]], bool]:
+        if not header or not rows:
+            return rows, False
+
+        item_index = self._scraped_item_column_index(header)
+        category_index = self._scraped_category_column_index(header)
+        if item_index is None or category_index is None:
+            return rows, False
+
+        normalized_rows: List[List[str]] = []
+        key_lookup: List[Optional[Tuple[str, str]]] = []
+        base_values: List[str] = []
+        counts: Dict[Tuple[str, str], int] = {}
+
+        for row in rows:
+            values = list(row)
+            if item_index >= len(values):
+                values.extend([""] * (item_index - len(values) + 1))
+            if category_index >= len(values):
+                values.extend([""] * (category_index - len(values) + 1))
+
+            category_raw = values[category_index].strip()
+            item_raw = values[item_index].strip()
+            if item_raw:
+                base_value = re.sub(r"\.\d+$", "", item_raw)
+                key = (category_raw.lower(), base_value.lower())
+                counts[key] = counts.get(key, 0) + 1
+                key_lookup.append(key)
+                base_values.append(base_value)
+            else:
+                key_lookup.append(None)
+                base_values.append("")
+
+            normalized_rows.append(values)
+
+        if not counts:
+            return normalized_rows, False
+
+        duplicates_found = False
+        occurrences: Dict[Tuple[str, str], int] = {}
+
+        for index, values in enumerate(normalized_rows):
+            key = key_lookup[index]
+            if key is None:
+                continue
+
+            base_value = base_values[index]
+            total = counts.get(key, 0)
+            if total > 1:
+                occurrence = occurrences.get(key, 0) + 1
+                occurrences[key] = occurrence
+                new_value = f"{base_value}.{occurrence}"
+            else:
+                new_value = base_value
+
+            if values[item_index] != new_value:
+                values[item_index] = new_value
+                duplicates_found = True
+
+        expected_length = len(header)
+        if expected_length:
+            for values in normalized_rows:
+                if len(values) < expected_length:
+                    values.extend([""] * (expected_length - len(values)))
+                elif len(values) > expected_length:
+                    del values[expected_length:]
+
+        return normalized_rows, duplicates_found
 
     def _update_scraped_controls_state(self, info: Dict[str, Any]) -> None:
         rows: List[List[str]] = info.get("rows", [])
@@ -4101,13 +4355,6 @@ class ReportApp:
                 relabel_button.state(["!disabled"])
             else:
                 relabel_button.state(["disabled"])
-
-        dedupe_button = info.get("dedupe_button")
-        if isinstance(dedupe_button, ttk.Button):
-            if has_csv and len(header) > 2:
-                dedupe_button.state(["!disabled"])
-            else:
-                dedupe_button.state(["disabled"])
 
         dedupe_items_button = info.get("dedupe_items_button")
         if isinstance(dedupe_items_button, ttk.Button):
@@ -4396,6 +4643,13 @@ class ReportApp:
             )
             return
 
+        rows: List[List[str]] = info.get("rows", [])
+        if not rows:
+            messagebox.showinfo(
+                "Make Items Unique", "There are no rows available to update.",
+            )
+            return
+
         csv_path = info.get("csv_path")
         if not isinstance(csv_path, Path):
             messagebox.showinfo(
@@ -4404,37 +4658,12 @@ class ReportApp:
             )
             return
 
-        rows: List[List[str]] = info.get("rows", [])
-        if not rows:
-            messagebox.showinfo(
-                "Make Items Unique", "There are no rows available to update.",
-            )
-            return
-
-        updated_rows: List[List[str]] = []
-        seen: Dict[str, int] = {}
-        duplicates_found = False
-        for row in rows:
-            values = list(row)
-            if item_index >= len(values):
-                values.extend([""] * (item_index - len(values) + 1))
-            raw_value = values[item_index].strip()
-            if raw_value:
-                base_value = re.sub(r"\.\d+$", "", raw_value)
-                normalized = base_value.lower()
-                count = seen.get(normalized, 0)
-                if count == 0:
-                    if base_value != values[item_index]:
-                        values[item_index] = base_value
-                else:
-                    values[item_index] = f"{base_value}.{count}"
-                    duplicates_found = True
-                seen[normalized] = count + 1
-            updated_rows.append(values)
+        updated_rows, duplicates_found = self._normalize_scraped_item_rows(header, rows)
 
         if not duplicates_found:
             messagebox.showinfo(
-                "Make Items Unique", "No duplicate ITEM entries were found to update.",
+                "Make Items Unique",
+                "No duplicate CATEGORY+ITEM entries were found to update.",
             )
             return
 
@@ -4447,7 +4676,7 @@ class ReportApp:
         self._update_scraped_controls_state(info)
         self._refresh_combined_tab(auto_update=True)
         messagebox.showinfo(
-            "Make Items Unique", "Duplicate ITEM entries have been updated.",
+            "Make Items Unique", "Duplicate CATEGORY+ITEM entries have been updated.",
         )
 
     def _delete_scraped_column(self, tree: ttk.Treeview, column_index: int) -> None:
@@ -4737,6 +4966,170 @@ class ReportApp:
         self.combined_header_label_widgets.clear()
         self._refresh_chart_tab()
 
+    def _share_multiplier_path(self, company_root: Path) -> Path:
+        return company_root / SHARE_MULTIPLIER_FILENAME
+
+    def _current_combined_period_labels(self) -> List[str]:
+        periods: List[str] = []
+        for column_name in self.combined_ordered_columns:
+            if column_name in {"Type", "Category", "Item", "Note"}:
+                continue
+            if "." in column_name:
+                periods.append(column_name.split(".", 1)[1])
+            else:
+                periods.append(column_name)
+        return periods
+
+    def _write_share_multiplier_entries(
+        self, path: Path, entries: Sequence[Tuple[str, float]]
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(["Date", "Multiplier"])
+            for date_value, multiplier in entries:
+                writer.writerow([date_value, format(multiplier, "g")])
+
+    def _verify_share_multiplier_coverage(
+        self, company_root: Path, periods: Sequence[str]
+    ) -> None:
+        if not periods:
+            self._share_multiplier_warning_state = None
+            return
+        path = self._share_multiplier_path(company_root)
+        if not path.exists():
+            self._share_multiplier_warning_state = None
+            return
+        try:
+            mapping = FinanceDataset.parse_share_multiplier_file(path)
+        except ValueError as exc:
+            messagebox.showwarning(
+                "Share Multipliers",
+                f"The share multiplier file '{path.name}' is invalid:\n{exc}",
+            )
+            self._share_multiplier_warning_state = None
+            return
+        missing = [
+            period
+            for period in periods
+            if _lookup_period_value(mapping, period) is None
+        ]
+        if not missing:
+            self._share_multiplier_warning_state = None
+            return
+        warning_key = (str(company_root), tuple(missing))
+        if self._share_multiplier_warning_state == warning_key:
+            return
+        self._share_multiplier_warning_state = warning_key
+        formatted = "\n".join(missing)
+        messagebox.showwarning(
+            "Share Multipliers",
+            "Share multipliers are missing for the following periods:\n" + formatted,
+        )
+
+    def _open_share_multiplier_dialog(self) -> None:
+        company = self.company_var.get().strip()
+        if not company:
+            messagebox.showinfo(
+                "Share Multipliers", "Select a company before configuring share multipliers."
+            )
+            return
+        company_root = self.companies_dir / company
+        path = self._share_multiplier_path(company_root)
+        try:
+            initial_text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            initial_text = "Date,Multiplier\n"
+        except Exception as exc:
+            messagebox.showwarning(
+                "Share Multipliers",
+                f"Could not read the share multiplier file '{path.name}':\n{exc}",
+            )
+            initial_text = "Date,Multiplier\n"
+        if not initial_text.strip():
+            initial_text = "Date,Multiplier\n"
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Configure Share Multipliers")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        content = ttk.Frame(dialog, padding=(12, 12, 12, 0))
+        content.pack(fill=tk.BOTH, expand=True)
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(1, weight=1)
+
+        instructions = (
+            "Enter Date,Multiplier rows that match the periods in combined.csv."
+        )
+        ttk.Label(content, text=instructions, wraplength=420, justify=tk.LEFT).grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+
+        text_widget = tk.Text(content, wrap="none", width=60, height=15)
+        text_widget.insert("1.0", initial_text)
+        text_widget.configure(font=("TkFixedFont", 10))
+        text_widget.grid(row=1, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(content, orient=tk.VERTICAL, command=text_widget.yview)
+        y_scroll.grid(row=1, column=1, sticky="ns")
+        text_widget.configure(yscrollcommand=y_scroll.set)
+
+        x_scroll = ttk.Scrollbar(content, orient=tk.HORIZONTAL, command=text_widget.xview)
+        x_scroll.grid(row=2, column=0, sticky="ew")
+        text_widget.configure(xscrollcommand=x_scroll.set)
+
+        button_frame = ttk.Frame(dialog, padding=(12, 8, 12, 12))
+        button_frame.pack(fill=tk.X)
+
+        def _save() -> None:
+            csv_text = text_widget.get("1.0", "end-1c").strip()
+            if not csv_text:
+                if path.exists():
+                    try:
+                        path.unlink()
+                    except Exception as exc:
+                        messagebox.showwarning(
+                            "Share Multipliers", f"Could not remove share multipliers: {exc}"
+                        )
+                        return
+                dialog.destroy()
+                self._share_multiplier_warning_state = None
+                self._refresh_chart_tab()
+                return
+            try:
+                entries = FinanceDataset.parse_share_multiplier_rows(
+                    csv.reader(io.StringIO(csv_text))
+                )
+            except ValueError as exc:
+                messagebox.showwarning("Share Multipliers", str(exc))
+                return
+            except csv.Error as exc:
+                messagebox.showwarning("Share Multipliers", f"Unable to parse CSV data: {exc}")
+                return
+            try:
+                self._write_share_multiplier_entries(path, entries)
+            except Exception as exc:
+                messagebox.showwarning(
+                    "Share Multipliers", f"Could not save share multipliers: {exc}"
+                )
+                return
+            dialog.destroy()
+            self._share_multiplier_warning_state = None
+            periods = self._current_combined_period_labels()
+            if periods:
+                self._verify_share_multiplier_coverage(company_root, periods)
+            self._refresh_chart_tab()
+
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(
+            side=tk.RIGHT, padx=(8, 0)
+        )
+        ttk.Button(button_frame, text="Save", command=_save).pack(side=tk.RIGHT)
+
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.wait_visibility()
+        text_widget.focus_set()
+
     def _refresh_chart_tab(self) -> None:
         plot_frame = self.chart_plot_frame
         if plot_frame is None:
@@ -4768,6 +5161,13 @@ class ReportApp:
         except Exception:
             logger.exception("Unexpected error while rendering chart for %s", company)
             return
+        missing_share_multipliers = dataset.missing_share_multiplier_periods()
+        if missing_share_multipliers:
+            logger.warning(
+                "Share multipliers missing for %s periods: %s",
+                company,
+                ", ".join(missing_share_multipliers),
+            )
         if warning:
             logger.warning("Chart normalization warning for %s: %s", company, warning)
         plot_frame.set_display_mode(FinancePlotFrame.MODE_STACKED)
@@ -6161,6 +6561,13 @@ class ReportApp:
                 with metadata_path.open("w", encoding="utf-8") as fh:
                     json.dump(metadata, fh, indent=2)
                 logger.info("Exported combined metadata to %s", metadata_path)
+            header_row = csv_rows[0] if csv_rows else []
+            periods = [
+                value
+                for value in header_row
+                if value not in {"Type", "Category", "Item", "Note"}
+            ]
+            self._verify_share_multiplier_coverage(company_root, periods)
         except Exception:
             logger.exception("Failed to export final combined CSV to company root")
 
@@ -7207,25 +7614,86 @@ class ReportApp:
                     continue
         return None
 
-    def _call_openai(self, api_key: str, prompt: str, page_text: str) -> str:
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": page_text},
-            ],
-        }
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
-        data = response.json()
-        choices = data.get("choices")
+    def _call_openai(
+        self, api_key: str, model_name: str, prompt: str, page_text: str
+    ) -> str:
+        thread_name = threading.current_thread().name
+        sanitized_key = api_key.strip()
+        if not sanitized_key:
+            logger.error(
+                "OpenAI call aborted | thread=%s | reason=missing_api_key",
+                thread_name,
+            )
+            raise ValueError("OpenAI API key is missing")
+
+        prompt_length = len(prompt)
+        page_text_length = len(page_text)
+        logger.info(
+            "OpenAI call starting | thread=%s | model=%s | prompt_chars=%d | page_chars=%d",
+            thread_name,
+            model_name,
+            prompt_length,
+            page_text_length,
+        )
+
+        client_start = time.perf_counter()
+        client = OpenAI(api_key=sanitized_key)
+        logger.info(
+            "OpenAI client initialized | thread=%s | elapsed_ms=%.2f",
+            thread_name,
+            (time.perf_counter() - client_start) * 1000,
+        )
+
+        request_started = time.perf_counter()
+        logger.info(
+            "OpenAI request initiated | thread=%s | model=%s | prompt_chars=%d | page_chars=%d",
+            thread_name,
+            model_name,
+            prompt_length,
+            page_text_length,
+        )
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": page_text},
+                ],
+            )
+        except (APIConnectionError, APIError, APIStatusError, RateLimitError) as exc:
+            logger.exception(
+                "OpenAI request failed | model=%s | status=error | detail=%s",
+                model_name,
+                exc,
+            )
+            raise
+
+        usage = getattr(response, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None) if usage else None
+        completion_tokens = getattr(usage, "completion_tokens", None) if usage else None
+        total_tokens = getattr(usage, "total_tokens", None) if usage else None
+        logger.info(
+            "OpenAI response received | thread=%s | model=%s | status=success | completion_id=%s | "
+            "prompt_tokens=%s | completion_tokens=%s | total_tokens=%s | latency_ms=%.2f",
+            thread_name,
+            model_name,
+            getattr(response, "id", ""),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            (time.perf_counter() - request_started) * 1000,
+        )
+
+        choices = getattr(response, "choices", None)
         if not choices:
+            logger.error("OpenAI response missing choices | model=%s", model_name)
             raise ValueError("No choices returned from OpenAI API")
-        message = choices[0].get("message", {})
-        content = message.get("content")
+
+        first_choice = choices[0]
+        message = getattr(first_choice, "message", None) or {}
+        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
         if not content:
+            logger.error("OpenAI response missing content | model=%s", model_name)
             raise ValueError("Empty response from OpenAI API")
         return str(content)
 
@@ -7327,6 +7795,58 @@ class ReportApp:
             return collapsed_escaped
         return trimmed
 
+    def _load_local_config(self) -> None:
+        self.local_config_data = {}
+        if not self.local_config_path.exists():
+            return
+        try:
+            with self.local_config_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as exc:
+            messagebox.showwarning("Load Local Config", f"Could not load local configuration: {exc}")
+            return
+        if not isinstance(data, dict):
+            messagebox.showwarning(
+                "Load Local Config",
+                "Local configuration file is invalid; ignoring its contents.",
+            )
+            return
+
+        api_key_value = str(data.get("api_key", "")).strip()
+        downloads_dir_value = str(data.get("downloads_dir", "")).strip()
+
+        if api_key_value:
+            self.local_config_data["api_key"] = api_key_value
+        self.api_key_var.set(api_key_value)
+
+        if downloads_dir_value:
+            self.local_config_data["downloads_dir"] = downloads_dir_value
+            self.downloads_dir_var.set(downloads_dir_value)
+
+    def _write_local_config(self) -> None:
+        payload: Dict[str, Any] = {}
+        api_key_value = str(self.local_config_data.get("api_key", "")).strip()
+        downloads_dir_value = str(self.local_config_data.get("downloads_dir", "")).strip()
+
+        if api_key_value:
+            payload["api_key"] = api_key_value
+        if downloads_dir_value:
+            payload["downloads_dir"] = downloads_dir_value
+
+        if not payload:
+            if self.local_config_path.exists():
+                try:
+                    self.local_config_path.unlink()
+                except Exception as exc:
+                    messagebox.showwarning("Save Local Config", f"Could not remove local configuration: {exc}")
+            return
+
+        try:
+            with self.local_config_path.open("w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+        except Exception as exc:
+            messagebox.showwarning("Save Local Config", f"Could not save local configuration: {exc}")
+
     def _ensure_unique_path(self, path: Path) -> Path:
         if not path.exists():
             return path
@@ -7423,29 +7943,74 @@ class ReportApp:
             return
         try:
             with self.pattern_config_path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-                self.config_data = data
-                stored_widths = data.get("combined_base_column_widths")
-                if isinstance(stored_widths, dict):
-                    valid_widths: Dict[str, int] = {}
-                    for column_name in ("Type", "Category", "Item", "Note"):
-                        width_value = stored_widths.get(column_name)
-                        if isinstance(width_value, (int, float)) and width_value > 0:
-                            valid_widths[column_name] = int(width_value)
-                    self.combined_base_column_widths = valid_widths
-                else:
-                    self.combined_base_column_widths = {}
-                other_width_value = data.get("combined_other_column_width")
-                if isinstance(other_width_value, (int, float)) and other_width_value > 0:
-                    self.combined_other_column_width = int(other_width_value)
-                else:
-                    self.combined_other_column_width = None
-                zoom_value = data.get("combined_preview_zoom")
-                if isinstance(zoom_value, (int, float)):
-                    zoom = max(0.5, min(3.0, float(zoom_value)))
-                    self.combined_preview_zoom_var.set(zoom)
-                self._update_combined_preview_zoom_display()
-                self._load_type_category_colors_from_config(data)
+                raw_data = json.load(fh)
+        except Exception as exc:  # pragma: no cover - guard for IO issues
+            messagebox.showwarning("Load Patterns", f"Could not load pattern configuration: {exc}")
+            self._config_loaded = True
+            return
+
+        if not isinstance(raw_data, dict):
+            messagebox.showwarning(
+                "Load Patterns",
+                "Pattern configuration file is invalid; ignoring its contents.",
+            )
+            data: Dict[str, Any] = {}
+        else:
+            data = dict(raw_data)
+
+        migrated_local_settings = False
+        raw_api_key = data.pop("api_key", None)
+        if isinstance(raw_api_key, str):
+            trimmed_key = raw_api_key.strip()
+            if not self.api_key_var.get().strip():
+                self.api_key_var.set(trimmed_key)
+            if trimmed_key:
+                if self.local_config_data.get("api_key") != trimmed_key:
+                    self.local_config_data["api_key"] = trimmed_key
+                    migrated_local_settings = True
+            elif "api_key" in self.local_config_data:
+                self.local_config_data.pop("api_key", None)
+                migrated_local_settings = True
+
+        raw_downloads_dir = data.pop("downloads_dir", None)
+        if isinstance(raw_downloads_dir, str):
+            trimmed_dir = raw_downloads_dir.strip()
+            if not self.downloads_dir_var.get().strip() and trimmed_dir:
+                self.downloads_dir_var.set(trimmed_dir)
+            if trimmed_dir:
+                if self.local_config_data.get("downloads_dir") != trimmed_dir:
+                    self.local_config_data["downloads_dir"] = trimmed_dir
+                    migrated_local_settings = True
+            elif "downloads_dir" in self.local_config_data:
+                self.local_config_data.pop("downloads_dir", None)
+                migrated_local_settings = True
+
+        if migrated_local_settings:
+            self._write_local_config()
+
+        self.config_data = data
+        try:
+            stored_widths = data.get("combined_base_column_widths")
+            if isinstance(stored_widths, dict):
+                valid_widths: Dict[str, int] = {}
+                for column_name in ("Type", "Category", "Item", "Note"):
+                    width_value = stored_widths.get(column_name)
+                    if isinstance(width_value, (int, float)) and width_value > 0:
+                        valid_widths[column_name] = int(width_value)
+                self.combined_base_column_widths = valid_widths
+            else:
+                self.combined_base_column_widths = {}
+            other_width_value = data.get("combined_other_column_width")
+            if isinstance(other_width_value, (int, float)) and other_width_value > 0:
+                self.combined_other_column_width = int(other_width_value)
+            else:
+                self.combined_other_column_width = None
+            zoom_value = data.get("combined_preview_zoom")
+            if isinstance(zoom_value, (int, float)):
+                zoom = max(0.5, min(3.0, float(zoom_value)))
+                self.combined_preview_zoom_var.set(zoom)
+            self._update_combined_preview_zoom_display()
+            self._load_type_category_colors_from_config(data)
         except Exception as exc:  # pragma: no cover - guard for IO issues
             messagebox.showwarning("Load Patterns", f"Could not load pattern configuration: {exc}")
             self._config_loaded = True
@@ -7473,8 +8038,24 @@ class ReportApp:
         if "year_space_as_whitespace" in data:
             self.year_whitespace_as_space_var.set(bool(data["year_space_as_whitespace"]))
         self.last_company_preference = data.get("last_company", "")
-        if "api_key" in data:
-            self.api_key_var.set(str(data.get("api_key", "")))
+        raw_models = data.get("openai_models")
+        if isinstance(raw_models, dict):
+            for column in COLUMNS:
+                value = raw_models.get(column)
+                if isinstance(value, str) and value.strip():
+                    self.openai_model_vars[column].set(value.strip())
+                else:
+                    self.openai_model_vars[column].set(DEFAULT_OPENAI_MODEL)
+        else:
+            raw_model = data.get("openai_model")
+            if isinstance(raw_model, str) and raw_model.strip():
+                cleaned_model = raw_model.strip()
+                for column in COLUMNS:
+                    self.openai_model_vars[column].set(cleaned_model)
+                data.setdefault("openai_models", {column: cleaned_model for column in COLUMNS})
+            else:
+                for column in COLUMNS:
+                    self.openai_model_vars[column].set(DEFAULT_OPENAI_MODEL)
         self._ensure_download_settings()
         self._apply_last_company_selection()
         self._config_loaded = True
@@ -7653,15 +8234,17 @@ class ReportApp:
         return pattern.replace(" ", r"\s+")
 
     def _ensure_download_settings(self) -> None:
-        configured_dir = str(self.config_data.get("downloads_dir", "")).strip()
+        configured_dir = str(self.local_config_data.get("downloads_dir", "")).strip()
         if configured_dir:
             self.downloads_dir_var.set(configured_dir)
         elif not self.downloads_dir_var.get():
             default_download_dir = Path.home() / "Downloads"
             if default_download_dir.exists():
                 self.downloads_dir_var.set(str(default_download_dir))
-        if self.downloads_dir_var.get():
-            self.config_data["downloads_dir"] = self.downloads_dir_var.get()
+        current_dir = self.downloads_dir_var.get().strip()
+        if current_dir and self.local_config_data.get("downloads_dir") != current_dir:
+            self.local_config_data["downloads_dir"] = current_dir
+            self._write_local_config()
 
         configured_minutes = self.config_data.get("downloads_minutes")
         if isinstance(configured_minutes, int) and configured_minutes > 0:
@@ -7780,6 +8363,18 @@ class ReportApp:
 
     def _write_config(self) -> None:
         self._update_note_settings_config_entries()
+        self.config_data.pop("api_key", None)
+        self.config_data.pop("downloads_dir", None)
+        model_payload: Dict[str, str] = {}
+        for column, var in self.openai_model_vars.items():
+            cleaned = var.get().strip()
+            if cleaned and cleaned != DEFAULT_OPENAI_MODEL:
+                model_payload[column] = cleaned
+        if model_payload:
+            self.config_data["openai_models"] = model_payload
+        else:
+            self.config_data.pop("openai_models", None)
+        self.config_data.pop("openai_model", None)
         self.config_data["combined_base_column_widths"] = {
             column: int(width)
             for column, width in self.combined_base_column_widths.items()
@@ -7827,13 +8422,16 @@ class ReportApp:
             messagebox.showwarning("Save Patterns", f"Could not save pattern configuration: {exc}")
 
     def scrape_selections(self) -> None:
+        logger.info("AIScrape invoked | pdf_entries=%d", len(self.pdf_entries))
         if not self.pdf_entries:
             messagebox.showinfo("No PDFs", "Load PDFs before running AIScrape.")
+            logger.info("AIScrape aborted | reason=no_pdfs")
             return
 
         company = self.company_var.get()
         if not company:
             messagebox.showinfo("Select Company", "Please choose a company before running AIScrape.")
+            logger.info("AIScrape aborted | reason=no_company_selected")
             return
 
         if hasattr(self, "scrape_progress"):
@@ -7843,6 +8441,7 @@ class ReportApp:
         if not api_key:
             messagebox.showwarning("API Key Required", "Enter an API key and press Enter before running AIScrape.")
             self.api_key_entry.focus_set()
+            logger.info("AIScrape aborted | reason=no_api_key")
             return
         if api_key != self.api_key_var.get():
             self.api_key_var.set(api_key)
@@ -7859,12 +8458,32 @@ class ReportApp:
                 "Missing Prompts",
                 "Prompt files not found for: " + ", ".join(missing_prompts),
             )
+            logger.info(
+                "AIScrape aborted | reason=missing_prompts | missing=%s",
+                ",".join(sorted(missing_prompts)),
+            )
             return
 
         self._save_api_key()
 
         scrape_root = self.companies_dir / company / "openapiscrape"
         scrape_root.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "AIScrape preparing jobs | company=%s | scrape_root=%s",
+            company,
+            scrape_root,
+        )
+
+        model_map: Dict[str, str] = {}
+        for column in COLUMNS:
+            selected = self.openai_model_vars[column].get().strip()
+            model_map[column] = selected or DEFAULT_OPENAI_MODEL
+        assignment_summary = ", ".join(f"{column}:{model_map[column]}" for column in COLUMNS)
+        logger.info(
+            "AIScrape models selected | thread=%s | assignments=%s",
+            threading.current_thread().name,
+            assignment_summary,
+        )
 
         errors: List[str] = []
         pending: List[Tuple[PDFEntry, List[Tuple[str, List[int]]]]] = []
@@ -7923,17 +8542,25 @@ class ReportApp:
                 entry_tasks.append((category, normalized_indexes))
 
             if entry_tasks:
+                logger.info(
+                    "AIScrape pending entry | entry=%s | year=%s | tasks=%d",
+                    entry.path.name,
+                    entry.year,
+                    len(entry_tasks),
+                )
                 pending.append((entry, entry_tasks))
 
         total_tasks = sum(len(items) for _, items in pending)
         if not total_tasks:
             messagebox.showinfo("AIScrape", "All selected sections already have scraped files.")
+            logger.info("AIScrape aborted | reason=no_pending_tasks")
             return
 
         if hasattr(self, "scrape_button"):
             self.scrape_button.state(["disabled"])
         if hasattr(self, "scrape_progress"):
             self.scrape_progress.configure(maximum=total_tasks, value=0)
+        logger.info("AIScrape starting | jobs=%d", total_tasks)
 
         successful = 0
         attempted = 0
@@ -7942,11 +8569,36 @@ class ReportApp:
         jobs: List[ScrapeTask] = []
 
         def _run_job(job: ScrapeTask) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+            category_model = model_map.get(job.category, DEFAULT_OPENAI_MODEL)
+            logger.info(
+                "AIScrape job started | entry=%s | category=%s | page_count=%d | model=%s",
+                job.entry_name,
+                job.category,
+                len(job.page_indexes),
+                category_model,
+            )
             try:
-                response_text = self._call_openai(api_key, job.prompt_text, job.page_text)
-            except requests.RequestException as exc:
+                response_text = self._call_openai(
+                    api_key,
+                    category_model,
+                    job.prompt_text,
+                    job.page_text,
+                )
+            except (APIConnectionError, APIError, APIStatusError, RateLimitError) as exc:
+                logger.error(
+                    "OpenAI request failed | entry=%s | category=%s | detail=%s",
+                    job.entry_name,
+                    job.category,
+                    exc,
+                )
                 return False, None, f"{job.entry_name} - {job.category}: API request failed ({exc})"
             except Exception as exc:
+                logger.error(
+                    "OpenAI processing error | entry=%s | category=%s | detail=%s",
+                    job.entry_name,
+                    job.category,
+                    exc,
+                )
                 return False, None, f"{job.entry_name} - {job.category}: {exc}"
 
             pdf_stem = Path(job.entry_name).stem
@@ -7964,6 +8616,12 @@ class ReportApp:
                 "page_indexes": list(job.page_indexes),
                 "year": job.entry_year,
             }
+            logger.info(
+                "AIScrape job completed | entry=%s | category=%s | response_chars=%d",
+                job.entry_name,
+                job.category,
+                len(response_text),
+            )
             return True, metadata_entry, None
 
         try:
@@ -8015,9 +8673,16 @@ class ReportApp:
                             scrape_root=scrape_root,
                         )
                     )
+                    logger.info(
+                        "AIScrape job queued | entry=%s | category=%s | pages=%s",
+                        entry.path.name,
+                        category,
+                        ",".join(str(idx) for idx in successful_pages),
+                    )
 
             if jobs:
                 max_workers = min(8, max(2, os.cpu_count() or 4))
+                logger.info("AIScrape executing | queued_jobs=%d | max_workers=%d", len(jobs), max_workers)
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     future_map = {executor.submit(_run_job, job): job for job in jobs}
                     for future in as_completed(future_map):
@@ -8029,8 +8694,21 @@ class ReportApp:
                             success, metadata_entry, error_message = future.result()
                         except Exception as exc:
                             error_message = f"{job.entry_name} - {job.category}: {exc}"
+                            logger.exception(
+                                "AIScrape job crashed | entry=%s | category=%s",
+                                job.entry_name,
+                                job.category,
+                            )
 
                         attempted += 1
+                        logger.info(
+                            "AIScrape job finished | entry=%s | category=%s | success=%s | attempted=%d/%d",
+                            job.entry_name,
+                            job.category,
+                            success,
+                            attempted,
+                            total_tasks,
+                        )
 
                         if success and metadata_entry is not None:
                             metadata = metadata_cache.get(job.entry_path, {})
@@ -8040,8 +8718,20 @@ class ReportApp:
                             metadata[job.category] = metadata_entry
                             metadata_changed[job.entry_path] = True
                             successful += 1
+                            logger.info(
+                                "AIScrape job success | entry=%s | category=%s | successful=%d",
+                                job.entry_name,
+                                job.category,
+                                successful,
+                            )
                         elif error_message:
                             errors.append(error_message)
+                            logger.warning(
+                                "AIScrape job error | entry=%s | category=%s | message=%s",
+                                job.entry_name,
+                                job.category,
+                                error_message,
+                            )
 
                         if hasattr(self, "scrape_progress"):
                             self.scrape_progress["value"] = attempted
@@ -8056,12 +8746,23 @@ class ReportApp:
                 metadata_path = metadata_path_map.get(entry_path)
                 if metadata_path is None:
                     continue
+                logger.info(
+                    "AIScrape writing metadata | entry=%s | path=%s",
+                    entry_path.name,
+                    metadata_path,
+                )
                 self._write_doc_metadata(metadata_path, metadata)
         finally:
             if hasattr(self, "scrape_button"):
                 self.scrape_button.state(["!disabled"])
             if hasattr(self, "scrape_progress"):
                 self.scrape_progress["value"] = 0
+            logger.info(
+                "AIScrape completed | attempted=%d | successful=%d | errors=%d",
+                attempted,
+                successful,
+                len(errors),
+            )
 
         self._refresh_scraped_tab()
         if successful:
