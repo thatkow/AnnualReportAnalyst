@@ -763,43 +763,15 @@ class ReportAppV2:
         tables_frame = ttk.Frame(scrape_split)
         scrape_split.add(tables_frame, weight=1)
 
-        self.scrape_tables_notebook = ttk.Notebook(tables_frame)
-        self.scrape_tables_notebook.pack(fill=tk.BOTH, expand=True)
-        self.scrape_category_tabs: Dict[str, ttk.Frame] = {}
-        self.scrape_category_canvases: Dict[str, tk.Canvas] = {}
-        self.scrape_category_inners: Dict[str, ttk.Frame] = {}
-        self.scrape_category_windows: Dict[str, int] = {}
-        self.scrape_category_placeholders: Dict[str, tk.Widget] = {}
-
-        for category in COLUMNS:
-            tab = ttk.Frame(self.scrape_tables_notebook)
-            self.scrape_tables_notebook.add(tab, text=category)
-            canvas = tk.Canvas(tab)
-            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            scrollbar = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=canvas.yview)
-            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-            canvas.configure(yscrollcommand=scrollbar.set)
-            inner = ttk.Frame(canvas)
-            window = canvas.create_window((0, 0), window=inner, anchor="nw")
-            inner.bind(
-                "<Configure>",
-                lambda _e, c=canvas: c.configure(scrollregion=c.bbox("all")),
-            )
-            canvas.bind(
-                "<Configure>",
-                lambda event, cv=canvas, win=window: cv.itemconfigure(win, width=event.width),
-            )
-            placeholder = ttk.Label(
-                inner,
-                text="Select pages in the Review tab to stage AIScrape jobs.",
-                foreground="#666666",
-            )
-            placeholder.pack(anchor="w", padx=12, pady=12)
-            self.scrape_category_tabs[category] = tab
-            self.scrape_category_canvases[category] = canvas
-            self.scrape_category_inners[category] = inner
-            self.scrape_category_windows[category] = window
-            self.scrape_category_placeholders[category] = placeholder
+        self.scrape_pdf_notebook = ttk.Notebook(tables_frame)
+        self.scrape_pdf_notebook.pack(fill=tk.BOTH, expand=True)
+        self.scrape_pdf_tabs: Dict[Path, ttk.Frame] = {}
+        self.scrape_pdf_category_notebooks: Dict[Path, ttk.Notebook] = {}
+        self.scrape_category_tabs: Dict[Tuple[Path, str], ttk.Frame] = {}
+        self.scrape_category_canvases: Dict[Tuple[Path, str], tk.Canvas] = {}
+        self.scrape_category_inners: Dict[Tuple[Path, str], ttk.Frame] = {}
+        self.scrape_category_windows: Dict[Tuple[Path, str], int] = {}
+        self.scrape_category_placeholders: Dict[Tuple[Path, str], Optional[tk.Widget]] = {}
 
     def _maximize_window(self) -> None:
         try:
@@ -1368,35 +1340,83 @@ class ReportAppV2:
         self._refresh_scrape_results()
 
     def _refresh_scrape_results(self) -> None:
-        if not hasattr(self, "scrape_tables_notebook"):
+        if not hasattr(self, "scrape_pdf_notebook"):
             return
 
         for panel in self.scrape_panels.values():
             panel.destroy()
         self.scrape_panels.clear()
 
-        for category, inner in self.scrape_category_inners.items():
-            for child in list(inner.winfo_children()):
-                child.destroy()
-            self.scrape_category_placeholders[category] = None
+        for child in list(self.scrape_pdf_notebook.winfo_children()):
+            child.destroy()
+
+        self.scrape_pdf_tabs.clear()
+        self.scrape_pdf_category_notebooks.clear()
+        self.scrape_category_tabs.clear()
+        self.scrape_category_canvases.clear()
+        self.scrape_category_inners.clear()
+        self.scrape_category_windows.clear()
+        self.scrape_category_placeholders.clear()
 
         if not self.pdf_entries:
+            placeholder_tab = ttk.Frame(self.scrape_pdf_notebook)
+            ttk.Label(
+                placeholder_tab,
+                text="Load PDFs and choose pages to prepare scraping results.",
+                foreground="#666666",
+                wraplength=360,
+                justify=tk.LEFT,
+            ).pack(anchor="w", padx=12, pady=12)
+            self.scrape_pdf_notebook.add(placeholder_tab, text="No PDFs")
+            self.scrape_pdf_notebook.tab(placeholder_tab, state="disabled")
             self._clear_scrape_preview()
-            for category, inner in self.scrape_category_inners.items():
-                placeholder = ttk.Label(
-                    inner,
-                    text="Load PDFs and choose pages to prepare scraping results.",
-                    foreground="#666666",
-                )
-                placeholder.pack(anchor="w", padx=12, pady=12)
-                self.scrape_category_placeholders[category] = placeholder
             self.active_scrape_key = None
             return
 
         company = self.company_var.get().strip()
+        entry_lookup: Dict[Path, PDFEntry] = {entry.path: entry for entry in self.pdf_entries}
         default_entry: Optional[PDFEntry] = None
         default_category: Optional[str] = None
-        category_has_content: Dict[str, bool] = {column: False for column in COLUMNS}
+
+        for entry in self.pdf_entries:
+            pdf_tab = ttk.Frame(self.scrape_pdf_notebook)
+            self.scrape_pdf_notebook.add(pdf_tab, text=entry.path.name)
+            self.scrape_pdf_tabs[entry.path] = pdf_tab
+
+            category_notebook = ttk.Notebook(pdf_tab)
+            category_notebook.pack(fill=tk.BOTH, expand=True)
+            self.scrape_pdf_category_notebooks[entry.path] = category_notebook
+
+            for category in COLUMNS:
+                tab = ttk.Frame(category_notebook)
+                category_notebook.add(tab, text=category)
+                canvas = tk.Canvas(tab)
+                canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+                scrollbar = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=canvas.yview)
+                scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+                canvas.configure(yscrollcommand=scrollbar.set)
+                inner = ttk.Frame(canvas)
+                window = canvas.create_window((0, 0), window=inner, anchor="nw")
+                inner.bind(
+                    "<Configure>",
+                    lambda _e, c=canvas: c.configure(scrollregion=c.bbox("all")),
+                )
+                canvas.bind(
+                    "<Configure>",
+                    lambda event, cv=canvas, win=window: cv.itemconfigure(win, width=event.width),
+                )
+                placeholder = ttk.Label(
+                    inner,
+                    text="Select pages in the Review tab to stage AIScrape jobs.",
+                    foreground="#666666",
+                )
+                placeholder.pack(anchor="w", padx=12, pady=12)
+                key = (entry.path, category)
+                self.scrape_category_tabs[key] = tab
+                self.scrape_category_canvases[key] = canvas
+                self.scrape_category_inners[key] = inner
+                self.scrape_category_windows[key] = window
+                self.scrape_category_placeholders[key] = placeholder
 
         for entry in self.pdf_entries:
             if company:
@@ -1404,7 +1424,8 @@ class ReportAppV2:
             else:
                 target_base = entry.path.parent / "openapiscrape" / entry.path.stem
             for category in COLUMNS:
-                parent_inner = self.scrape_category_inners.get(category)
+                key = (entry.path, category)
+                parent_inner = self.scrape_category_inners.get(key)
                 if parent_inner is None:
                     continue
                 pages = self._get_selected_pages(entry, category)
@@ -1412,29 +1433,17 @@ class ReportAppV2:
                 multiplier_path = target_base / f"{category}_multiplier.txt"
                 if not pages and not csv_path.exists() and not multiplier_path.exists():
                     continue
+                placeholder = self.scrape_category_placeholders.get(key)
+                if placeholder is not None:
+                    placeholder.destroy()
+                    self.scrape_category_placeholders[key] = None
                 panel = ScrapeResultPanel(parent_inner, self, entry, category, target_base)
                 panel.load_from_files()
-                key = (entry.path, category)
                 self.scrape_panels[key] = panel
-                category_has_content[category] = True
                 if panel.has_csv_data or pages:
                     if default_entry is None:
                         default_entry = entry
                         default_category = category
-
-        for category, has_content in category_has_content.items():
-            if has_content:
-                continue
-            inner = self.scrape_category_inners.get(category)
-            if inner is None:
-                continue
-            placeholder = ttk.Label(
-                inner,
-                text="Select pages in the Review tab to stage AIScrape jobs.",
-                foreground="#666666",
-            )
-            placeholder.pack(anchor="w", padx=12, pady=12)
-            self.scrape_category_placeholders[category] = placeholder
 
         if not self.scrape_panels:
             self._clear_scrape_preview()
@@ -1442,9 +1451,12 @@ class ReportAppV2:
             return
 
         if default_entry is None or default_category is None:
-            first_panel = next(iter(self.scrape_panels.values()))
-            default_entry = first_panel.entry
-            default_category = first_panel.category
+            first_path, first_category = next(iter(self.scrape_panels.keys()))
+            default_entry = entry_lookup.get(first_path)
+            default_category = first_category
+
+        if default_entry is None or default_category is None:
+            return
 
         self.set_active_scrape_panel(default_entry, default_category)
 
@@ -1472,10 +1484,17 @@ class ReportAppV2:
         if key not in self.scrape_panels:
             return
         self.active_scrape_key = key
-        tab = self.scrape_category_tabs.get(category)
-        if tab is not None:
+        pdf_tab = self.scrape_pdf_tabs.get(entry.path)
+        if pdf_tab is not None:
             try:
-                self.scrape_tables_notebook.select(tab)
+                self.scrape_pdf_notebook.select(pdf_tab)
+            except Exception:
+                pass
+        category_tab = self.scrape_category_tabs.get(key)
+        category_notebook = self.scrape_pdf_category_notebooks.get(entry.path)
+        if category_tab is not None and category_notebook is not None:
+            try:
+                category_notebook.select(category_tab)
             except Exception:
                 pass
         for panel_key, panel in self.scrape_panels.items():
