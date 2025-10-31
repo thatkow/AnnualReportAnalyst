@@ -7250,7 +7250,9 @@ class ReportApp:
                     continue
         return None
 
-    def _call_openai(self, api_key: str, prompt: str, page_text: str) -> str:
+    def _call_openai(
+        self, api_key: str, model_name: str, prompt: str, page_text: str
+    ) -> str:
         thread_name = threading.current_thread().name
         sanitized_key = api_key.strip()
         if not sanitized_key:
@@ -7260,7 +7262,6 @@ class ReportApp:
             )
             raise ValueError("OpenAI API key is missing")
 
-        model_name = self.openai_model_var.get().strip() or DEFAULT_OPENAI_MODEL
         prompt_length = len(prompt)
         page_text_length = len(page_text)
         logger.info(
@@ -8091,6 +8092,13 @@ class ReportApp:
             scrape_root,
         )
 
+        model_name = self.openai_model_var.get().strip() or DEFAULT_OPENAI_MODEL
+        logger.info(
+            "AIScrape model selected | model=%s | thread=%s",
+            model_name,
+            threading.current_thread().name,
+        )
+
         errors: List[str] = []
         pending: List[Tuple[PDFEntry, List[Tuple[str, List[int]]]]] = []
         metadata_cache: Dict[Path, Dict[str, Any]] = {}
@@ -8182,7 +8190,12 @@ class ReportApp:
                 len(job.page_indexes),
             )
             try:
-                response_text = self._call_openai(api_key, job.prompt_text, job.page_text)
+                response_text = self._call_openai(
+                    api_key,
+                    model_name,
+                    job.prompt_text,
+                    job.page_text,
+                )
             except (APIConnectionError, APIError, APIStatusError, RateLimitError) as exc:
                 logger.error(
                     "OpenAI request failed | entry=%s | category=%s | detail=%s",
