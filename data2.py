@@ -320,7 +320,7 @@ class ScrapeResultPanel:
             bd=1,
             relief=tk.FLAT,
         )
-        self.container.pack(fill=tk.X, pady=(0, 8))
+        self.container.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
         self.frame = ttk.Frame(self.container, padding=8)
         self.frame.pack(fill=tk.BOTH, expand=True)
@@ -476,6 +476,8 @@ class ScrapeResultPanel:
             if len(values) < column_count:
                 values.extend([""] * (column_count - len(values)))
             self.table.insert("", "end", values=values)
+        display_rows = max(len(rows), 1)
+        self.table.configure(height=display_rows)
 
     def _handle_activate(self, _: tk.Event) -> None:  # type: ignore[override]
         self.app._on_scrape_panel_clicked(self)
@@ -749,16 +751,42 @@ class ReportAppV2:
         self.scrape_preview_page_var = tk.StringVar(value="")
         ttk.Label(preview_header, textvariable=self.scrape_preview_page_var).pack(side=tk.RIGHT)
 
+        preview_body = ttk.Frame(preview_frame)
+        preview_body.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        preview_body.rowconfigure(0, weight=1)
+        preview_body.columnconfigure(0, weight=1)
+
+        self.scrape_preview_canvas = tk.Canvas(
+            preview_body,
+            background="#f0f0f0",
+            highlightthickness=0,
+        )
+        self.scrape_preview_canvas.grid(row=0, column=0, sticky="nsew")
+        preview_scrollbar = ttk.Scrollbar(
+            preview_body, orient=tk.VERTICAL, command=self.scrape_preview_canvas.yview
+        )
+        preview_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.scrape_preview_canvas.configure(yscrollcommand=preview_scrollbar.set)
+
         self.scrape_preview_label = tk.Label(
-            preview_frame,
+            preview_body,
             text="Select a section to preview.",
             justify=tk.CENTER,
             anchor="center",
             background="#f0f0f0",
         )
-        self.scrape_preview_label.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.scrape_preview_window = self.scrape_preview_canvas.create_window(
+            (0, 0), window=self.scrape_preview_label, anchor="n", width=0
+        )
+        self.scrape_preview_canvas.bind("<Configure>", self._on_scrape_preview_resize)
+        self.scrape_preview_label.bind("<Configure>", self._on_scrape_preview_label_configure)
+        self.scrape_preview_canvas.bind("<MouseWheel>", self._on_scrape_preview_mousewheel)
+        self.scrape_preview_canvas.bind("<Button-4>", self._on_scrape_preview_mousewheel)
+        self.scrape_preview_canvas.bind("<Button-5>", self._on_scrape_preview_mousewheel)
         self.scrape_preview_label.bind("<Button-1>", self._on_scrape_preview_click)
-        self.scrape_preview_label.bind("<Configure>", self._on_scrape_preview_resize)
+        self.scrape_preview_label.bind("<MouseWheel>", self._on_scrape_preview_mousewheel)
+        self.scrape_preview_label.bind("<Button-4>", self._on_scrape_preview_mousewheel)
+        self.scrape_preview_label.bind("<Button-5>", self._on_scrape_preview_mousewheel)
 
         tables_frame = ttk.Frame(scrape_split)
         scrape_split.add(tables_frame, weight=1)
@@ -1464,6 +1492,8 @@ class ReportAppV2:
         if not hasattr(self, "scrape_preview_label"):
             return
         self.scrape_preview_photo = None
+        if hasattr(self, "scrape_preview_canvas"):
+            self.scrape_preview_canvas.configure(background="#f0f0f0")
         self.scrape_preview_label.configure(image="", text="Select a section to preview.", background="#f0f0f0")
         if hasattr(self, "scrape_preview_title_var"):
             self.scrape_preview_title_var.set("Select a section to preview.")
@@ -1475,6 +1505,7 @@ class ReportAppV2:
         self.scrape_preview_cycle_index = 0
         self.scrape_preview_render_page = None
         self.scrape_preview_render_width = 0
+        self._reset_scrape_preview_scroll()
 
     def _on_scrape_panel_clicked(self, panel: ScrapeResultPanel) -> None:
         self.set_active_scrape_panel(panel.entry, panel.category)
@@ -1514,8 +1545,11 @@ class ReportAppV2:
                 text="No pages selected for this category.",
                 background="#f0f0f0",
             )
+            if hasattr(self, "scrape_preview_canvas"):
+                self.scrape_preview_canvas.configure(background="#f0f0f0")
             self.scrape_preview_page_var.set("")
             self.scrape_preview_photo = None
+            self._reset_scrape_preview_scroll()
             return
         self.scrape_preview_render_page = None
         self.scrape_preview_render_width = 0
@@ -1530,9 +1564,9 @@ class ReportAppV2:
         page_index = self.scrape_preview_pages[self.scrape_preview_cycle_index]
         available_width = self.scrape_preview_last_width
         if available_width <= 1:
-            available_width = self.scrape_preview_label.winfo_width()
+            available_width = self.scrape_preview_canvas.winfo_width()
         if available_width <= 1:
-            available_width = self.scrape_preview_label.winfo_reqwidth()
+            available_width = self.scrape_preview_canvas.winfo_reqwidth()
         if available_width <= 1:
             available_width = max(self.thumbnail_width_var.get(), 360)
         display_width = max(int(available_width) - 16, 200)
@@ -1550,13 +1584,18 @@ class ReportAppV2:
             )
         if photo is None:
             self.scrape_preview_label.configure(image="", text="Preview unavailable", background="#f0f0f0")
+            if hasattr(self, "scrape_preview_canvas"):
+                self.scrape_preview_canvas.configure(background="#f0f0f0")
             self.scrape_preview_photo = None
             self.scrape_preview_render_page = None
         else:
             self.scrape_preview_photo = photo
             self.scrape_preview_label.configure(image=photo, text="", background="#000000")
+            if hasattr(self, "scrape_preview_canvas"):
+                self.scrape_preview_canvas.configure(background="#000000")
             self.scrape_preview_render_page = page_index
             self.scrape_preview_render_width = display_width
+        self._reset_scrape_preview_scroll()
         self.scrape_preview_page_var.set(
             f"Page {page_index + 1} ({self.scrape_preview_cycle_index + 1}/{page_count})"
         )
@@ -1571,6 +1610,11 @@ class ReportAppV2:
         if abs(width - self.scrape_preview_last_width) <= 2:
             return
         self.scrape_preview_last_width = width
+        if hasattr(self, "scrape_preview_canvas") and hasattr(self, "scrape_preview_window"):
+            try:
+                self.scrape_preview_canvas.itemconfigure(self.scrape_preview_window, width=width)
+            except Exception:
+                pass
         if self.scrape_preview_pages:
             self._display_scrape_preview_page(force=True)
 
@@ -1587,6 +1631,34 @@ class ReportAppV2:
             return
         self.scrape_preview_cycle_index = (self.scrape_preview_cycle_index + 1) % len(self.scrape_preview_pages)
         self._display_scrape_preview_page(force=True)
+
+    def _on_scrape_preview_label_configure(self, _: tk.Event) -> None:  # type: ignore[override]
+        self._reset_scrape_preview_scroll()
+
+    def _reset_scrape_preview_scroll(self) -> None:
+        if not hasattr(self, "scrape_preview_canvas"):
+            return
+        try:
+            bbox = self.scrape_preview_canvas.bbox("all")
+        except Exception:
+            bbox = None
+        if bbox:
+            self.scrape_preview_canvas.configure(scrollregion=bbox)
+        try:
+            self.scrape_preview_canvas.yview_moveto(0)
+        except Exception:
+            pass
+
+    def _on_scrape_preview_mousewheel(self, event: tk.Event) -> None:  # type: ignore[override]
+        if not hasattr(self, "scrape_preview_canvas"):
+            return
+        if getattr(event, "delta", 0):
+            delta = -event.delta
+            step = int(delta / 120) or (1 if delta > 0 else -1)
+            self.scrape_preview_canvas.yview_scroll(step, "units")
+        else:
+            step = -1 if getattr(event, "num", 0) == 4 else 1
+            self.scrape_preview_canvas.yview_scroll(step, "units")
 
     # ------------------------------------------------------------------ Interactions
     def _bind_review_mousewheel(self, _: tk.Event) -> None:  # type: ignore[override]
