@@ -799,6 +799,23 @@ class ReportAppV2:
                 if selections:
                     record["selections"] = selections
 
+            multi_obj = value.get("multi_selections")
+            if isinstance(multi_obj, dict):
+                multi: Dict[str, List[int]] = {}
+                for category, raw_list in multi_obj.items():
+                    if not isinstance(raw_list, list):
+                        continue
+                    pages: List[int] = []
+                    for raw_page in raw_list:
+                        try:
+                            pages.append(int(raw_page))
+                        except (TypeError, ValueError):
+                            continue
+                    if pages:
+                        multi[category] = pages
+                if multi:
+                    record["multi_selections"] = multi
+
             year_value = value.get("year")
             if isinstance(year_value, str):
                 record["year"] = year_value
