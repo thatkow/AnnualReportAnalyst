@@ -407,11 +407,13 @@ class ReportApp:
         self.companies_dir = self.app_root / "companies"
         self.prompts_dir = self.app_root / "prompts"
         self.pattern_config_path = self.app_root / "pattern_config.json"
+        self.local_config_path = self.app_root / "local_config.json"
         self.type_item_category_path = self.app_root / "type_item_category.csv"
         self.combined_order_path = self.app_root / "combined_order.csv"
         self.type_category_sort_order_path = self.combined_order_path
         self.global_note_assignments_path = self.app_root / "type_category_item_assignments.csv"
         self.config_data: Dict[str, Any] = {}
+        self.local_config_data: Dict[str, Any] = {}
         self.last_company_preference: str = ""
         self._config_loaded = False
         self.assigned_pages: Dict[str, Dict[str, Any]] = {}
@@ -489,6 +491,7 @@ class ReportApp:
 
         self.chart_plot_frame: Optional[FinancePlotFrame] = None
 
+        self._load_local_config()
         self._build_ui()
         self._load_pattern_config()
         self._apply_configured_note_key_bindings()
@@ -1117,8 +1120,11 @@ class ReportApp:
 
     def _save_api_key(self) -> None:
         api_key = self.api_key_var.get().strip()
-        self.config_data["api_key"] = api_key
-        self._write_config()
+        if api_key:
+            self.local_config_data["api_key"] = api_key
+        else:
+            self.local_config_data.pop("api_key", None)
+        self._write_local_config()
 
     def _load_pdfs_on_start(self) -> None:
         if self.embedded:
@@ -1241,8 +1247,8 @@ class ReportApp:
         if not selected:
             return
         self.downloads_dir_var.set(selected)
-        self.config_data["downloads_dir"] = selected
-        self._write_config()
+        self.local_config_data["downloads_dir"] = selected
+        self._write_local_config()
 
     def _set_download_window(self) -> None:
         current_value = max(1, self.recent_download_minutes_var.get())
@@ -7357,6 +7363,58 @@ class ReportApp:
             return collapsed_escaped
         return trimmed
 
+    def _load_local_config(self) -> None:
+        self.local_config_data = {}
+        if not self.local_config_path.exists():
+            return
+        try:
+            with self.local_config_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as exc:
+            messagebox.showwarning("Load Local Config", f"Could not load local configuration: {exc}")
+            return
+        if not isinstance(data, dict):
+            messagebox.showwarning(
+                "Load Local Config",
+                "Local configuration file is invalid; ignoring its contents.",
+            )
+            return
+
+        api_key_value = str(data.get("api_key", "")).strip()
+        downloads_dir_value = str(data.get("downloads_dir", "")).strip()
+
+        if api_key_value:
+            self.local_config_data["api_key"] = api_key_value
+        self.api_key_var.set(api_key_value)
+
+        if downloads_dir_value:
+            self.local_config_data["downloads_dir"] = downloads_dir_value
+            self.downloads_dir_var.set(downloads_dir_value)
+
+    def _write_local_config(self) -> None:
+        payload: Dict[str, Any] = {}
+        api_key_value = str(self.local_config_data.get("api_key", "")).strip()
+        downloads_dir_value = str(self.local_config_data.get("downloads_dir", "")).strip()
+
+        if api_key_value:
+            payload["api_key"] = api_key_value
+        if downloads_dir_value:
+            payload["downloads_dir"] = downloads_dir_value
+
+        if not payload:
+            if self.local_config_path.exists():
+                try:
+                    self.local_config_path.unlink()
+                except Exception as exc:
+                    messagebox.showwarning("Save Local Config", f"Could not remove local configuration: {exc}")
+            return
+
+        try:
+            with self.local_config_path.open("w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+        except Exception as exc:
+            messagebox.showwarning("Save Local Config", f"Could not save local configuration: {exc}")
+
     def _ensure_unique_path(self, path: Path) -> Path:
         if not path.exists():
             return path
@@ -7453,29 +7511,74 @@ class ReportApp:
             return
         try:
             with self.pattern_config_path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-                self.config_data = data
-                stored_widths = data.get("combined_base_column_widths")
-                if isinstance(stored_widths, dict):
-                    valid_widths: Dict[str, int] = {}
-                    for column_name in ("Type", "Category", "Item", "Note"):
-                        width_value = stored_widths.get(column_name)
-                        if isinstance(width_value, (int, float)) and width_value > 0:
-                            valid_widths[column_name] = int(width_value)
-                    self.combined_base_column_widths = valid_widths
-                else:
-                    self.combined_base_column_widths = {}
-                other_width_value = data.get("combined_other_column_width")
-                if isinstance(other_width_value, (int, float)) and other_width_value > 0:
-                    self.combined_other_column_width = int(other_width_value)
-                else:
-                    self.combined_other_column_width = None
-                zoom_value = data.get("combined_preview_zoom")
-                if isinstance(zoom_value, (int, float)):
-                    zoom = max(0.5, min(3.0, float(zoom_value)))
-                    self.combined_preview_zoom_var.set(zoom)
-                self._update_combined_preview_zoom_display()
-                self._load_type_category_colors_from_config(data)
+                raw_data = json.load(fh)
+        except Exception as exc:  # pragma: no cover - guard for IO issues
+            messagebox.showwarning("Load Patterns", f"Could not load pattern configuration: {exc}")
+            self._config_loaded = True
+            return
+
+        if not isinstance(raw_data, dict):
+            messagebox.showwarning(
+                "Load Patterns",
+                "Pattern configuration file is invalid; ignoring its contents.",
+            )
+            data: Dict[str, Any] = {}
+        else:
+            data = dict(raw_data)
+
+        migrated_local_settings = False
+        raw_api_key = data.pop("api_key", None)
+        if isinstance(raw_api_key, str):
+            trimmed_key = raw_api_key.strip()
+            if not self.api_key_var.get().strip():
+                self.api_key_var.set(trimmed_key)
+            if trimmed_key:
+                if self.local_config_data.get("api_key") != trimmed_key:
+                    self.local_config_data["api_key"] = trimmed_key
+                    migrated_local_settings = True
+            elif "api_key" in self.local_config_data:
+                self.local_config_data.pop("api_key", None)
+                migrated_local_settings = True
+
+        raw_downloads_dir = data.pop("downloads_dir", None)
+        if isinstance(raw_downloads_dir, str):
+            trimmed_dir = raw_downloads_dir.strip()
+            if not self.downloads_dir_var.get().strip() and trimmed_dir:
+                self.downloads_dir_var.set(trimmed_dir)
+            if trimmed_dir:
+                if self.local_config_data.get("downloads_dir") != trimmed_dir:
+                    self.local_config_data["downloads_dir"] = trimmed_dir
+                    migrated_local_settings = True
+            elif "downloads_dir" in self.local_config_data:
+                self.local_config_data.pop("downloads_dir", None)
+                migrated_local_settings = True
+
+        if migrated_local_settings:
+            self._write_local_config()
+
+        self.config_data = data
+        try:
+            stored_widths = data.get("combined_base_column_widths")
+            if isinstance(stored_widths, dict):
+                valid_widths: Dict[str, int] = {}
+                for column_name in ("Type", "Category", "Item", "Note"):
+                    width_value = stored_widths.get(column_name)
+                    if isinstance(width_value, (int, float)) and width_value > 0:
+                        valid_widths[column_name] = int(width_value)
+                self.combined_base_column_widths = valid_widths
+            else:
+                self.combined_base_column_widths = {}
+            other_width_value = data.get("combined_other_column_width")
+            if isinstance(other_width_value, (int, float)) and other_width_value > 0:
+                self.combined_other_column_width = int(other_width_value)
+            else:
+                self.combined_other_column_width = None
+            zoom_value = data.get("combined_preview_zoom")
+            if isinstance(zoom_value, (int, float)):
+                zoom = max(0.5, min(3.0, float(zoom_value)))
+                self.combined_preview_zoom_var.set(zoom)
+            self._update_combined_preview_zoom_display()
+            self._load_type_category_colors_from_config(data)
         except Exception as exc:  # pragma: no cover - guard for IO issues
             messagebox.showwarning("Load Patterns", f"Could not load pattern configuration: {exc}")
             self._config_loaded = True
@@ -7503,8 +7606,6 @@ class ReportApp:
         if "year_space_as_whitespace" in data:
             self.year_whitespace_as_space_var.set(bool(data["year_space_as_whitespace"]))
         self.last_company_preference = data.get("last_company", "")
-        if "api_key" in data:
-            self.api_key_var.set(str(data.get("api_key", "")))
         raw_model = data.get("openai_model")
         if isinstance(raw_model, str) and raw_model.strip():
             self.openai_model_var.set(raw_model.strip())
@@ -7688,15 +7789,17 @@ class ReportApp:
         return pattern.replace(" ", r"\s+")
 
     def _ensure_download_settings(self) -> None:
-        configured_dir = str(self.config_data.get("downloads_dir", "")).strip()
+        configured_dir = str(self.local_config_data.get("downloads_dir", "")).strip()
         if configured_dir:
             self.downloads_dir_var.set(configured_dir)
         elif not self.downloads_dir_var.get():
             default_download_dir = Path.home() / "Downloads"
             if default_download_dir.exists():
                 self.downloads_dir_var.set(str(default_download_dir))
-        if self.downloads_dir_var.get():
-            self.config_data["downloads_dir"] = self.downloads_dir_var.get()
+        current_dir = self.downloads_dir_var.get().strip()
+        if current_dir and self.local_config_data.get("downloads_dir") != current_dir:
+            self.local_config_data["downloads_dir"] = current_dir
+            self._write_local_config()
 
         configured_minutes = self.config_data.get("downloads_minutes")
         if isinstance(configured_minutes, int) and configured_minutes > 0:
@@ -7815,6 +7918,8 @@ class ReportApp:
 
     def _write_config(self) -> None:
         self._update_note_settings_config_entries()
+        self.config_data.pop("api_key", None)
+        self.config_data.pop("downloads_dir", None)
         model_name = self.openai_model_var.get().strip()
         if model_name and model_name != DEFAULT_OPENAI_MODEL:
             self.config_data["openai_model"] = model_name
