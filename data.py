@@ -4139,16 +4139,16 @@ class ReportApp:
 
                     multiply_button = ttk.Button(
                         controls_frame,
-                        text="×10",
-                        command=lambda t=tree: self._scale_scraped_table(t, 10.0),
+                        text="×1000",
+                        command=lambda t=tree: self._scale_scraped_table(t, 1000.0),
                         width=12,
                     )
                     multiply_button.grid(row=0, column=1, sticky="e", padx=(0, 4))
 
                     divide_button = ttk.Button(
                         controls_frame,
-                        text="÷10",
-                        command=lambda t=tree: self._scale_scraped_table(t, 0.1),
+                        text="÷1000",
+                        command=lambda t=tree: self._scale_scraped_table(t, 0.001),
                         width=12,
                     )
                     divide_button.grid(row=0, column=2, sticky="e", padx=(0, 4))
