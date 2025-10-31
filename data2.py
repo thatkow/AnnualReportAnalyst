@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 import re
 import shutil
@@ -27,6 +28,9 @@ try:
     from openai import OpenAI
 except ImportError:  # pragma: no cover - handled at runtime
     OpenAI = None  # type: ignore[assignment]
+
+
+logger = logging.getLogger(__name__)
 
 
 COLUMNS = ["Financial", "Income", "Shares"]
@@ -1436,13 +1440,6 @@ class ReportAppV2:
         if not company:
             messagebox.showinfo("Select Company", "Please choose a company before committing assignments.")
             return
-        if not messagebox.askyesno(
-            "Confirm Commit",
-            f"Commit the current assignments for {company}?",
-            parent=self.root,
-        ):
-            return
-
         if self.pdf_entries:
             for entry in self.pdf_entries:
                 record: Dict[str, Any] = self.assigned_pages.get(entry.path.name, {})
@@ -1546,12 +1543,14 @@ class ReportAppV2:
         client = OpenAI(api_key=sanitized_key)
         file_ids: List[str] = []
         for pdf_path in pdf_paths:
+            logger.info("AIScrape uploading %s", pdf_path)
             with pdf_path.open("rb") as pdf_file:
                 uploaded = client.files.create(file=pdf_file, purpose="assistants")
                 file_id = getattr(uploaded, "id", None)
                 if not file_id:
                     raise ValueError(f"Failed to upload {pdf_path.name} to OpenAI")
                 file_ids.append(str(file_id))
+                logger.info("AIScrape uploaded %s as file id %s", pdf_path.name, file_id)
 
         user_entries: List[Dict[str, Any]] = [
             {"type": "input_text", "text": prompt},
@@ -1562,6 +1561,11 @@ class ReportAppV2:
         ]
         user_entries.extend({"type": "input_file", "file_id": fid} for fid in file_ids)
 
+        logger.info(
+            "AIScrape submitting request (model=%s, files=%s)",
+            selected_model,
+            file_ids,
+        )
         response = client.responses.create(
             model=selected_model,
             input=
@@ -1573,6 +1577,7 @@ class ReportAppV2:
                 {"role": "user", "content": user_entries},
             ],
         )
+        logger.info("AIScrape response received (model=%s)", selected_model)
 
         text_output = getattr(response, "output_text", None)
         if text_output:
@@ -1675,6 +1680,13 @@ class ReportAppV2:
         for entry, category, pages, prompt_text, model_name in tasks:
             temp_pdf: Optional[Path] = None
             try:
+                logger.info(
+                    "AIScrape starting for %s | %s | pages=%s | model=%s",
+                    entry.path.name,
+                    category,
+                    pages,
+                    model_name,
+                )
                 temp_pdf = self._export_pages_to_pdf(entry.doc, pages)
                 if temp_pdf is None:
                     raise ValueError("Unable to prepare the selected pages for upload")
@@ -1683,6 +1695,13 @@ class ReportAppV2:
                     api_key, prompt_text, [temp_pdf], model_name
                 )
                 multiplier, rows = self._parse_multiplier_response(response_text)
+                logger.info(
+                    "AIScrape completed for %s | %s | multiplier=%s | rows=%s",
+                    entry.path.name,
+                    category,
+                    multiplier,
+                    len(rows),
+                )
 
                 target_dir = scrape_root / entry.path.stem
                 target_dir.mkdir(parents=True, exist_ok=True)
@@ -1700,6 +1719,9 @@ class ReportAppV2:
                 else:
                     csv_path.write_text("", encoding="utf-8")
             except Exception as exc:
+                logger.exception(
+                    "AIScrape failed for %s | %s", entry.path.name, category
+                )
                 errors.append(f"{entry.path.name} - {category}: {exc}")
             finally:
                 if temp_pdf is not None:
@@ -1914,6 +1936,7 @@ class ReportAppV2:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO)
     root = tk.Tk()
     app = ReportAppV2(root)
     root.protocol("WM_DELETE_WINDOW", root.destroy)
