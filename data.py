@@ -397,7 +397,10 @@ class ReportApp:
         if company_name:
             self.company_var.set(company_name)
         self.api_key_var = tk.StringVar(master=self.root)
-        self.openai_model_var = tk.StringVar(master=self.root, value=DEFAULT_OPENAI_MODEL)
+        self.openai_model_vars: Dict[str, tk.StringVar] = {
+            column: tk.StringVar(master=self.root, value=DEFAULT_OPENAI_MODEL)
+            for column in COLUMNS
+        }
         self.thumbnail_width_var = tk.IntVar(master=self.root, value=220)
         self.review_primary_match_filter_var = tk.BooleanVar(master=self.root, value=False)
         self.pattern_texts: Dict[str, tk.Text] = {}
@@ -1274,26 +1277,57 @@ class ReportApp:
         self._write_config()
 
     def _set_openai_model(self) -> None:
-        current_value = self.openai_model_var.get().strip() or DEFAULT_OPENAI_MODEL
         try:
-            value = simpledialog.askstring(
-                "OpenAI Model",
-                "Enter the OpenAI model name to use:",
-                parent=self.root,
-                initialvalue=current_value,
-            )
+            window = tk.Toplevel(self.root)
         except tk.TclError:
             return
-        if value is None:
-            return
-        cleaned = value.strip()
-        if not cleaned:
-            self.openai_model_var.set(DEFAULT_OPENAI_MODEL)
-            self.config_data.pop("openai_model", None)
-        else:
-            self.openai_model_var.set(cleaned)
-            self.config_data["openai_model"] = cleaned
-        self._write_config()
+
+        window.title("Configure OpenAI Models")
+        window.transient(self.root)
+        window.grab_set()
+
+        container = ttk.Frame(window, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(1, weight=1)
+
+        entry_vars: Dict[str, tk.StringVar] = {}
+        for row_index, column in enumerate(COLUMNS):
+            ttk.Label(container, text=f"{column} model:").grid(
+                row=row_index, column=0, sticky="w", padx=(0, 8), pady=4
+            )
+            current_value = self.openai_model_vars[column].get().strip() or DEFAULT_OPENAI_MODEL
+            var = tk.StringVar(master=window, value=current_value)
+            entry = ttk.Entry(container, textvariable=var, width=40)
+            entry.grid(row=row_index, column=1, sticky="ew", pady=4)
+            entry_vars[column] = var
+
+        button_row = ttk.Frame(container)
+        button_row.grid(row=len(COLUMNS), column=0, columnspan=2, pady=(12, 0), sticky="e")
+
+        def _restore_defaults() -> None:
+            for column in COLUMNS:
+                entry_vars[column].set(DEFAULT_OPENAI_MODEL)
+
+        def _on_save() -> None:
+            for column, var in entry_vars.items():
+                cleaned = var.get().strip()
+                if cleaned:
+                    self.openai_model_vars[column].set(cleaned)
+                else:
+                    self.openai_model_vars[column].set(DEFAULT_OPENAI_MODEL)
+            self._write_config()
+            window.destroy()
+
+        ttk.Button(button_row, text="Restore Defaults", command=_restore_defaults).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        ttk.Button(button_row, text="Cancel", command=window.destroy).pack(side=tk.RIGHT)
+        ttk.Button(button_row, text="Save", command=_on_save).pack(side=tk.RIGHT, padx=(0, 8))
+
+        try:
+            window.wait_window()
+        except tk.TclError:
+            window.destroy()
 
     def _normalize_note_binding_value(self, value: str) -> str:
         if not value:
@@ -7674,11 +7708,24 @@ class ReportApp:
         if "year_space_as_whitespace" in data:
             self.year_whitespace_as_space_var.set(bool(data["year_space_as_whitespace"]))
         self.last_company_preference = data.get("last_company", "")
-        raw_model = data.get("openai_model")
-        if isinstance(raw_model, str) and raw_model.strip():
-            self.openai_model_var.set(raw_model.strip())
+        raw_models = data.get("openai_models")
+        if isinstance(raw_models, dict):
+            for column in COLUMNS:
+                value = raw_models.get(column)
+                if isinstance(value, str) and value.strip():
+                    self.openai_model_vars[column].set(value.strip())
+                else:
+                    self.openai_model_vars[column].set(DEFAULT_OPENAI_MODEL)
         else:
-            self.openai_model_var.set(DEFAULT_OPENAI_MODEL)
+            raw_model = data.get("openai_model")
+            if isinstance(raw_model, str) and raw_model.strip():
+                cleaned_model = raw_model.strip()
+                for column in COLUMNS:
+                    self.openai_model_vars[column].set(cleaned_model)
+                data.setdefault("openai_models", {column: cleaned_model for column in COLUMNS})
+            else:
+                for column in COLUMNS:
+                    self.openai_model_vars[column].set(DEFAULT_OPENAI_MODEL)
         self._ensure_download_settings()
         self._apply_last_company_selection()
         self._config_loaded = True
@@ -7988,11 +8035,16 @@ class ReportApp:
         self._update_note_settings_config_entries()
         self.config_data.pop("api_key", None)
         self.config_data.pop("downloads_dir", None)
-        model_name = self.openai_model_var.get().strip()
-        if model_name and model_name != DEFAULT_OPENAI_MODEL:
-            self.config_data["openai_model"] = model_name
+        model_payload: Dict[str, str] = {}
+        for column, var in self.openai_model_vars.items():
+            cleaned = var.get().strip()
+            if cleaned and cleaned != DEFAULT_OPENAI_MODEL:
+                model_payload[column] = cleaned
+        if model_payload:
+            self.config_data["openai_models"] = model_payload
         else:
-            self.config_data.pop("openai_model", None)
+            self.config_data.pop("openai_models", None)
+        self.config_data.pop("openai_model", None)
         self.config_data["combined_base_column_widths"] = {
             column: int(width)
             for column, width in self.combined_base_column_widths.items()
@@ -8092,11 +8144,15 @@ class ReportApp:
             scrape_root,
         )
 
-        model_name = self.openai_model_var.get().strip() or DEFAULT_OPENAI_MODEL
+        model_map: Dict[str, str] = {}
+        for column in COLUMNS:
+            selected = self.openai_model_vars[column].get().strip()
+            model_map[column] = selected or DEFAULT_OPENAI_MODEL
+        assignment_summary = ", ".join(f"{column}:{model_map[column]}" for column in COLUMNS)
         logger.info(
-            "AIScrape model selected | model=%s | thread=%s",
-            model_name,
+            "AIScrape models selected | thread=%s | assignments=%s",
             threading.current_thread().name,
+            assignment_summary,
         )
 
         errors: List[str] = []
@@ -8183,16 +8239,18 @@ class ReportApp:
         jobs: List[ScrapeTask] = []
 
         def _run_job(job: ScrapeTask) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+            category_model = model_map.get(job.category, DEFAULT_OPENAI_MODEL)
             logger.info(
-                "AIScrape job started | entry=%s | category=%s | page_count=%d",
+                "AIScrape job started | entry=%s | category=%s | page_count=%d | model=%s",
                 job.entry_name,
                 job.category,
                 len(job.page_indexes),
+                category_model,
             )
             try:
                 response_text = self._call_openai(
                     api_key,
-                    model_name,
+                    category_model,
                     job.prompt_text,
                     job.page_text,
                 )
