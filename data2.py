@@ -295,12 +295,17 @@ class ReportAppV2:
         self.companies_dir = self.app_root / "companies"
         self.config_path = self.app_root / "data2_config.json"
         self.pattern_config_path = self.app_root / "pattern_config.json"
+        self.local_config_path = self.app_root / "local_config.json"
         self.prompts_dir = self.app_root / "prompts"
 
         self.company_var = tk.StringVar(master=self.root)
         self.folder_path = tk.StringVar(master=self.root)
         self.thumbnail_width_var = tk.IntVar(master=self.root, value=220)
         self.api_key_var = tk.StringVar(master=self.root)
+        self.local_config_data: Dict[str, Any] = {}
+        self._api_key_save_after: Optional[str] = None
+        self._suspend_api_key_save = False
+        self.api_key_var.trace_add("write", self._on_api_key_var_changed)
 
         self.pattern_texts: Dict[str, tk.Text] = {}
         self.case_insensitive_vars: Dict[str, tk.BooleanVar] = {}
@@ -325,6 +330,9 @@ class ReportAppV2:
         self.downloads_dir = tk.StringVar(master=self.root)
         self.recent_download_minutes = tk.IntVar(master=self.root, value=5)
 
+        self._suspend_api_key_save = True
+        self._load_local_config()
+        self._suspend_api_key_save = False
         self._build_ui()
         self._load_pattern_config()
         self._load_config()
@@ -619,6 +627,88 @@ class ReportAppV2:
                 model_name = models.get(column)
                 if isinstance(model_name, str) and model_name.strip():
                     var.set(model_name.strip())
+
+    def _load_local_config(self) -> None:
+        self.local_config_data = {}
+        if not self.local_config_path.exists():
+            return
+        try:
+            with self.local_config_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return
+
+        if not isinstance(data, dict):
+            return
+
+        self.local_config_data = data
+
+        api_key_value = data.get("api_key")
+        if isinstance(api_key_value, str):
+            trimmed = api_key_value.strip()
+            if trimmed:
+                self.api_key_var.set(trimmed)
+
+        downloads_dir_value = data.get("downloads_dir")
+        if isinstance(downloads_dir_value, str) and not self.downloads_dir.get().strip():
+            trimmed_downloads = downloads_dir_value.strip()
+            if trimmed_downloads:
+                self.downloads_dir.set(trimmed_downloads)
+
+    def _write_local_config(self) -> None:
+        data = dict(self.local_config_data)
+        api_key_value = self.api_key_var.get().strip()
+        if api_key_value:
+            data["api_key"] = api_key_value
+        else:
+            data.pop("api_key", None)
+
+        if not data:
+            if self.local_config_path.exists():
+                try:
+                    self.local_config_path.unlink()
+                except OSError:
+                    messagebox.showwarning(
+                        "Local Config", "Unable to remove local configuration file."
+                    )
+                    return
+        else:
+            try:
+                with self.local_config_path.open("w", encoding="utf-8") as fh:
+                    json.dump(data, fh, indent=2)
+            except OSError:
+                messagebox.showwarning(
+                    "Local Config", "Unable to save local configuration file."
+                )
+                return
+
+        self.local_config_data = data
+
+    def _persist_api_key(self, value: str) -> None:
+        trimmed = value.strip()
+        if trimmed:
+            if self.local_config_data.get("api_key") == trimmed:
+                return
+            self.local_config_data["api_key"] = trimmed
+        elif "api_key" in self.local_config_data:
+            self.local_config_data.pop("api_key", None)
+        else:
+            return
+        self._write_local_config()
+
+    def _on_api_key_var_changed(self, *_: Any) -> None:
+        if self._suspend_api_key_save:
+            return
+        if self._api_key_save_after is not None:
+            try:
+                self.root.after_cancel(self._api_key_save_after)
+            except Exception:
+                pass
+        self._api_key_save_after = self.root.after(600, self._flush_api_key_save)
+
+    def _flush_api_key_save(self) -> None:
+        self._api_key_save_after = None
+        self._persist_api_key(self.api_key_var.get())
 
     def _load_config(self) -> None:
         if not self.config_path.exists():
@@ -1179,19 +1269,19 @@ class ReportAppV2:
             if getattr(event, "delta", 0):
                 delta = -event.delta
                 step = int(delta / 120) or (1 if delta > 0 else -1)
-                canvas.yview_scroll(step, "units")
+                canvas.yview_scroll(step * 4, "units")
             else:
                 step = -1 if getattr(event, "num", 0) == 4 else 1
-                canvas.yview_scroll(step, "units")
+                canvas.yview_scroll(step * 4, "units")
 
         def _on_shift_mousewheel(event: tk.Event) -> None:
             if getattr(event, "delta", 0):
                 delta = -event.delta
                 step = int(delta / 120) or (1 if delta > 0 else -1)
-                canvas.xview_scroll(step, "units")
+                canvas.xview_scroll(step * 4, "units")
             else:
                 step = -1 if getattr(event, "num", 0) == 4 else 1
-                canvas.xview_scroll(step, "units")
+                canvas.xview_scroll(step * 4, "units")
 
         canvas.bind("<MouseWheel>", _on_mousewheel)
         canvas.bind("<Button-4>", _on_mousewheel)
@@ -1496,6 +1586,7 @@ class ReportAppV2:
             if hasattr(self, "api_key_entry"):
                 self.api_key_entry.focus_set()
             return
+        self._persist_api_key(api_key)
 
         prompts: Dict[str, str] = {}
         missing: List[str] = []
