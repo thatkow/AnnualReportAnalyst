@@ -19,7 +19,7 @@ from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from tkinter import font as tkfont
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:
     import fitz  # type: ignore[import-untyped]
@@ -42,7 +42,7 @@ from openai import (
     RateLimitError,
 )
 
-from analyst import FinanceDataset, FinancePlotFrame
+from analyst import FinanceDataset, FinancePlotFrame, _lookup_period_value
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -85,6 +85,7 @@ SPECIAL_KEYSYM_ALIASES = {
 }
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+SHARE_MULTIPLIER_FILENAME = "share_multipliers.csv"
 
 
 @dataclass
@@ -503,6 +504,7 @@ class ReportApp:
         self.note_display_labels: Dict[str, str] = DEFAULT_NOTE_LABELS.copy()
 
         self.chart_plot_frame: Optional[FinancePlotFrame] = None
+        self._share_multiplier_warning_state: Optional[Tuple[str, Tuple[str, ...]]] = None
 
         self._load_local_config()
         self._build_ui()
@@ -705,6 +707,13 @@ class ReportApp:
         notebook.add(chart_container, text="Chart")
         chart_content = ttk.Frame(chart_container, padding=8)
         chart_content.pack(fill=tk.BOTH, expand=True)
+        chart_controls = ttk.Frame(chart_content)
+        chart_controls.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(
+            chart_controls,
+            text="Configure Share Multipliers",
+            command=self._open_share_multiplier_dialog,
+        ).pack(side=tk.LEFT)
         chart_frame = FinancePlotFrame(chart_content)
         chart_frame.pack(fill=tk.BOTH, expand=True)
         chart_frame.set_display_mode(FinancePlotFrame.MODE_STACKED)
@@ -4957,6 +4966,170 @@ class ReportApp:
         self.combined_header_label_widgets.clear()
         self._refresh_chart_tab()
 
+    def _share_multiplier_path(self, company_root: Path) -> Path:
+        return company_root / SHARE_MULTIPLIER_FILENAME
+
+    def _current_combined_period_labels(self) -> List[str]:
+        periods: List[str] = []
+        for column_name in self.combined_ordered_columns:
+            if column_name in {"Type", "Category", "Item", "Note"}:
+                continue
+            if "." in column_name:
+                periods.append(column_name.split(".", 1)[1])
+            else:
+                periods.append(column_name)
+        return periods
+
+    def _write_share_multiplier_entries(
+        self, path: Path, entries: Sequence[Tuple[str, float]]
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(["Date", "Multiplier"])
+            for date_value, multiplier in entries:
+                writer.writerow([date_value, format(multiplier, "g")])
+
+    def _verify_share_multiplier_coverage(
+        self, company_root: Path, periods: Sequence[str]
+    ) -> None:
+        if not periods:
+            self._share_multiplier_warning_state = None
+            return
+        path = self._share_multiplier_path(company_root)
+        if not path.exists():
+            self._share_multiplier_warning_state = None
+            return
+        try:
+            mapping = FinanceDataset.parse_share_multiplier_file(path)
+        except ValueError as exc:
+            messagebox.showwarning(
+                "Share Multipliers",
+                f"The share multiplier file '{path.name}' is invalid:\n{exc}",
+            )
+            self._share_multiplier_warning_state = None
+            return
+        missing = [
+            period
+            for period in periods
+            if _lookup_period_value(mapping, period) is None
+        ]
+        if not missing:
+            self._share_multiplier_warning_state = None
+            return
+        warning_key = (str(company_root), tuple(missing))
+        if self._share_multiplier_warning_state == warning_key:
+            return
+        self._share_multiplier_warning_state = warning_key
+        formatted = "\n".join(missing)
+        messagebox.showwarning(
+            "Share Multipliers",
+            "Share multipliers are missing for the following periods:\n" + formatted,
+        )
+
+    def _open_share_multiplier_dialog(self) -> None:
+        company = self.company_var.get().strip()
+        if not company:
+            messagebox.showinfo(
+                "Share Multipliers", "Select a company before configuring share multipliers."
+            )
+            return
+        company_root = self.companies_dir / company
+        path = self._share_multiplier_path(company_root)
+        try:
+            initial_text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            initial_text = "Date,Multiplier\n"
+        except Exception as exc:
+            messagebox.showwarning(
+                "Share Multipliers",
+                f"Could not read the share multiplier file '{path.name}':\n{exc}",
+            )
+            initial_text = "Date,Multiplier\n"
+        if not initial_text.strip():
+            initial_text = "Date,Multiplier\n"
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Configure Share Multipliers")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        content = ttk.Frame(dialog, padding=(12, 12, 12, 0))
+        content.pack(fill=tk.BOTH, expand=True)
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(1, weight=1)
+
+        instructions = (
+            "Enter Date,Multiplier rows that match the periods in combined.csv."
+        )
+        ttk.Label(content, text=instructions, wraplength=420, justify=tk.LEFT).grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+
+        text_widget = tk.Text(content, wrap="none", width=60, height=15)
+        text_widget.insert("1.0", initial_text)
+        text_widget.configure(font=("TkFixedFont", 10))
+        text_widget.grid(row=1, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(content, orient=tk.VERTICAL, command=text_widget.yview)
+        y_scroll.grid(row=1, column=1, sticky="ns")
+        text_widget.configure(yscrollcommand=y_scroll.set)
+
+        x_scroll = ttk.Scrollbar(content, orient=tk.HORIZONTAL, command=text_widget.xview)
+        x_scroll.grid(row=2, column=0, sticky="ew")
+        text_widget.configure(xscrollcommand=x_scroll.set)
+
+        button_frame = ttk.Frame(dialog, padding=(12, 8, 12, 12))
+        button_frame.pack(fill=tk.X)
+
+        def _save() -> None:
+            csv_text = text_widget.get("1.0", "end-1c").strip()
+            if not csv_text:
+                if path.exists():
+                    try:
+                        path.unlink()
+                    except Exception as exc:
+                        messagebox.showwarning(
+                            "Share Multipliers", f"Could not remove share multipliers: {exc}"
+                        )
+                        return
+                dialog.destroy()
+                self._share_multiplier_warning_state = None
+                self._refresh_chart_tab()
+                return
+            try:
+                entries = FinanceDataset.parse_share_multiplier_rows(
+                    csv.reader(io.StringIO(csv_text))
+                )
+            except ValueError as exc:
+                messagebox.showwarning("Share Multipliers", str(exc))
+                return
+            except csv.Error as exc:
+                messagebox.showwarning("Share Multipliers", f"Unable to parse CSV data: {exc}")
+                return
+            try:
+                self._write_share_multiplier_entries(path, entries)
+            except Exception as exc:
+                messagebox.showwarning(
+                    "Share Multipliers", f"Could not save share multipliers: {exc}"
+                )
+                return
+            dialog.destroy()
+            self._share_multiplier_warning_state = None
+            periods = self._current_combined_period_labels()
+            if periods:
+                self._verify_share_multiplier_coverage(company_root, periods)
+            self._refresh_chart_tab()
+
+        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(
+            side=tk.RIGHT, padx=(8, 0)
+        )
+        ttk.Button(button_frame, text="Save", command=_save).pack(side=tk.RIGHT)
+
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.wait_visibility()
+        text_widget.focus_set()
+
     def _refresh_chart_tab(self) -> None:
         plot_frame = self.chart_plot_frame
         if plot_frame is None:
@@ -4988,6 +5161,13 @@ class ReportApp:
         except Exception:
             logger.exception("Unexpected error while rendering chart for %s", company)
             return
+        missing_share_multipliers = dataset.missing_share_multiplier_periods()
+        if missing_share_multipliers:
+            logger.warning(
+                "Share multipliers missing for %s periods: %s",
+                company,
+                ", ".join(missing_share_multipliers),
+            )
         if warning:
             logger.warning("Chart normalization warning for %s: %s", company, warning)
         plot_frame.set_display_mode(FinancePlotFrame.MODE_STACKED)
@@ -6381,6 +6561,13 @@ class ReportApp:
                 with metadata_path.open("w", encoding="utf-8") as fh:
                     json.dump(metadata, fh, indent=2)
                 logger.info("Exported combined metadata to %s", metadata_path)
+            header_row = csv_rows[0] if csv_rows else []
+            periods = [
+                value
+                for value in header_row
+                if value not in {"Type", "Category", "Item", "Note"}
+            ]
+            self._verify_share_multiplier_coverage(company_root, periods)
         except Exception:
             logger.exception("Failed to export final combined CSV to company root")
 
