@@ -375,6 +375,9 @@ class ScrapeResultPanel:
 
         table_container = ttk.Frame(self.frame)
         table_container.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        table_container.columnconfigure(0, weight=1)
+        table_container.rowconfigure(0, weight=1)
+
         self.current_columns: List[str] = list(SCRAPE_EXPECTED_COLUMNS)
         self._column_ids: List[str] = [f"col{idx}" for idx in range(len(self.current_columns))]
         self.table = ttk.Treeview(
@@ -384,10 +387,18 @@ class ScrapeResultPanel:
             height=SCRAPE_PLACEHOLDER_ROWS,
         )
         self._apply_table_columns(self.current_columns)
-        self.table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar = ttk.Scrollbar(table_container, orient=tk.VERTICAL, command=self.table.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.table.configure(yscrollcommand=scrollbar.set)
+        self.table.grid(row=0, column=0, sticky="nsew")
+
+        y_scrollbar = ttk.Scrollbar(table_container, orient=tk.VERTICAL, command=self.table.yview)
+        y_scrollbar.grid(row=0, column=1, sticky="ns")
+        x_scrollbar = ttk.Scrollbar(table_container, orient=tk.HORIZONTAL, command=self.table.xview)
+        x_scrollbar.grid(row=1, column=0, sticky="ew")
+        self.table.configure(yscrollcommand=y_scrollbar.set, xscrollcommand=x_scrollbar.set)
+
+        self.table.bind("<MouseWheel>", self._on_table_mousewheel, add="+")
+        self.table.bind("<Shift-MouseWheel>", self._on_table_shift_mousewheel, add="+")
+        self.table.bind("<Button-4>", self._on_table_linux_scroll, add="+")
+        self.table.bind("<Button-5>", self._on_table_linux_scroll, add="+")
         self.table.tag_configure("state-negated", background="#FFE6E6")
         self.table.tag_configure("state-excluded", background="#E8E8E8", foreground="#666666")
         self.table.tag_configure("state-share_count", background="#E0F3FF")
@@ -678,6 +689,27 @@ class ScrapeResultPanel:
         self.open_csv_button.configure(state="normal" if has_csv else "disabled")
         has_raw = self.raw_path.exists()
         self.view_raw_button.configure(state="normal" if has_raw else "disabled")
+
+    def _on_table_mousewheel(self, event: tk.Event) -> str:  # type: ignore[override]
+        if event.delta == 0:
+            return "break"
+        direction = -1 if event.delta > 0 else 1
+        self.table.yview_scroll(direction, "units")
+        return "break"
+
+    def _on_table_shift_mousewheel(self, event: tk.Event) -> str:  # type: ignore[override]
+        if event.delta == 0:
+            return "break"
+        direction = -1 if event.delta > 0 else 1
+        self.table.xview_scroll(direction, "units")
+        return "break"
+
+    def _on_table_linux_scroll(self, event: tk.Event) -> str:  # type: ignore[override]
+        if getattr(event, "num", None) == 4:
+            self.table.yview_scroll(-1, "units")
+        elif getattr(event, "num", None) == 5:
+            self.table.yview_scroll(1, "units")
+        return "break"
 
 
 @dataclass
@@ -2381,6 +2413,25 @@ class ReportAppV2:
                 header = header + [""] * (column_count - len(header))
         return multiplier, header, normalized_rows
 
+    def _csv_has_data(self, path: Path) -> bool:
+        try:
+            with path.open("r", encoding="utf-8", newline="") as fh:
+                reader = csv.reader(fh)
+                header_seen = False
+                for raw_row in reader:
+                    if not any(cell.strip() for cell in raw_row):
+                        continue
+                    normalized = [cell.strip() for cell in raw_row]
+                    if not header_seen:
+                        header_seen = True
+                        if normalize_header_row(normalized) is None:
+                            return True
+                        continue
+                    return True
+        except OSError:
+            return False
+        return False
+
     def _call_openai_with_pdfs(
         self, api_key: str, prompt: str, pdf_paths: List[Path], model_name: str
     ) -> str:
@@ -2581,6 +2632,28 @@ class ReportAppV2:
                 model_name = model_var.get() if model_var is not None else DEFAULT_OPENAI_MODEL
                 mode_var = self.scrape_upload_mode_vars.get(category)
                 upload_mode = mode_var.get() if mode_var is not None else "pdf"
+                target_dir = scrape_root / entry.path.stem
+                panel = self.scrape_panels.get((entry.path, category))
+
+                already_processed = False
+                if panel is not None:
+                    if panel.has_csv_data:
+                        already_processed = True
+                    elif panel.csv_path.exists() and self._csv_has_data(panel.csv_path):
+                        panel.load_from_files()
+                        already_processed = True
+                else:
+                    csv_path = target_dir / f"{category}.csv"
+                    if csv_path.exists() and self._csv_has_data(csv_path):
+                        already_processed = True
+
+                if already_processed:
+                    logger.info(
+                        "AIScrape skipping %s | %s (existing CSV)",
+                        entry.path.name,
+                        category,
+                    )
+                    continue
                 temp_pdf: Optional[Path] = None
                 text_payload: Optional[str] = None
                 if upload_mode == "text":
@@ -2597,7 +2670,7 @@ class ReportAppV2:
                             f"{entry.path.name} - {category}: Unable to prepare selected pages"
                         )
                         continue
-                target_dir = scrape_root / entry.path.stem
+                panel = self.scrape_panels.get((entry.path, category))
                 jobs.append(
                     ScrapeJob(
                         entry=entry,
@@ -2611,7 +2684,6 @@ class ReportAppV2:
                         text_payload=text_payload,
                     )
                 )
-                panel = self.scrape_panels.get((entry.path, category))
                 if panel is not None and not panel.has_csv_data:
                     panel.mark_loading()
 
