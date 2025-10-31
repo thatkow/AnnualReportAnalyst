@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import csv
 import json
 import os
@@ -8,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1347,12 +1347,30 @@ class ReportAppV2:
         except Exception:
             return None
 
-    def _render_page_bytes(self, doc: fitz.Document, page_index: int) -> Optional[bytes]:
+    def _export_pages_to_pdf(
+        self, doc: fitz.Document, pages: List[int]
+    ) -> Optional[Path]:
+        if not pages:
+            return None
+        temp_path: Optional[Path] = None
         try:
-            page = doc.load_page(page_index)
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-            return pix.tobytes("png")
+            unique_pages = sorted(dict.fromkeys(int(page) for page in pages))
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                temp_path = Path(tmp.name)
+            new_doc = fitz.open()
+            try:
+                for page_index in unique_pages:
+                    new_doc.insert_pdf(doc, from_page=page_index, to_page=page_index)
+                new_doc.save(temp_path)
+            finally:
+                new_doc.close()
+            return temp_path
         except Exception:
+            try:
+                if temp_path is not None:
+                    temp_path.unlink()
+            except Exception:
+                pass
             return None
 
     def _get_selected_page_index(self, entry: PDFEntry, category: str) -> Optional[int]:
@@ -1497,71 +1515,76 @@ class ReportAppV2:
             rows.append([segment.strip() for segment in line.split(",")])
         return multiplier, rows
 
-    def _call_openai_with_images(
-        self, api_key: str, prompt: str, images: List[bytes], model_name: str
+    def _call_openai_with_pdfs(
+        self, api_key: str, prompt: str, pdf_paths: List[Path], model_name: str
     ) -> str:
         sanitized_key = api_key.strip()
         if not sanitized_key:
             raise ValueError("API key is required")
-        if not images:
-            raise ValueError("No rendered pages available for OpenAI request")
+        if not pdf_paths:
+            raise ValueError("No PDF pages available for OpenAI request")
 
         selected_model = model_name.strip() or DEFAULT_OPENAI_MODEL
 
         client = OpenAI(api_key=sanitized_key)
-        user_content: List[Dict[str, Any]] = [
+        file_ids: List[str] = []
+        for pdf_path in pdf_paths:
+            with pdf_path.open("rb") as pdf_file:
+                uploaded = client.files.create(file=pdf_file, purpose="assistants")
+                file_id = getattr(uploaded, "id", None)
+                if not file_id:
+                    raise ValueError(f"Failed to upload {pdf_path.name} to OpenAI")
+                file_ids.append(str(file_id))
+
+        user_entries: List[Dict[str, Any]] = [
+            {"type": "input_text", "text": prompt},
             {
-                "type": "text",
-                "text": "Review the attached PDF page images and respond according to the prompt.",
-            }
+                "type": "input_text",
+                "text": "Parse the attached PDFs and return the multiplier value and CSV rows.",
+            },
         ]
-        for image in images:
-            user_content.append(
-                {
-                    "type": "input_image",
-                    "image": {
-                        "b64_json": base64.b64encode(image).decode("ascii"),
-                        "mime_type": "image/png",
-                    },
-                }
-            )
+        user_entries.extend({"type": "input_file", "file_id": fid} for fid in file_ids)
 
         response = client.responses.create(
             model=selected_model,
             input=
             [
-                {"role": "system", "content": [{"type": "text", "text": prompt}]},
-                {"role": "user", "content": user_content},
+                {
+                    "role": "system",
+                    "content": "You are a financial statement parser.",
+                },
+                {"role": "user", "content": user_entries},
             ],
         )
 
-        text_parts: List[str] = []
-        output = getattr(response, "output", None)
-        if output:
-            for item in output:
+        text_output = getattr(response, "output_text", None)
+        if text_output:
+            combined = str(text_output).strip()
+            if combined:
+                return combined
+
+        output_items = getattr(response, "output", None)
+        if output_items:
+            collected: List[str] = []
+            for item in output_items:
                 contents = getattr(item, "content", None)
                 if not contents:
                     continue
                 for content in contents:
                     if getattr(content, "type", None) == "output_text":
-                        text_parts.append(str(getattr(content, "text", "")))
+                        collected.append(str(getattr(content, "text", "")))
+            combined = "\n".join(part.strip() for part in collected if part).strip()
+            if combined:
+                return combined
 
-        if not text_parts:
-            fallback_text = getattr(response, "output_text", None)
-            if fallback_text:
-                text_parts.append(str(fallback_text))
-
-        if not text_parts and hasattr(response, "choices"):
+        if hasattr(response, "choices"):
             for choice in getattr(response, "choices", []):
                 message = getattr(choice, "message", None)
                 content = getattr(message, "content", None)
-                if isinstance(content, str):
-                    text_parts.append(content)
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
 
-        combined = "\n".join(part.strip() for part in text_parts if part).strip()
-        if not combined:
-            raise ValueError("OpenAI response did not contain any text output")
-        return combined
+        raise ValueError("OpenAI response did not contain any text output")
 
     def scrape_selected_pages(self) -> None:
         if OpenAI is None:
@@ -1633,17 +1656,14 @@ class ReportAppV2:
         completed = 0
 
         for entry, category, pages, prompt_text, model_name in tasks:
+            temp_pdf: Optional[Path] = None
             try:
-                rendered_pages: List[bytes] = []
-                for page_index in pages:
-                    data = self._render_page_bytes(entry.doc, page_index)
-                    if data is not None:
-                        rendered_pages.append(data)
-                if not rendered_pages:
-                    raise ValueError("Unable to render the selected pages")
+                temp_pdf = self._export_pages_to_pdf(entry.doc, pages)
+                if temp_pdf is None:
+                    raise ValueError("Unable to prepare the selected pages for upload")
 
-                response_text = self._call_openai_with_images(
-                    api_key, prompt_text, rendered_pages, model_name
+                response_text = self._call_openai_with_pdfs(
+                    api_key, prompt_text, [temp_pdf], model_name
                 )
                 multiplier, rows = self._parse_multiplier_response(response_text)
 
@@ -1665,6 +1685,11 @@ class ReportAppV2:
             except Exception as exc:
                 errors.append(f"{entry.path.name} - {category}: {exc}")
             finally:
+                if temp_pdf is not None:
+                    try:
+                        temp_pdf.unlink()
+                    except Exception:
+                        pass
                 completed += 1
                 self.scrape_progress.configure(value=completed)
                 self.root.update_idletasks()
