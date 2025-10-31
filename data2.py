@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import csv
 import json
 import os
 import re
@@ -21,6 +23,11 @@ except ImportError:  # pragma: no cover - handled at runtime
 
 from PIL import Image, ImageTk
 
+try:
+    from openai import OpenAI
+except ImportError:  # pragma: no cover - handled at runtime
+    OpenAI = None  # type: ignore[assignment]
+
 
 COLUMNS = ["Financial", "Income", "Shares"]
 DEFAULT_PATTERNS = {
@@ -29,6 +36,11 @@ DEFAULT_PATTERNS = {
     "Shares": ["Movements in issued capital"],
 }
 YEAR_DEFAULT_PATTERNS = [r"(\d{4})\s+Annual\s+Report"]
+
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+
+SHIFT_MASK = 0x0001
+CONTROL_MASK = 0x0004
 
 
 @dataclass
@@ -45,12 +57,18 @@ class PDFEntry:
     doc: fitz.Document
     matches: Dict[str, List[Match]] = field(default_factory=dict)
     current_index: Dict[str, Optional[int]] = field(default_factory=dict)
+    selected_pages: Dict[str, List[int]] = field(default_factory=dict)
     year: str = ""
 
     def __post_init__(self) -> None:
         for column in COLUMNS:
             self.matches.setdefault(column, [])
             self.current_index.setdefault(column, 0 if self.matches[column] else None)
+            self.selected_pages.setdefault(column, [])
+            index = self.current_index.get(column)
+            if index is not None and 0 <= index < len(self.matches[column]):
+                page_index = self.matches[column][index].page_index
+                self.selected_pages[column] = [page_index]
 
 
 class CollapsibleFrame(ttk.Frame):
@@ -83,6 +101,7 @@ class CollapsibleFrame(ttk.Frame):
 class MatchThumbnail:
     SELECTED_COLOR = "#1E90FF"
     UNSELECTED_COLOR = "#c3c3c3"
+    MULTI_COLOR = "#FFD666"
 
     def __init__(self, row: "CategoryRow", match_index: int, match: Match) -> None:
         self.row = row
@@ -129,12 +148,28 @@ class MatchThumbnail:
     def update_state(self) -> None:
         current_index = self.entry.current_index.get(self.row.category)
         selected = current_index == self.match_index
-        color = self.SELECTED_COLOR if selected else self.UNSELECTED_COLOR
-        thickness = 3 if selected else 1
+        multi_pages = self.match.page_index in self.entry.selected_pages.get(self.row.category, [])
+        if selected:
+            color = self.SELECTED_COLOR
+            thickness = 3
+        elif multi_pages:
+            color = self.MULTI_COLOR
+            thickness = 2
+        else:
+            color = self.UNSELECTED_COLOR
+            thickness = 1
         self.container.configure(highlightbackground=color, highlightcolor=color, highlightthickness=thickness)
 
-    def _on_click(self, _: tk.Event) -> None:  # type: ignore[override]
-        self.app.select_match(self.entry, self.row.category, self.match_index)
+    def _on_click(self, event: tk.Event) -> None:  # type: ignore[override]
+        try:
+            state = int(event.state)
+        except Exception:
+            state = 0
+        if state & CONTROL_MASK:
+            self.app.toggle_fullscreen_preview(self.entry, self.match.page_index)
+            return
+        extend = bool(state & SHIFT_MASK)
+        self.app.select_match(self.entry, self.row.category, self.match_index, extend_selection=extend)
 
     def _open_pdf(self, _: tk.Event) -> None:  # type: ignore[override]
         self.app.open_pdf(self.entry.path)
@@ -255,10 +290,12 @@ class ReportAppV2:
         self.app_root = Path(__file__).resolve().parent
         self.companies_dir = self.app_root / "companies"
         self.config_path = self.app_root / "data2_config.json"
+        self.prompts_dir = self.app_root / "prompts"
 
         self.company_var = tk.StringVar(master=self.root)
         self.folder_path = tk.StringVar(master=self.root)
         self.thumbnail_width_var = tk.IntVar(master=self.root, value=220)
+        self.api_key_var = tk.StringVar(master=self.root)
 
         self.pattern_texts: Dict[str, tk.Text] = {}
         self.case_insensitive_vars: Dict[str, tk.BooleanVar] = {}
@@ -271,6 +308,13 @@ class ReportAppV2:
         self.category_rows: Dict[Tuple[Path, str], CategoryRow] = {}
         self.assigned_pages: Dict[str, Dict[str, Any]] = {}
         self.assigned_pages_path: Optional[Path] = None
+        self.fullscreen_preview_window: Optional[tk.Toplevel] = None
+        self.fullscreen_preview_image: Optional[ImageTk.PhotoImage] = None
+        self.fullscreen_preview_entry: Optional[Path] = None
+        self.fullscreen_preview_page: Optional[int] = None
+
+        self.scrape_tree_items: Dict[str, Tuple[PDFEntry, str]] = {}
+        self.scrape_preview_images: List[ImageTk.PhotoImage] = []
 
         self.downloads_dir = tk.StringVar(master=self.root)
         self.recent_download_minutes = tk.IntVar(master=self.root, value=5)
@@ -301,7 +345,13 @@ class ReportAppV2:
 
         ttk.Button(top, text="Load PDFs", command=self.load_pdfs).pack(side=tk.LEFT)
 
-        options_section = CollapsibleFrame(self.root, "Patterns & Review Options", initially_open=False)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        review_tab = ttk.Frame(self.notebook)
+        self.notebook.add(review_tab, text="Review")
+
+        options_section = CollapsibleFrame(review_tab, "Patterns & Review Options", initially_open=False)
         options_section.pack(fill=tk.X, padx=8, pady=(4, 0))
 
         options_inner = ttk.Frame(options_section.content, padding=8)
@@ -367,7 +417,7 @@ class ReportAppV2:
         self.thumbnail_scale.pack(side=tk.LEFT, padx=8, fill=tk.X, expand=True)
         ttk.Label(review_controls, textvariable=self.thumbnail_width_var).pack(side=tk.LEFT)
 
-        review_container = ttk.Frame(self.root)
+        review_container = ttk.Frame(review_tab)
         review_container.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
         self.review_canvas = tk.Canvas(review_container)
@@ -386,10 +436,54 @@ class ReportAppV2:
             lambda event: self.review_canvas.itemconfigure(self.canvas_window, width=event.width),
         )
 
-        actions_frame = ttk.Frame(self.root, padding=8)
+        actions_frame = ttk.Frame(review_tab, padding=8)
         actions_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
         self.commit_button = ttk.Button(actions_frame, text="Commit", command=self.commit_assignments)
         self.commit_button.pack(side=tk.RIGHT)
+
+        scrape_tab = ttk.Frame(self.notebook)
+        self.notebook.add(scrape_tab, text="Scrape")
+
+        scrape_controls = ttk.Frame(scrape_tab, padding=8)
+        scrape_controls.pack(fill=tk.X)
+        ttk.Label(scrape_controls, text="API key:").pack(side=tk.LEFT)
+        self.api_key_entry = ttk.Entry(scrape_controls, textvariable=self.api_key_var, width=40, show="*")
+        self.api_key_entry.pack(side=tk.LEFT, padx=(4, 8))
+        self.scrape_button = ttk.Button(scrape_controls, text="AIScrape", command=self.scrape_selected_pages)
+        self.scrape_button.pack(side=tk.LEFT)
+        self.scrape_progress = ttk.Progressbar(scrape_controls, orient=tk.HORIZONTAL, mode="determinate", length=200)
+        self.scrape_progress.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
+
+        scrape_body = ttk.Frame(scrape_tab, padding=(8, 0, 8, 8))
+        scrape_body.pack(fill=tk.BOTH, expand=True)
+
+        preview_container = ttk.Frame(scrape_body)
+        preview_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.scrape_preview_canvas = tk.Canvas(preview_container)
+        self.scrape_preview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        preview_scrollbar = ttk.Scrollbar(preview_container, orient=tk.VERTICAL, command=self.scrape_preview_canvas.yview)
+        preview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.scrape_preview_canvas.configure(yscrollcommand=preview_scrollbar.set)
+        self.scrape_preview_inner = ttk.Frame(self.scrape_preview_canvas)
+        self.scrape_preview_window = self.scrape_preview_canvas.create_window((0, 0), window=self.scrape_preview_inner, anchor="nw")
+        self.scrape_preview_inner.bind(
+            "<Configure>",
+            lambda _e: self.scrape_preview_canvas.configure(scrollregion=self.scrape_preview_canvas.bbox("all")),
+        )
+        self.scrape_preview_canvas.bind(
+            "<Configure>",
+            lambda event: self.scrape_preview_canvas.itemconfigure(self.scrape_preview_window, width=event.width),
+        )
+
+        tree_container = ttk.Frame(scrape_body, padding=(8, 0, 0, 0))
+        tree_container.pack(side=tk.LEFT, fill=tk.BOTH)
+        self.scrape_tree = ttk.Treeview(tree_container, show="tree")
+        self.scrape_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scrollbar = ttk.Scrollbar(tree_container, orient=tk.VERTICAL, command=self.scrape_tree.yview)
+        tree_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.scrape_tree.configure(yscrollcommand=tree_scrollbar.set)
+        self.scrape_tree.bind("<<TreeviewSelect>>", self._on_scrape_tree_select)
 
     def _maximize_window(self) -> None:
         try:
@@ -579,6 +673,8 @@ class ReportAppV2:
         self.category_rows.clear()
         for child in self.inner_frame.winfo_children():
             child.destroy()
+        self._refresh_scrape_tree()
+        self._clear_scrape_preview()
 
     def load_pdfs(self) -> None:
         folder = self.folder_path.get()
@@ -684,6 +780,40 @@ class ReportAppV2:
                     selected_index = None
             if selected_index is not None:
                 entry.current_index[category] = selected_index
+                entry.selected_pages[category] = [matches[selected_index].page_index]
+
+        multi_map = record.get("multi_selections")
+        if isinstance(multi_map, dict):
+            for category, values in multi_map.items():
+                if not isinstance(values, list):
+                    continue
+                valid_pages: List[int] = []
+                matches = entry.matches.setdefault(category, [])
+                for value in values:
+                    try:
+                        page_index = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if page_index < 0 or page_index >= total_pages:
+                        continue
+                    if all(match.page_index != page_index for match in matches):
+                        matches.append(Match(page_index=page_index, source="manual"))
+                    valid_pages.append(page_index)
+                if matches:
+                    matches.sort(key=lambda m: m.page_index)
+                if valid_pages:
+                    unique_sorted = sorted(dict.fromkeys(valid_pages))
+                    entry.selected_pages[category] = unique_sorted
+                    if unique_sorted:
+                        first_page = unique_sorted[0]
+                        try:
+                            first_index = next(
+                                idx for idx, match in enumerate(matches) if match.page_index == first_page
+                            )
+                        except StopIteration:
+                            first_index = None
+                        if first_index is not None:
+                            entry.current_index[category] = first_index
 
     def _rebuild_review_grid(self) -> None:
         for child in self.inner_frame.winfo_children():
@@ -720,6 +850,77 @@ class ReportAppV2:
                 row.refresh()
 
         self.inner_frame.columnconfigure(0, weight=1)
+        self._refresh_scrape_tree()
+
+    def _refresh_scrape_tree(self) -> None:
+        if not hasattr(self, "scrape_tree"):
+            return
+        for item in self.scrape_tree.get_children(""):
+            self.scrape_tree.delete(item)
+        self.scrape_tree_items.clear()
+        if not self.pdf_entries:
+            self._clear_scrape_preview()
+            return
+        for entry in self.pdf_entries:
+            parent_id = self.scrape_tree.insert("", "end", text=entry.path.name)
+            self.scrape_tree.item(parent_id, open=True)
+            for category in COLUMNS:
+                pages = self._get_selected_pages(entry, category)
+                if pages:
+                    page_text = ", ".join(str(page + 1) for page in pages)
+                    label = f"{category}: {page_text}"
+                else:
+                    label = f"{category}: none"
+                item_id = self.scrape_tree.insert(parent_id, "end", text=label)
+                self.scrape_tree_items[item_id] = (entry, category)
+
+    def _clear_scrape_preview(self) -> None:
+        if not hasattr(self, "scrape_preview_inner"):
+            return
+        for child in self.scrape_preview_inner.winfo_children():
+            child.destroy()
+        self.scrape_preview_images.clear()
+        bbox = self.scrape_preview_canvas.bbox("all")
+        if bbox is None:
+            self.scrape_preview_canvas.configure(scrollregion=(0, 0, 0, 0))
+        else:
+            self.scrape_preview_canvas.configure(scrollregion=bbox)
+
+    def _on_scrape_tree_select(self, _: tk.Event) -> None:  # type: ignore[override]
+        selection = self.scrape_tree.selection()
+        if not selection:
+            return
+        item_id = selection[0]
+        mapping = self.scrape_tree_items.get(item_id)
+        if mapping is None:
+            return
+        entry, category = mapping
+        self._update_scrape_preview(entry, category)
+
+    def _update_scrape_preview(self, entry: PDFEntry, category: str) -> None:
+        self._clear_scrape_preview()
+        pages = self._get_selected_pages(entry, category)
+        if not pages:
+            ttk.Label(self.scrape_preview_inner, text="No pages selected for this category.").pack(
+                anchor="w", padx=8, pady=8
+            )
+            return
+
+        display_width = max(self.thumbnail_width_var.get(), 360)
+        for page_index in pages:
+            frame = ttk.Frame(self.scrape_preview_inner, padding=8)
+            frame.pack(fill=tk.X, expand=True)
+            ttk.Label(frame, text=f"Page {page_index + 1}", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+            photo = self.render_page(entry.doc, page_index, display_width)
+            if photo is not None:
+                self.scrape_preview_images.append(photo)
+                ttk.Label(frame, image=photo).pack(anchor="center", pady=(4, 0))
+            else:
+                ttk.Label(frame, text="Preview unavailable").pack(anchor="w", pady=(4, 0))
+        bbox = self.scrape_preview_canvas.bbox("all")
+        if bbox is not None:
+            self.scrape_preview_canvas.configure(scrollregion=bbox)
+        self.scrape_preview_canvas.yview_moveto(0)
 
     # ------------------------------------------------------------------ Interactions
     def _bind_review_mousewheel(self, _: tk.Event) -> None:  # type: ignore[override]
@@ -748,15 +949,32 @@ class ReportAppV2:
         for row in self.category_rows.values():
             row.set_thumbnail_width(width)
 
-    def select_match(self, entry: PDFEntry, category: str, index: int) -> None:
+    def select_match(
+        self,
+        entry: PDFEntry,
+        category: str,
+        index: int,
+        *,
+        extend_selection: bool = False,
+    ) -> None:
         matches = entry.matches.get(category, [])
         if not matches:
             return
         index = max(0, min(index, len(matches) - 1))
         entry.current_index[category] = index
+        match = matches[index]
+        page_index = match.page_index
+        if extend_selection:
+            pages = entry.selected_pages.setdefault(category, [])
+            if page_index not in pages:
+                pages.append(page_index)
+                pages.sort()
+        else:
+            entry.selected_pages[category] = [page_index]
         row = self.category_rows.get((entry.path, category))
         if row is not None:
             row.update_selection()
+        self._refresh_scrape_tree()
 
     def manual_select(self, entry: PDFEntry, category: str) -> None:
         max_pages = len(entry.doc)
@@ -778,9 +996,11 @@ class ReportAppV2:
             (idx for idx, m in enumerate(entry.matches[category]) if m.page_index == page_index),
             entry.current_index[category],
         )
+        entry.selected_pages[category] = [page_index]
         row = self.category_rows.get((entry.path, category))
         if row is not None:
             row.refresh()
+        self._refresh_scrape_tree()
 
     def open_pdf(self, path: Path) -> None:
         try:
@@ -793,12 +1013,66 @@ class ReportAppV2:
         except Exception:
             messagebox.showwarning("Open PDF", "Unable to open the PDF file with the default viewer.")
 
+    def toggle_fullscreen_preview(self, entry: PDFEntry, page_index: int) -> None:
+        if self.fullscreen_preview_window is not None and self.fullscreen_preview_window.winfo_exists():
+            if (
+                self.fullscreen_preview_entry == entry.path
+                and self.fullscreen_preview_page == page_index
+            ):
+                self._close_fullscreen_preview()
+                return
+            self._close_fullscreen_preview()
+        self._open_fullscreen_preview(entry, page_index)
+
+    def _open_fullscreen_preview(self, entry: PDFEntry, page_index: int) -> None:
+        window = tk.Toplevel(self.root)
+        window.title(f"{entry.path.name} - Page {page_index + 1}")
+        try:
+            window.attributes("-fullscreen", True)
+        except tk.TclError:
+            try:
+                window.state("zoomed")
+            except tk.TclError:
+                screen_width = window.winfo_screenwidth()
+                screen_height = window.winfo_screenheight()
+                try:
+                    window.geometry(f"{screen_width}x{screen_height}")
+                except tk.TclError:
+                    pass
+
+        window.bind("<Escape>", lambda _e: self._close_fullscreen_preview())
+        window.bind("<Button-1>", lambda _e: self._close_fullscreen_preview())
+
+        screen_width = window.winfo_screenwidth()
+        target_width = max(screen_width - 80, 400)
+        photo = self.render_page(entry.doc, page_index, target_width)
+        if photo is None:
+            label = ttk.Label(window, text="Preview unavailable")
+            label.pack(expand=True, fill=tk.BOTH, padx=24, pady=24)
+            self.fullscreen_preview_image = None
+        else:
+            label = ttk.Label(window, image=photo)
+            label.pack(expand=True, fill=tk.BOTH)
+            self.fullscreen_preview_image = photo
+
+        self.fullscreen_preview_window = window
+        self.fullscreen_preview_entry = entry.path
+        self.fullscreen_preview_page = page_index
+
+    def _close_fullscreen_preview(self) -> None:
+        if self.fullscreen_preview_window is not None and self.fullscreen_preview_window.winfo_exists():
+            self.fullscreen_preview_window.destroy()
+        self.fullscreen_preview_window = None
+        self.fullscreen_preview_image = None
+        self.fullscreen_preview_entry = None
+        self.fullscreen_preview_page = None
+
     def render_page(
         self,
         doc: fitz.Document,
         page_index: int,
         target_width: int,
-    ) -> Optional[ImageTk.PhotoImage]:
+        ) -> Optional[ImageTk.PhotoImage]:
         try:
             page = doc.load_page(page_index)
             zoom_matrix = fitz.Matrix(1.5, 1.5)
@@ -815,12 +1089,32 @@ class ReportAppV2:
         except Exception:
             return None
 
+    def _render_page_bytes(self, doc: fitz.Document, page_index: int) -> Optional[bytes]:
+        try:
+            page = doc.load_page(page_index)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            return pix.tobytes("png")
+        except Exception:
+            return None
+
     def _get_selected_page_index(self, entry: PDFEntry, category: str) -> Optional[int]:
         matches = entry.matches.get(category, [])
         index = entry.current_index.get(category)
         if index is None or index < 0 or index >= len(matches):
             return None
         return matches[index].page_index
+
+    def _get_selected_pages(self, entry: PDFEntry, category: str) -> List[int]:
+        pages = entry.selected_pages.get(category, [])
+        if pages:
+            return sorted(dict.fromkeys(int(page) for page in pages))
+        page_index = self._get_selected_page_index(entry, category)
+        if page_index is None:
+            return []
+        return [int(page_index)]
+
+    def _get_multi_page_indexes(self, entry: PDFEntry, category: str) -> List[int]:
+        return self._get_selected_pages(entry, category)
 
     def _write_assigned_pages(self) -> bool:
         if self.assigned_pages_path is None:
@@ -870,6 +1164,10 @@ class ReportAppV2:
                 if not isinstance(selections, dict):
                     selections = {}
 
+                multi = record.get("multi_selections")
+                if not isinstance(multi, dict):
+                    multi = {}
+
                 for category in COLUMNS:
                     page_index = self._get_selected_page_index(entry, category)
                     if page_index is None:
@@ -877,10 +1175,21 @@ class ReportAppV2:
                     else:
                         selections[category] = int(page_index)
 
+                    multi_pages = self._get_multi_page_indexes(entry, category)
+                    if multi_pages:
+                        multi[category] = [int(idx) for idx in multi_pages]
+                    else:
+                        multi.pop(category, None)
+
                 if selections:
                     record["selections"] = selections
                 else:
                     record.pop("selections", None)
+
+                if multi:
+                    record["multi_selections"] = multi
+                else:
+                    record.pop("multi_selections", None)
 
                 if record:
                     self.assigned_pages[entry.path.name] = record
@@ -889,6 +1198,218 @@ class ReportAppV2:
 
         if self._write_assigned_pages():
             messagebox.showinfo("Commit Assignments", "Assignments saved.")
+
+    # ------------------------------------------------------------------ Scrape
+    def _get_prompt_text(self, company: str, category: str) -> Optional[str]:
+        candidate_paths: List[Path] = []
+        if company:
+            company_dir = self.companies_dir / company
+            candidate_paths.extend(
+                [
+                    company_dir / "prompts" / f"{category}.txt",
+                    company_dir / "prompt" / f"{category}.txt",
+                ]
+            )
+        candidate_paths.append(self.prompts_dir / f"{category}.txt")
+        for path in candidate_paths:
+            if path.exists():
+                try:
+                    return path.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+        return None
+
+    def _strip_code_fence(self, text: str) -> str:
+        fence = re.search(r"```(?:[^`\n]*)\n([\s\S]*?)```", text)
+        if fence:
+            return fence.group(1)
+        return text
+
+    def _parse_multiplier_response(self, response: str) -> Tuple[Optional[str], List[List[str]]]:
+        cleaned = self._strip_code_fence(response)
+        lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+        multiplier: Optional[str] = None
+        rows: List[List[str]] = []
+        for line in lines:
+            if multiplier is None and line.lower().startswith("multiplier"):
+                match_obj = re.search(r"([-+]?\d[\d,]*\.?\d*)", line)
+                if match_obj:
+                    multiplier = match_obj.group(1)
+                continue
+            rows.append([segment.strip() for segment in line.split(",")])
+        return multiplier, rows
+
+    def _call_openai_with_images(self, api_key: str, prompt: str, images: List[bytes]) -> str:
+        sanitized_key = api_key.strip()
+        if not sanitized_key:
+            raise ValueError("API key is required")
+        if not images:
+            raise ValueError("No rendered pages available for OpenAI request")
+
+        client = OpenAI(api_key=sanitized_key)
+        user_content: List[Dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": "Review the attached PDF page images and respond according to the prompt.",
+            }
+        ]
+        for image in images:
+            user_content.append(
+                {
+                    "type": "input_image",
+                    "image": {
+                        "b64_json": base64.b64encode(image).decode("ascii"),
+                        "mime_type": "image/png",
+                    },
+                }
+            )
+
+        response = client.responses.create(
+            model=DEFAULT_OPENAI_MODEL,
+            input=
+            [
+                {"role": "system", "content": [{"type": "text", "text": prompt}]},
+                {"role": "user", "content": user_content},
+            ],
+        )
+
+        text_parts: List[str] = []
+        output = getattr(response, "output", None)
+        if output:
+            for item in output:
+                contents = getattr(item, "content", None)
+                if not contents:
+                    continue
+                for content in contents:
+                    if getattr(content, "type", None) == "output_text":
+                        text_parts.append(str(getattr(content, "text", "")))
+
+        if not text_parts:
+            fallback_text = getattr(response, "output_text", None)
+            if fallback_text:
+                text_parts.append(str(fallback_text))
+
+        if not text_parts and hasattr(response, "choices"):
+            for choice in getattr(response, "choices", []):
+                message = getattr(choice, "message", None)
+                content = getattr(message, "content", None)
+                if isinstance(content, str):
+                    text_parts.append(content)
+
+        combined = "\n".join(part.strip() for part in text_parts if part).strip()
+        if not combined:
+            raise ValueError("OpenAI response did not contain any text output")
+        return combined
+
+    def scrape_selected_pages(self) -> None:
+        if OpenAI is None:
+            messagebox.showwarning(
+                "OpenAI Required",
+                "Install the 'openai' package to use AIScrape.",
+            )
+            return
+
+        if not self.pdf_entries:
+            messagebox.showinfo("AIScrape", "Load PDFs before running AIScrape.")
+            return
+
+        company = self.company_var.get().strip()
+        if not company:
+            messagebox.showinfo("AIScrape", "Select a company before running AIScrape.")
+            return
+
+        api_key = self.api_key_var.get().strip()
+        if not api_key:
+            messagebox.showwarning("AIScrape", "Enter an OpenAI API key before running AIScrape.")
+            if hasattr(self, "api_key_entry"):
+                self.api_key_entry.focus_set()
+            return
+
+        prompts: Dict[str, str] = {}
+        missing: List[str] = []
+        for category in COLUMNS:
+            prompt_text = self._get_prompt_text(company, category)
+            if prompt_text is None:
+                missing.append(category)
+            else:
+                prompts[category] = prompt_text
+
+        if missing:
+            messagebox.showerror(
+                "AIScrape", f"Prompt files not found for: {', '.join(missing)}."
+            )
+            return
+
+        tasks: List[Tuple[PDFEntry, str, List[int], str]] = []
+        for entry in self.pdf_entries:
+            for category in COLUMNS:
+                pages = self._get_selected_pages(entry, category)
+                if not pages:
+                    continue
+                prompt_text = prompts.get(category)
+                if not prompt_text:
+                    continue
+                tasks.append((entry, category, pages, prompt_text))
+
+        if not tasks:
+            messagebox.showinfo("AIScrape", "Select pages before running AIScrape.")
+            return
+
+        self.scrape_button.configure(state="disabled")
+        self.scrape_progress.configure(value=0, maximum=len(tasks))
+        self.root.update_idletasks()
+
+        scrape_root = self.companies_dir / company / "openapiscrape"
+        scrape_root.mkdir(parents=True, exist_ok=True)
+
+        errors: List[str] = []
+        completed = 0
+
+        for entry, category, pages, prompt_text in tasks:
+            try:
+                rendered_pages: List[bytes] = []
+                for page_index in pages:
+                    data = self._render_page_bytes(entry.doc, page_index)
+                    if data is not None:
+                        rendered_pages.append(data)
+                if not rendered_pages:
+                    raise ValueError("Unable to render the selected pages")
+
+                response_text = self._call_openai_with_images(api_key, prompt_text, rendered_pages)
+                multiplier, rows = self._parse_multiplier_response(response_text)
+
+                target_dir = scrape_root / entry.path.stem
+                target_dir.mkdir(parents=True, exist_ok=True)
+
+                if multiplier is not None:
+                    multiplier_path = target_dir / f"{category}_multiplier.txt"
+                    multiplier_path.write_text(str(multiplier).strip(), encoding="utf-8")
+
+                csv_path = target_dir / f"{category}.csv"
+                if rows:
+                    with csv_path.open("w", encoding="utf-8", newline="") as fh:
+                        writer = csv.writer(fh)
+                        for row in rows:
+                            writer.writerow(row)
+                else:
+                    csv_path.write_text("", encoding="utf-8")
+            except Exception as exc:
+                errors.append(f"{entry.path.name} - {category}: {exc}")
+            finally:
+                completed += 1
+                self.scrape_progress.configure(value=completed)
+                self.root.update_idletasks()
+
+        self.scrape_button.configure(state="normal")
+        self.scrape_progress.configure(value=0)
+
+        if errors:
+            messagebox.showerror("AIScrape", "\n".join(errors))
+        else:
+            messagebox.showinfo(
+                "AIScrape",
+                f"Saved {len(tasks)} OpenAI response(s) to 'openapiscrape'.",
+            )
 
     # ------------------------------------------------------------------ Company creation
     def _set_downloads_dir(self) -> None:
