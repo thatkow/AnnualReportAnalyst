@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import logging
 import os
@@ -307,6 +308,7 @@ class ScrapeResultPanel:
         self.target_dir = target_dir
         self.csv_path = target_dir / f"{category}.csv"
         self.multiplier_path = target_dir / f"{category}_multiplier.txt"
+        self.raw_path = target_dir / f"{category}_raw.txt"
         self.has_csv_data = False
         self._updating_multiplier = False
 
@@ -339,6 +341,13 @@ class ScrapeResultPanel:
         self.multiplier_entry.bind("<Return>", self._on_multiplier_submit)
         self.multiplier_entry.bind("<KP_Enter>", self._on_multiplier_submit)
 
+        actions_row = ttk.Frame(self.frame)
+        actions_row.pack(fill=tk.X, pady=(6, 0))
+        self.open_csv_button = ttk.Button(actions_row, text="Open CSV", command=self.open_csv)
+        self.open_csv_button.pack(side=tk.LEFT)
+        self.view_raw_button = ttk.Button(actions_row, text="View Raw", command=self.view_raw_text)
+        self.view_raw_button.pack(side=tk.LEFT, padx=(6, 0))
+
         table_container = ttk.Frame(self.frame)
         table_container.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
         self.table = ttk.Treeview(
@@ -367,6 +376,7 @@ class ScrapeResultPanel:
             widget.bind("<Button-1>", self._handle_activate, add="+")
 
         self.set_placeholder("-")
+        self._update_action_states()
 
     def destroy(self) -> None:
         self.container.destroy()
@@ -375,12 +385,14 @@ class ScrapeResultPanel:
         rows = [[fill for _ in SCRAPE_EXPECTED_COLUMNS] for _ in range(SCRAPE_PLACEHOLDER_ROWS)]
         self._populate(rows)
         self.has_csv_data = False
+        self._update_action_states()
 
     def mark_loading(self) -> None:
         if self.has_csv_data:
             return
         rows = [["?" for _ in SCRAPE_EXPECTED_COLUMNS] for _ in range(SCRAPE_PLACEHOLDER_ROWS)]
         self._populate(rows)
+        self._update_action_states()
 
     def load_from_files(self) -> None:
         rows: List[List[str]] = []
@@ -408,6 +420,7 @@ class ScrapeResultPanel:
             self._set_multiplier(text)
         else:
             self._set_multiplier("")
+        self._update_action_states()
 
     def set_multiplier(self, value: str) -> None:
         self._set_multiplier(value)
@@ -439,6 +452,21 @@ class ScrapeResultPanel:
         thickness = 2 if active else 1
         self.container.configure(highlightbackground=color, highlightcolor=color, highlightthickness=thickness)
 
+    def open_csv(self) -> None:
+        if not self.csv_path.exists():
+            messagebox.showinfo("Open CSV", "CSV file not available yet.")
+            return
+        self.app.open_file_path(self.csv_path)
+
+    def view_raw_text(self) -> None:
+        if not self.raw_path.exists():
+            messagebox.showinfo("Raw Response", "Raw response not available yet.")
+            return
+        self.app.show_raw_text_dialog(
+            self.raw_path,
+            f"{self.entry.path.name} – {self.category} raw response",
+        )
+
     def _populate(self, rows: List[List[str]]) -> None:
         for item in self.table.get_children(""):
             self.table.delete(item)
@@ -459,6 +487,12 @@ class ScrapeResultPanel:
         self.save_multiplier()
         return "break"
 
+    def _update_action_states(self) -> None:
+        has_csv = self.csv_path.exists()
+        self.open_csv_button.configure(state="normal" if has_csv else "disabled")
+        has_raw = self.raw_path.exists()
+        self.view_raw_button.configure(state="normal" if has_raw else "disabled")
+
 
 @dataclass
 class ScrapeJob:
@@ -467,8 +501,10 @@ class ScrapeJob:
     pages: List[int]
     prompt_text: str
     model_name: str
-    temp_pdf: Path
+    upload_mode: str
     target_dir: Path
+    temp_pdf: Optional[Path] = None
+    text_payload: Optional[str] = None
 
 
 class ReportAppV2:
@@ -508,6 +544,7 @@ class ReportAppV2:
         self.year_case_insensitive_var = tk.BooleanVar(master=self.root, value=True)
         self.year_whitespace_as_space_var = tk.BooleanVar(master=self.root, value=True)
         self.openai_model_vars: Dict[str, tk.StringVar] = {}
+        self.scrape_upload_mode_vars: Dict[str, tk.StringVar] = {}
 
         self.pdf_entries: List[PDFEntry] = []
         self.category_rows: Dict[Tuple[Path, str], CategoryRow] = {}
@@ -525,6 +562,9 @@ class ReportAppV2:
         self.scrape_preview_entry: Optional[PDFEntry] = None
         self.scrape_preview_category: Optional[str] = None
         self.scrape_preview_cycle_index: int = 0
+        self.scrape_preview_last_width: int = 0
+        self.scrape_preview_render_width: int = 0
+        self.scrape_preview_render_page: Optional[int] = None
         self._scrape_thread: Optional[threading.Thread] = None
 
         self.downloads_dir = tk.StringVar(master=self.root)
@@ -680,6 +720,14 @@ class ReportAppV2:
             ttk.Label(row, text=f"{column}:").pack(side=tk.LEFT)
             entry = ttk.Entry(row, textvariable=self.openai_model_vars[column])
             entry.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
+            mode_var = tk.StringVar(master=self.root, value="pdf")
+            self.scrape_upload_mode_vars[column] = mode_var
+            ttk.Radiobutton(row, text="Upload PDF", variable=mode_var, value="pdf").pack(
+                side=tk.LEFT, padx=(8, 0)
+            )
+            ttk.Radiobutton(row, text="Extract text", variable=mode_var, value="text").pack(
+                side=tk.LEFT, padx=(4, 0)
+            )
 
         scrape_body = ttk.Frame(scrape_tab, padding=(8, 0, 8, 8))
         scrape_body.pack(fill=tk.BOTH, expand=True)
@@ -710,29 +758,48 @@ class ReportAppV2:
         )
         self.scrape_preview_label.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         self.scrape_preview_label.bind("<Button-1>", self._on_scrape_preview_click)
+        self.scrape_preview_label.bind("<Configure>", self._on_scrape_preview_resize)
 
         tables_frame = ttk.Frame(scrape_split)
         scrape_split.add(tables_frame, weight=1)
 
-        self.scrape_tables_canvas = tk.Canvas(tables_frame)
-        self.scrape_tables_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        tables_scrollbar = ttk.Scrollbar(tables_frame, orient=tk.VERTICAL, command=self.scrape_tables_canvas.yview)
-        tables_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.scrape_tables_canvas.configure(yscrollcommand=tables_scrollbar.set)
-        self.scrape_tables_inner = ttk.Frame(self.scrape_tables_canvas)
-        self.scrape_tables_window = self.scrape_tables_canvas.create_window(
-            (0, 0),
-            window=self.scrape_tables_inner,
-            anchor="nw",
-        )
-        self.scrape_tables_inner.bind(
-            "<Configure>",
-            lambda _e: self.scrape_tables_canvas.configure(scrollregion=self.scrape_tables_canvas.bbox("all")),
-        )
-        self.scrape_tables_canvas.bind(
-            "<Configure>",
-            lambda event: self.scrape_tables_canvas.itemconfigure(self.scrape_tables_window, width=event.width),
-        )
+        self.scrape_tables_notebook = ttk.Notebook(tables_frame)
+        self.scrape_tables_notebook.pack(fill=tk.BOTH, expand=True)
+        self.scrape_category_tabs: Dict[str, ttk.Frame] = {}
+        self.scrape_category_canvases: Dict[str, tk.Canvas] = {}
+        self.scrape_category_inners: Dict[str, ttk.Frame] = {}
+        self.scrape_category_windows: Dict[str, int] = {}
+        self.scrape_category_placeholders: Dict[str, tk.Widget] = {}
+
+        for category in COLUMNS:
+            tab = ttk.Frame(self.scrape_tables_notebook)
+            self.scrape_tables_notebook.add(tab, text=category)
+            canvas = tk.Canvas(tab)
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=canvas.yview)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            canvas.configure(yscrollcommand=scrollbar.set)
+            inner = ttk.Frame(canvas)
+            window = canvas.create_window((0, 0), window=inner, anchor="nw")
+            inner.bind(
+                "<Configure>",
+                lambda _e, c=canvas: c.configure(scrollregion=c.bbox("all")),
+            )
+            canvas.bind(
+                "<Configure>",
+                lambda event, cv=canvas, win=window: cv.itemconfigure(win, width=event.width),
+            )
+            placeholder = ttk.Label(
+                inner,
+                text="Select pages in the Review tab to stage AIScrape jobs.",
+                foreground="#666666",
+            )
+            placeholder.pack(anchor="w", padx=12, pady=12)
+            self.scrape_category_tabs[category] = tab
+            self.scrape_category_canvases[category] = canvas
+            self.scrape_category_inners[category] = inner
+            self.scrape_category_windows[category] = window
+            self.scrape_category_placeholders[category] = placeholder
 
     def _maximize_window(self) -> None:
         try:
@@ -770,6 +837,13 @@ class ReportAppV2:
             else:
                 value = ""
             openai_models[column] = value or DEFAULT_OPENAI_MODEL
+        upload_modes: Dict[str, str] = {}
+        for column in COLUMNS:
+            mode_var = self.scrape_upload_mode_vars.get(column)
+            if mode_var is not None:
+                upload_modes[column] = mode_var.get() or "pdf"
+            else:
+                upload_modes[column] = "pdf"
         payload = {
             "patterns": patterns,
             "case_insensitive": case_flags,
@@ -779,6 +853,7 @@ class ReportAppV2:
             "year_space_as_whitespace": bool(self.year_whitespace_as_space_var.get()),
             "downloads_minutes": int(self.recent_download_minutes.get()),
             "openai_models": openai_models,
+            "upload_modes": upload_modes,
         }
         return payload
 
@@ -849,6 +924,12 @@ class ReportAppV2:
                 model_name = models.get(column)
                 if isinstance(model_name, str) and model_name.strip():
                     var.set(model_name.strip())
+        modes = data.get("upload_modes")
+        if isinstance(modes, dict):
+            for column, var in self.scrape_upload_mode_vars.items():
+                mode_value = modes.get(column)
+                if isinstance(mode_value, str) and mode_value in {"pdf", "text"}:
+                    var.set(mode_value)
 
     def _load_local_config(self) -> None:
         self.local_config_data = {}
@@ -1287,26 +1368,35 @@ class ReportAppV2:
         self._refresh_scrape_results()
 
     def _refresh_scrape_results(self) -> None:
-        if not hasattr(self, "scrape_tables_inner"):
+        if not hasattr(self, "scrape_tables_notebook"):
             return
+
         for panel in self.scrape_panels.values():
             panel.destroy()
         self.scrape_panels.clear()
-        for child in self.scrape_tables_inner.winfo_children():
-            child.destroy()
+
+        for category, inner in self.scrape_category_inners.items():
+            for child in list(inner.winfo_children()):
+                child.destroy()
+            self.scrape_category_placeholders[category] = None
 
         if not self.pdf_entries:
             self._clear_scrape_preview()
-            ttk.Label(
-                self.scrape_tables_inner,
-                text="Load PDFs and choose pages to prepare scraping results.",
-                foreground="#666666",
-            ).pack(anchor="w", padx=12, pady=12)
+            for category, inner in self.scrape_category_inners.items():
+                placeholder = ttk.Label(
+                    inner,
+                    text="Load PDFs and choose pages to prepare scraping results.",
+                    foreground="#666666",
+                )
+                placeholder.pack(anchor="w", padx=12, pady=12)
+                self.scrape_category_placeholders[category] = placeholder
+            self.active_scrape_key = None
             return
 
         company = self.company_var.get().strip()
         default_entry: Optional[PDFEntry] = None
         default_category: Optional[str] = None
+        category_has_content: Dict[str, bool] = {column: False for column in COLUMNS}
 
         for entry in self.pdf_entries:
             if company:
@@ -1314,26 +1404,39 @@ class ReportAppV2:
             else:
                 target_base = entry.path.parent / "openapiscrape" / entry.path.stem
             for category in COLUMNS:
+                parent_inner = self.scrape_category_inners.get(category)
+                if parent_inner is None:
+                    continue
                 pages = self._get_selected_pages(entry, category)
                 csv_path = target_base / f"{category}.csv"
                 multiplier_path = target_base / f"{category}_multiplier.txt"
                 if not pages and not csv_path.exists() and not multiplier_path.exists():
                     continue
-                panel = ScrapeResultPanel(self.scrape_tables_inner, self, entry, category, target_base)
+                panel = ScrapeResultPanel(parent_inner, self, entry, category, target_base)
                 panel.load_from_files()
                 key = (entry.path, category)
                 self.scrape_panels[key] = panel
+                category_has_content[category] = True
                 if panel.has_csv_data or pages:
                     if default_entry is None:
                         default_entry = entry
                         default_category = category
 
-        if not self.scrape_panels:
-            ttk.Label(
-                self.scrape_tables_inner,
+        for category, has_content in category_has_content.items():
+            if has_content:
+                continue
+            inner = self.scrape_category_inners.get(category)
+            if inner is None:
+                continue
+            placeholder = ttk.Label(
+                inner,
                 text="Select pages in the Review tab to stage AIScrape jobs.",
                 foreground="#666666",
-            ).pack(anchor="w", padx=12, pady=12)
+            )
+            placeholder.pack(anchor="w", padx=12, pady=12)
+            self.scrape_category_placeholders[category] = placeholder
+
+        if not self.scrape_panels:
             self._clear_scrape_preview()
             self.active_scrape_key = None
             return
@@ -1358,6 +1461,8 @@ class ReportAppV2:
         self.scrape_preview_entry = None
         self.scrape_preview_category = None
         self.scrape_preview_cycle_index = 0
+        self.scrape_preview_render_page = None
+        self.scrape_preview_render_width = 0
 
     def _on_scrape_panel_clicked(self, panel: ScrapeResultPanel) -> None:
         self.set_active_scrape_panel(panel.entry, panel.category)
@@ -1367,6 +1472,12 @@ class ReportAppV2:
         if key not in self.scrape_panels:
             return
         self.active_scrape_key = key
+        tab = self.scrape_category_tabs.get(category)
+        if tab is not None:
+            try:
+                self.scrape_tables_notebook.select(tab)
+            except Exception:
+                pass
         for panel_key, panel in self.scrape_panels.items():
             panel.set_active(panel_key == key)
         self._show_scrape_preview(entry, category)
@@ -1387,26 +1498,62 @@ class ReportAppV2:
             self.scrape_preview_page_var.set("")
             self.scrape_preview_photo = None
             return
-        self._display_scrape_preview_page()
+        self.scrape_preview_render_page = None
+        self.scrape_preview_render_width = 0
+        self._display_scrape_preview_page(force=True)
 
-    def _display_scrape_preview_page(self) -> None:
+    def _display_scrape_preview_page(self, force: bool = False) -> None:
         if not self.scrape_preview_entry or not self.scrape_preview_pages:
             self._clear_scrape_preview()
             return
         page_count = len(self.scrape_preview_pages)
         self.scrape_preview_cycle_index %= max(page_count, 1)
         page_index = self.scrape_preview_pages[self.scrape_preview_cycle_index]
-        display_width = max(self.thumbnail_width_var.get(), 360)
-        photo = self.render_page(self.scrape_preview_entry.doc, page_index, target_width=display_width)
+        available_width = self.scrape_preview_last_width
+        if available_width <= 1:
+            available_width = self.scrape_preview_label.winfo_width()
+        if available_width <= 1:
+            available_width = self.scrape_preview_label.winfo_reqwidth()
+        if available_width <= 1:
+            available_width = max(self.thumbnail_width_var.get(), 360)
+        display_width = max(int(available_width) - 16, 200)
+        if (
+            not force
+            and self.scrape_preview_render_page == page_index
+            and self.scrape_preview_render_width == display_width
+        ):
+            photo = self.scrape_preview_photo
+        else:
+            photo = self.render_page(
+                self.scrape_preview_entry.doc,
+                page_index,
+                target_width=display_width,
+            )
         if photo is None:
             self.scrape_preview_label.configure(image="", text="Preview unavailable", background="#f0f0f0")
             self.scrape_preview_photo = None
+            self.scrape_preview_render_page = None
         else:
             self.scrape_preview_photo = photo
             self.scrape_preview_label.configure(image=photo, text="", background="#000000")
+            self.scrape_preview_render_page = page_index
+            self.scrape_preview_render_width = display_width
         self.scrape_preview_page_var.set(
             f"Page {page_index + 1} ({self.scrape_preview_cycle_index + 1}/{page_count})"
         )
+
+    def _on_scrape_preview_resize(self, event: tk.Event) -> None:  # type: ignore[override]
+        try:
+            width = int(getattr(event, "width", 0))
+        except Exception:
+            return
+        if width <= 1:
+            return
+        if abs(width - self.scrape_preview_last_width) <= 2:
+            return
+        self.scrape_preview_last_width = width
+        if self.scrape_preview_pages:
+            self._display_scrape_preview_page(force=True)
 
     def _on_scrape_preview_click(self, event: tk.Event) -> None:  # type: ignore[override]
         try:
@@ -1420,7 +1567,7 @@ class ReportAppV2:
         if len(self.scrape_preview_pages) < 2:
             return
         self.scrape_preview_cycle_index = (self.scrape_preview_cycle_index + 1) % len(self.scrape_preview_pages)
-        self._display_scrape_preview_page()
+        self._display_scrape_preview_page(force=True)
 
     # ------------------------------------------------------------------ Interactions
     def _bind_review_mousewheel(self, _: tk.Event) -> None:  # type: ignore[override]
@@ -1504,6 +1651,36 @@ class ReportAppV2:
         self._refresh_scrape_results()
 
     def open_pdf(self, path: Path) -> None:
+        self._open_with_default_app(path, "Open PDF")
+
+    def open_file_path(self, path: Path) -> None:
+        self._open_with_default_app(path, "Open File")
+
+    def show_raw_text_dialog(self, path: Path, title: str) -> None:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            messagebox.showwarning("Raw Response", "Unable to read the raw response file.")
+            return
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.transient(self.root)
+
+        container = ttk.Frame(window, padding=8)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        text_widget = tk.Text(container, wrap=tk.WORD)
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        text_widget.insert("1.0", content)
+        text_widget.configure(state=tk.DISABLED)
+
+        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=text_widget.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+
+        ttk.Button(window, text="Close", command=window.destroy).pack(pady=(0, 8))
+
+    def _open_with_default_app(self, path: Path, failure_title: str) -> None:
         try:
             if sys.platform.startswith("win"):
                 os.startfile(path)  # type: ignore[attr-defined]
@@ -1512,7 +1689,10 @@ class ReportAppV2:
             else:
                 subprocess.Popen(["xdg-open", str(path)])
         except Exception:
-            messagebox.showwarning("Open PDF", "Unable to open the PDF file with the default viewer.")
+            messagebox.showwarning(
+                failure_title,
+                f"Unable to open '{path.name}' with the default application.",
+            )
 
     def toggle_fullscreen_preview(self, entry: PDFEntry, page_index: int) -> None:
         if self.fullscreen_preview_window is not None and self.fullscreen_preview_window.winfo_exists():
@@ -1679,6 +1859,27 @@ class ReportAppV2:
                 pass
             return None
 
+    def _extract_pages_text(self, doc: fitz.Document, pages: List[int]) -> Optional[str]:
+        if not pages:
+            return None
+        snippets: List[str] = []
+        seen: List[int] = sorted(dict.fromkeys(int(page) for page in pages))
+        for page_index in seen:
+            try:
+                page = doc.load_page(page_index)
+                text = page.get_text("text")
+            except Exception:
+                logger.exception(
+                    "Failed to extract text for page %s in %s", page_index + 1, getattr(doc, "name", "document")
+                )
+                continue
+            cleaned = text.strip()
+            if not cleaned:
+                continue
+            snippets.append(f"--- Page {page_index + 1} ---\n{cleaned}")
+        combined = "\n\n".join(snippets).strip()
+        return combined or None
+
     def _get_selected_page_index(self, entry: PDFEntry, category: str) -> Optional[int]:
         matches = entry.matches.get(category, [])
         index = entry.current_index.get(category)
@@ -1802,16 +2003,27 @@ class ReportAppV2:
 
     def _parse_multiplier_response(self, response: str) -> Tuple[Optional[str], List[List[str]]]:
         cleaned = self._strip_code_fence(response)
-        lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+        raw_lines = [line for line in cleaned.splitlines() if line.strip()]
         multiplier: Optional[str] = None
-        rows: List[List[str]] = []
-        for line in lines:
-            if multiplier is None and line.lower().startswith("multiplier"):
-                match_obj = re.search(r"([-+]?\d[\d,]*\.?\d*)", line)
+        data_lines: List[str] = []
+        for line in raw_lines:
+            stripped = line.strip()
+            if multiplier is None and stripped.lower().startswith("multiplier"):
+                match_obj = re.search(r"([-+]?\d[\d,]*\.?\d*)", stripped)
                 if match_obj:
                     multiplier = match_obj.group(1)
                 continue
-            rows.append([segment.strip() for segment in line.split(",")])
+            data_lines.append(stripped)
+
+        rows: List[List[str]] = []
+        if data_lines:
+            reader = csv.reader(io.StringIO("\n".join(data_lines)))
+            try:
+                for parsed in reader:
+                    rows.append([cell.strip() for cell in parsed])
+            except csv.Error:
+                rows.extend([line.split(",") for line in data_lines])
+                rows = [[cell.strip() for cell in row] for row in rows]
         return multiplier, rows
 
     def _call_openai_with_pdfs(
@@ -1863,7 +2075,68 @@ class ReportAppV2:
             ],
         )
         logger.info("AIScrape response received (model=%s)", selected_model)
+        return self._extract_openai_response_text(response)
 
+    def _call_openai_with_text(
+        self, api_key: str, prompt: str, text_payload: str, model_name: str
+    ) -> str:
+        sanitized_key = api_key.strip()
+        if not sanitized_key:
+            raise ValueError("API key is required")
+        cleaned_text = text_payload.strip()
+        if not cleaned_text:
+            raise ValueError("Extracted text is empty")
+
+        selected_model = model_name.strip() or DEFAULT_OPENAI_MODEL
+        client = OpenAI(api_key=sanitized_key)
+
+        user_entries: List[Dict[str, Any]] = [
+            {"type": "input_text", "text": prompt},
+            {
+                "type": "input_text",
+                "text": "Parse the provided text excerpt and return the multiplier value and CSV rows.",
+            },
+            {"type": "input_text", "text": cleaned_text},
+        ]
+
+        logger.info(
+            "AIScrape submitting text request (model=%s, characters=%s)",
+            selected_model,
+            len(cleaned_text),
+        )
+        response = client.responses.create(
+            model=selected_model,
+            input=[
+                {
+                    "role": "system",
+                    "content": "You are a financial statement parser.",
+                },
+                {"role": "user", "content": user_entries},
+            ],
+        )
+        logger.info("AIScrape text response received (model=%s)", selected_model)
+        return self._extract_openai_response_text(response)
+
+    def _call_openai_for_job(self, job: ScrapeJob, api_key: str) -> str:
+        if job.upload_mode == "text":
+            if not job.text_payload:
+                raise ValueError("No extracted text available for OpenAI request")
+            return self._call_openai_with_text(
+                api_key,
+                job.prompt_text,
+                job.text_payload,
+                job.model_name,
+            )
+        if job.temp_pdf is None:
+            raise ValueError("No PDF prepared for OpenAI request")
+        return self._call_openai_with_pdfs(
+            api_key,
+            job.prompt_text,
+            [job.temp_pdf],
+            job.model_name,
+        )
+
+    def _extract_openai_response_text(self, response: Any) -> str:
         text_output = getattr(response, "output_text", None)
         if text_output:
             combined = str(text_output).strip()
@@ -1951,10 +2224,24 @@ class ReportAppV2:
                     continue
                 model_var = self.openai_model_vars.get(category)
                 model_name = model_var.get() if model_var is not None else DEFAULT_OPENAI_MODEL
-                temp_pdf = self._export_pages_to_pdf(entry.doc, pages)
-                if temp_pdf is None:
-                    prep_errors.append(f"{entry.path.name} - {category}: Unable to prepare selected pages")
-                    continue
+                mode_var = self.scrape_upload_mode_vars.get(category)
+                upload_mode = mode_var.get() if mode_var is not None else "pdf"
+                temp_pdf: Optional[Path] = None
+                text_payload: Optional[str] = None
+                if upload_mode == "text":
+                    text_payload = self._extract_pages_text(entry.doc, pages)
+                    if not text_payload:
+                        prep_errors.append(
+                            f"{entry.path.name} - {category}: Unable to extract text from selected pages"
+                        )
+                        continue
+                else:
+                    temp_pdf = self._export_pages_to_pdf(entry.doc, pages)
+                    if temp_pdf is None:
+                        prep_errors.append(
+                            f"{entry.path.name} - {category}: Unable to prepare selected pages"
+                        )
+                        continue
                 target_dir = scrape_root / entry.path.stem
                 jobs.append(
                     ScrapeJob(
@@ -1963,8 +2250,10 @@ class ReportAppV2:
                         pages=pages,
                         prompt_text=prompt_text,
                         model_name=model_name,
-                        temp_pdf=temp_pdf,
+                        upload_mode=upload_mode,
                         target_dir=target_dir,
+                        temp_pdf=temp_pdf,
+                        text_payload=text_payload,
                     )
                 )
                 panel = self.scrape_panels.get((entry.path, category))
@@ -2008,12 +2297,8 @@ class ReportAppV2:
                     job.pages,
                     job.model_name,
                 )
-                response_text = self._call_openai_with_pdfs(
-                    api_key,
-                    job.prompt_text,
-                    [job.temp_pdf],
-                    job.model_name,
-                )
+                logger.info("AIScrape mode=%s", job.upload_mode)
+                response_text = self._call_openai_for_job(job, api_key)
                 multiplier, rows = self._parse_multiplier_response(response_text)
                 logger.info(
                     "AIScrape completed for %s | %s | multiplier=%s | rows=%s",
@@ -2024,6 +2309,8 @@ class ReportAppV2:
                 )
 
                 job.target_dir.mkdir(parents=True, exist_ok=True)
+                raw_path = job.target_dir / f"{job.category}_raw.txt"
+                raw_path.write_text(response_text, encoding="utf-8")
                 if multiplier is not None:
                     multiplier_path = job.target_dir / f"{job.category}_multiplier.txt"
                     multiplier_path.write_text(str(multiplier).strip(), encoding="utf-8")
@@ -2031,7 +2318,7 @@ class ReportAppV2:
                 csv_path = job.target_dir / f"{job.category}.csv"
                 if rows:
                     with csv_path.open("w", encoding="utf-8", newline="") as fh:
-                        writer = csv.writer(fh)
+                        writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
                         writer.writerows(rows)
                 else:
                     csv_path.write_text("", encoding="utf-8")
@@ -2043,7 +2330,8 @@ class ReportAppV2:
                 errors.append(f"{job.entry.path.name} - {job.category}: {exc}")
             finally:
                 try:
-                    job.temp_pdf.unlink()
+                    if job.temp_pdf is not None and job.temp_pdf.exists():
+                        job.temp_pdf.unlink()
                 except Exception:
                     pass
                 self.root.after(
@@ -2070,7 +2358,7 @@ class ReportAppV2:
             panel.set_active(self.active_scrape_key == (job.entry.path, job.category))
         if self.active_scrape_key == (job.entry.path, job.category):
             if self.scrape_preview_pages:
-                self._display_scrape_preview_page()
+                self._display_scrape_preview_page(force=True)
             else:
                 self._show_scrape_preview(job.entry, job.category)
 
