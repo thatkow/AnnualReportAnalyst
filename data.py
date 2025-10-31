@@ -4027,13 +4027,27 @@ class ReportApp:
                     table_rows: List[List[str]] = []
                     scalable_columns = self._scraped_scalable_column_indices(headings)
                     if data_rows:
-                        for data in data_rows:
-                            values = list(data)
+                        working_rows = [list(data) for data in data_rows]
+                        normalized_rows, rows_changed = self._normalize_scraped_item_rows(
+                            list(headings), working_rows
+                        )
+                        table_rows = normalized_rows
+                        if rows_changed and isinstance(csv_target_path, Path):
+                            if not self._write_scraped_csv_rows(
+                                csv_target_path,
+                                list(headings),
+                                normalized_rows,
+                                delimiter=csv_delimiter,
+                            ):
+                                logger.warning(
+                                    "Unable to persist unique ITEM values for %s",
+                                    csv_target_path,
+                                )
+                        for values in table_rows:
                             if len(values) < len(columns):
                                 values.extend([""] * (len(columns) - len(values)))
                             elif len(values) > len(columns):
                                 values = values[: len(columns)]
-                            table_rows.append(values.copy())
                             display_values = [self._format_table_value(value) for value in values]
                             tree.insert("", tk.END, values=display_values)
 
@@ -4069,21 +4083,13 @@ class ReportApp:
                     )
                     relabel_button.grid(row=0, column=4, sticky="e", padx=(0, 4))
 
-                    dedupe_button = ttk.Button(
-                        controls_frame,
-                        text="Make Dates Unique",
-                        command=lambda t=tree: self._dedupe_scraped_headers(t),
-                        width=18,
-                    )
-                    dedupe_button.grid(row=0, column=5, sticky="e", padx=(0, 4))
-
                     dedupe_items_button = ttk.Button(
                         controls_frame,
                         text="Make Items Unique",
                         command=lambda t=tree: self._dedupe_scraped_items(t),
                         width=18,
                     )
-                    dedupe_items_button.grid(row=0, column=6, sticky="e", padx=(0, 4))
+                    dedupe_items_button.grid(row=0, column=5, sticky="e", padx=(0, 4))
 
                     delete_row_button = ttk.Button(
                         controls_frame,
@@ -4091,7 +4097,7 @@ class ReportApp:
                         command=lambda t=tree: self._delete_scraped_row(t),
                         width=12,
                     )
-                    delete_row_button.grid(row=0, column=7, sticky="e", padx=(0, 4))
+                    delete_row_button.grid(row=0, column=6, sticky="e", padx=(0, 4))
 
                     delete_column_button = tk.Menubutton(
                         controls_frame,
@@ -4100,7 +4106,7 @@ class ReportApp:
                         relief=tk.RAISED,
                         direction="below",
                     )
-                    delete_column_button.grid(row=0, column=8, sticky="e")
+                    delete_column_button.grid(row=0, column=7, sticky="e")
                     delete_column_menu = tk.Menu(delete_column_button, tearoff=False)
                     delete_column_button.configure(menu=delete_column_menu)
 
@@ -4117,7 +4123,6 @@ class ReportApp:
                         "scale_buttons": (multiply_button, divide_button),
                         "open_button": open_page_button,
                         "relabel_button": relabel_button,
-                        "dedupe_button": dedupe_button,
                         "dedupe_items_button": dedupe_items_button,
                         "delete_column_button": delete_column_button,
                         "delete_column_menu": delete_column_menu,
@@ -4147,6 +4152,83 @@ class ReportApp:
             if isinstance(value, str) and value.strip().lower() == "item":
                 return index
         return None
+
+    def _scraped_category_column_index(self, headings: List[str]) -> Optional[int]:
+        for index, value in enumerate(headings):
+            if isinstance(value, str) and value.strip().lower() == "category":
+                return index
+        return None
+
+    def _normalize_scraped_item_rows(
+        self, header: List[str], rows: List[List[str]]
+    ) -> Tuple[List[List[str]], bool]:
+        if not header or not rows:
+            return rows, False
+
+        item_index = self._scraped_item_column_index(header)
+        category_index = self._scraped_category_column_index(header)
+        if item_index is None or category_index is None:
+            return rows, False
+
+        normalized_rows: List[List[str]] = []
+        key_lookup: List[Optional[Tuple[str, str]]] = []
+        base_values: List[str] = []
+        counts: Dict[Tuple[str, str], int] = {}
+
+        for row in rows:
+            values = list(row)
+            if item_index >= len(values):
+                values.extend([""] * (item_index - len(values) + 1))
+            if category_index >= len(values):
+                values.extend([""] * (category_index - len(values) + 1))
+
+            category_raw = values[category_index].strip()
+            item_raw = values[item_index].strip()
+            if item_raw:
+                base_value = re.sub(r"\.\d+$", "", item_raw)
+                key = (category_raw.lower(), base_value.lower())
+                counts[key] = counts.get(key, 0) + 1
+                key_lookup.append(key)
+                base_values.append(base_value)
+            else:
+                key_lookup.append(None)
+                base_values.append("")
+
+            normalized_rows.append(values)
+
+        if not counts:
+            return normalized_rows, False
+
+        duplicates_found = False
+        occurrences: Dict[Tuple[str, str], int] = {}
+
+        for index, values in enumerate(normalized_rows):
+            key = key_lookup[index]
+            if key is None:
+                continue
+
+            base_value = base_values[index]
+            total = counts.get(key, 0)
+            if total > 1:
+                occurrence = occurrences.get(key, 0) + 1
+                occurrences[key] = occurrence
+                new_value = f"{base_value}.{occurrence}"
+            else:
+                new_value = base_value
+
+            if values[item_index] != new_value:
+                values[item_index] = new_value
+                duplicates_found = True
+
+        expected_length = len(header)
+        if expected_length:
+            for values in normalized_rows:
+                if len(values) < expected_length:
+                    values.extend([""] * (expected_length - len(values)))
+                elif len(values) > expected_length:
+                    del values[expected_length:]
+
+        return normalized_rows, duplicates_found
 
     def _update_scraped_controls_state(self, info: Dict[str, Any]) -> None:
         rows: List[List[str]] = info.get("rows", [])
@@ -4178,13 +4260,6 @@ class ReportApp:
                 relabel_button.state(["!disabled"])
             else:
                 relabel_button.state(["disabled"])
-
-        dedupe_button = info.get("dedupe_button")
-        if isinstance(dedupe_button, ttk.Button):
-            if has_csv and len(header) > 2:
-                dedupe_button.state(["!disabled"])
-            else:
-                dedupe_button.state(["disabled"])
 
         dedupe_items_button = info.get("dedupe_items_button")
         if isinstance(dedupe_items_button, ttk.Button):
@@ -4473,6 +4548,13 @@ class ReportApp:
             )
             return
 
+        rows: List[List[str]] = info.get("rows", [])
+        if not rows:
+            messagebox.showinfo(
+                "Make Items Unique", "There are no rows available to update.",
+            )
+            return
+
         csv_path = info.get("csv_path")
         if not isinstance(csv_path, Path):
             messagebox.showinfo(
@@ -4481,37 +4563,12 @@ class ReportApp:
             )
             return
 
-        rows: List[List[str]] = info.get("rows", [])
-        if not rows:
-            messagebox.showinfo(
-                "Make Items Unique", "There are no rows available to update.",
-            )
-            return
-
-        updated_rows: List[List[str]] = []
-        seen: Dict[str, int] = {}
-        duplicates_found = False
-        for row in rows:
-            values = list(row)
-            if item_index >= len(values):
-                values.extend([""] * (item_index - len(values) + 1))
-            raw_value = values[item_index].strip()
-            if raw_value:
-                base_value = re.sub(r"\.\d+$", "", raw_value)
-                normalized = base_value.lower()
-                count = seen.get(normalized, 0)
-                if count == 0:
-                    if base_value != values[item_index]:
-                        values[item_index] = base_value
-                else:
-                    values[item_index] = f"{base_value}.{count}"
-                    duplicates_found = True
-                seen[normalized] = count + 1
-            updated_rows.append(values)
+        updated_rows, duplicates_found = self._normalize_scraped_item_rows(header, rows)
 
         if not duplicates_found:
             messagebox.showinfo(
-                "Make Items Unique", "No duplicate ITEM entries were found to update.",
+                "Make Items Unique",
+                "No duplicate CATEGORY+ITEM entries were found to update.",
             )
             return
 
@@ -4524,7 +4581,7 @@ class ReportApp:
         self._update_scraped_controls_state(info)
         self._refresh_combined_tab(auto_update=True)
         messagebox.showinfo(
-            "Make Items Unique", "Duplicate ITEM entries have been updated.",
+            "Make Items Unique", "Duplicate CATEGORY+ITEM entries have been updated.",
         )
 
     def _delete_scraped_column(self, tree: ttk.Treeview, column_index: int) -> None:
