@@ -7406,26 +7406,100 @@ class ReportApp:
         return None
 
     def _call_openai(self, api_key: str, model: str, prompt: str, page_text: str) -> str:
-        url = "https://api.openai.com/v1/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        payload = {
+
+        def _extract_error_message(response: requests.Response) -> str:
+            try:
+                data = response.json()
+            except ValueError:
+                data = None
+            if isinstance(data, dict):
+                error_block = data.get("error")
+                if isinstance(error_block, dict):
+                    message = error_block.get("message")
+                    if isinstance(message, str) and message.strip():
+                        return message.strip()
+            text = response.text.strip()
+            if text:
+                return text
+            return response.reason
+
+        def _extract_text(data: Dict[str, Any]) -> str:
+            choices = data.get("choices")
+            if isinstance(choices, list) and choices:
+                message = choices[0].get("message", {})
+                if isinstance(message, dict):
+                    content = message.get("content")
+                    if isinstance(content, list):
+                        parts: List[str] = []
+                        for chunk in content:
+                            if isinstance(chunk, dict) and chunk.get("type") == "text":
+                                text_value = chunk.get("text")
+                                if isinstance(text_value, str) and text_value.strip():
+                                    parts.append(text_value.strip())
+                        if parts:
+                            return "\n".join(parts)
+                    elif isinstance(content, str) and content.strip():
+                        return content.strip()
+            output = data.get("output")
+            if isinstance(output, list) and output:
+                segments: List[str] = []
+                for entry in output:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("type") != "message":
+                        continue
+                    for block in entry.get("content", []):
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") != "text":
+                            continue
+                        text_value = block.get("text")
+                        if isinstance(text_value, str) and text_value.strip():
+                            segments.append(text_value.strip())
+                if segments:
+                    return "\n".join(segments)
+            raise ValueError("Empty response from OpenAI API")
+
+        chat_payload = {
             "model": model,
             "messages": [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": page_text},
             ],
         }
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
-        data = response.json()
-        choices = data.get("choices")
-        if not choices:
-            raise ValueError("No choices returned from OpenAI API")
-        message = choices[0].get("message", {})
-        content = message.get("content")
-        if not content:
-            raise ValueError("Empty response from OpenAI API")
-        return str(content)
+        chat_url = "https://api.openai.com/v1/chat/completions"
+        chat_response = requests.post(chat_url, headers=headers, json=chat_payload, timeout=120)
+        fallback_to_responses = False
+        if not chat_response.ok:
+            error_message = _extract_error_message(chat_response)
+            if chat_response.status_code == 404 or "responses api" in error_message.lower():
+                fallback_to_responses = True
+            else:
+                chat_response.raise_for_status()
+        if not fallback_to_responses:
+            chat_response.raise_for_status()
+            return _extract_text(chat_response.json())
+
+        responses_payload = {
+            "model": model,
+            "input": [
+                {"role": "system", "content": [{"type": "text", "text": prompt}]},
+                {"role": "user", "content": [{"type": "text", "text": page_text}]},
+            ],
+        }
+        responses_url = "https://api.openai.com/v1/responses"
+        responses_response = requests.post(
+            responses_url, headers=headers, json=responses_payload, timeout=120
+        )
+        if not responses_response.ok:
+            detail = _extract_error_message(responses_response)
+            try:
+                responses_response.raise_for_status()
+            except requests.HTTPError as exc:
+                raise requests.HTTPError(detail, response=responses_response) from exc
+            raise requests.HTTPError(detail, response=responses_response)
+        return _extract_text(responses_response.json())
 
     def _strip_code_fence(self, text: str) -> str:
         fence_match = re.search(r"```(?:[^`\n]*)\n([\s\S]*?)```", text)
