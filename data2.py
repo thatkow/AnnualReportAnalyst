@@ -127,7 +127,11 @@ class MatchThumbnail:
         self.refresh()
 
     def refresh(self) -> None:
-        photo = self.app.render_page(self.entry.doc, self.match.page_index, self.row.target_width)
+        photo = self.app.render_page(
+            self.entry.doc,
+            self.match.page_index,
+            target_width=self.row.target_width,
+        )
         self.photo = photo
         if photo is not None:
             self.image_label.configure(image=photo, text="")
@@ -1011,7 +1015,7 @@ class ReportAppV2:
             frame = ttk.Frame(self.scrape_preview_inner, padding=8)
             frame.pack(fill=tk.X, expand=True)
             ttk.Label(frame, text=f"Page {page_index + 1}", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
-            photo = self.render_page(entry.doc, page_index, display_width)
+            photo = self.render_page(entry.doc, page_index, target_width=display_width)
             if photo is not None:
                 self.scrape_preview_images.append(photo)
                 ttk.Label(frame, image=photo).pack(anchor="center", pady=(4, 0))
@@ -1077,6 +1081,7 @@ class ReportAppV2:
         self._refresh_scrape_tree()
 
     def manual_select(self, entry: PDFEntry, category: str) -> None:
+        self.open_pdf(entry.path)
         max_pages = len(entry.doc)
         value = simpledialog.askinteger(
             "Manual Selection",
@@ -1141,18 +1146,71 @@ class ReportAppV2:
                     pass
 
         window.bind("<Escape>", lambda _e: self._close_fullscreen_preview())
-        window.bind("<Button-1>", lambda _e: self._close_fullscreen_preview())
 
-        screen_width = window.winfo_screenwidth()
-        target_width = max(screen_width - 80, 400)
-        photo = self.render_page(entry.doc, page_index, target_width)
+        window.rowconfigure(0, weight=1)
+        window.columnconfigure(0, weight=1)
+
+        container = ttk.Frame(window)
+        container.grid(row=0, column=0, sticky="nsew")
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+        container.columnconfigure(1, weight=0)
+
+        canvas = tk.Canvas(container, background="#111111", highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        v_scroll = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        v_scroll.grid(row=0, column=1, sticky="ns")
+        h_scroll = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=canvas.xview)
+        h_scroll.grid(row=1, column=0, sticky="ew")
+        container.grid_rowconfigure(1, weight=0)
+        canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+
+        inner = ttk.Frame(canvas)
+        window_item = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _update_scroll_region(_: tk.Event) -> None:
+            bbox = canvas.bbox(window_item)
+            if bbox:
+                canvas.configure(scrollregion=bbox)
+
+        inner.bind("<Configure>", _update_scroll_region)
+
+        def _on_mousewheel(event: tk.Event) -> None:
+            if getattr(event, "delta", 0):
+                delta = -event.delta
+                step = int(delta / 120) or (1 if delta > 0 else -1)
+                canvas.yview_scroll(step, "units")
+            else:
+                step = -1 if getattr(event, "num", 0) == 4 else 1
+                canvas.yview_scroll(step, "units")
+
+        def _on_shift_mousewheel(event: tk.Event) -> None:
+            if getattr(event, "delta", 0):
+                delta = -event.delta
+                step = int(delta / 120) or (1 if delta > 0 else -1)
+                canvas.xview_scroll(step, "units")
+            else:
+                step = -1 if getattr(event, "num", 0) == 4 else 1
+                canvas.xview_scroll(step, "units")
+
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        canvas.bind("<Button-4>", _on_mousewheel)
+        canvas.bind("<Button-5>", _on_mousewheel)
+        canvas.bind("<Shift-MouseWheel>", _on_shift_mousewheel)
+        canvas.bind("<Shift-Button-4>", _on_shift_mousewheel)
+        canvas.bind("<Shift-Button-5>", _on_shift_mousewheel)
+
+        screen_height = window.winfo_screenheight()
+        target_height = max(screen_height - 160, 400)
+        photo = self.render_page(entry.doc, page_index, target_height=target_height)
         if photo is None:
-            label = ttk.Label(window, text="Preview unavailable")
-            label.pack(expand=True, fill=tk.BOTH, padx=24, pady=24)
+            label = ttk.Label(inner, text="Preview unavailable", padding=24)
+            label.pack(expand=True, fill=tk.BOTH)
             self.fullscreen_preview_image = None
         else:
-            label = ttk.Label(window, image=photo)
-            label.pack(expand=True, fill=tk.BOTH)
+            label = tk.Label(inner, image=photo, background="#111111")
+            label.pack()
+            label.bind("<Button-1>", lambda _e: self._close_fullscreen_preview())
             self.fullscreen_preview_image = photo
 
         self.fullscreen_preview_window = window
@@ -1171,8 +1229,10 @@ class ReportAppV2:
         self,
         doc: fitz.Document,
         page_index: int,
-        target_width: int,
-        ) -> Optional[ImageTk.PhotoImage]:
+        *,
+        target_width: Optional[int] = None,
+        target_height: Optional[int] = None,
+    ) -> Optional[ImageTk.PhotoImage]:
         try:
             page = doc.load_page(page_index)
             zoom_matrix = fitz.Matrix(1.5, 1.5)
@@ -1181,9 +1241,17 @@ class ReportAppV2:
             image = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
             if image.mode == "RGBA":
                 image = image.convert("RGB")
-            if target_width > 0 and image.width != target_width:
-                ratio = target_width / image.width
-                new_size = (int(image.width * ratio), int(image.height * ratio))
+            scale: Optional[float] = None
+            if target_width and target_width > 0:
+                scale = target_width / image.width
+            if target_height and target_height > 0:
+                height_scale = target_height / image.height
+                scale = min(scale, height_scale) if scale else height_scale
+            if scale and abs(scale - 1.0) > 0.01:
+                new_size = (
+                    max(1, int(image.width * scale)),
+                    max(1, int(image.height * scale)),
+                )
                 image = image.resize(new_size, Image.LANCZOS)
             return ImageTk.PhotoImage(image, master=self.root)
         except Exception:
@@ -1676,7 +1744,7 @@ class ReportAppV2:
                 ttk.Label(item_frame, text=f"Unable to open PDF: {exc}").pack(anchor="w", pady=(4, 0))
                 continue
             try:
-                photo = self.render_page(doc, 0, 220)
+                photo = self.render_page(doc, 0, target_width=220)
             finally:
                 doc.close()
             if photo is None:
