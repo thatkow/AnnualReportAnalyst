@@ -32,7 +32,12 @@ PYMUPDF_REQUIRED_MESSAGE = (
 
 from PIL import Image, ImageTk
 import webbrowser
-import requests
+from openai import OpenAI
+
+try:  # pragma: no cover - gracefully handle differing OpenAI client versions
+    from openai import APIConnectionError, APIError, APIStatusError, RateLimitError
+except ImportError:  # pragma: no cover - fallback to generic exceptions if unavailable
+    APIConnectionError = APIError = APIStatusError = RateLimitError = Exception  # type: ignore[assignment]
 
 from analyst import FinanceDataset, FinancePlotFrame
 
@@ -7243,25 +7248,56 @@ class ReportApp:
         return None
 
     def _call_openai(self, api_key: str, prompt: str, page_text: str) -> str:
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         model_name = self.openai_model_var.get().strip() or DEFAULT_OPENAI_MODEL
-        payload = {
-            "model": model_name,
-            "messages": [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": page_text},
-            ],
-        }
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
-        data = response.json()
-        choices = data.get("choices")
+        client = OpenAI(api_key=api_key.strip())
+        prompt_length = len(prompt)
+        page_text_length = len(page_text)
+        logger.info(
+            "OpenAI request initiated | model=%s | prompt_chars=%d | page_chars=%d",
+            model_name,
+            prompt_length,
+            page_text_length,
+        )
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": page_text},
+                ],
+            )
+        except (APIConnectionError, APIError, APIStatusError, RateLimitError) as exc:
+            logger.exception(
+                "OpenAI request failed | model=%s | status=error | detail=%s",
+                model_name,
+                exc,
+            )
+            raise
+
+        usage = getattr(response, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None) if usage else None
+        completion_tokens = getattr(usage, "completion_tokens", None) if usage else None
+        total_tokens = getattr(usage, "total_tokens", None) if usage else None
+        logger.info(
+            "OpenAI response received | model=%s | status=success | completion_id=%s | "
+            "prompt_tokens=%s | completion_tokens=%s | total_tokens=%s",
+            model_name,
+            getattr(response, "id", ""),
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        )
+
+        choices = getattr(response, "choices", None)
         if not choices:
+            logger.error("OpenAI response missing choices | model=%s", model_name)
             raise ValueError("No choices returned from OpenAI API")
-        message = choices[0].get("message", {})
-        content = message.get("content")
+
+        first_choice = choices[0]
+        message = getattr(first_choice, "message", None) or {}
+        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
         if not content:
+            logger.error("OpenAI response missing content | model=%s", model_name)
             raise ValueError("Empty response from OpenAI API")
         return str(content)
 
@@ -8089,9 +8125,21 @@ class ReportApp:
         def _run_job(job: ScrapeTask) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
             try:
                 response_text = self._call_openai(api_key, job.prompt_text, job.page_text)
-            except requests.RequestException as exc:
+            except (APIConnectionError, APIError, APIStatusError, RateLimitError) as exc:
+                logger.error(
+                    "OpenAI request failed | entry=%s | category=%s | detail=%s",
+                    job.entry_name,
+                    job.category,
+                    exc,
+                )
                 return False, None, f"{job.entry_name} - {job.category}: API request failed ({exc})"
             except Exception as exc:
+                logger.error(
+                    "OpenAI processing error | entry=%s | category=%s | detail=%s",
+                    job.entry_name,
+                    job.category,
+                    exc,
+                )
                 return False, None, f"{job.entry_name} - {job.category}: {exc}"
 
             pdf_stem = Path(job.entry_name).stem
