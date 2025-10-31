@@ -32,12 +32,13 @@ PYMUPDF_REQUIRED_MESSAGE = (
 
 from PIL import Image, ImageTk
 import webbrowser
-from openai import OpenAI
-
-try:  # pragma: no cover - gracefully handle differing OpenAI client versions
-    from openai import APIConnectionError, APIError, APIStatusError, RateLimitError
-except ImportError:  # pragma: no cover - fallback to generic exceptions if unavailable
-    APIConnectionError = APIError = APIStatusError = RateLimitError = Exception  # type: ignore[assignment]
+from openai import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    OpenAI,
+    RateLimitError,
+)
 
 from analyst import FinanceDataset, FinancePlotFrame
 
