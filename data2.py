@@ -1034,6 +1034,14 @@ class ReportAppV2:
         # Auto-load last company toggle
         self.auto_load_last_company_var = tk.BooleanVar(master=self.root, value=False)
 
+        # Combined tab state
+        self.combined_date_tree: Optional[ttk.Treeview] = None
+        self.combined_table: Optional[ttk.Treeview] = None
+        self.combined_create_button: Optional[ttk.Button] = None
+        self.combined_save_button: Optional[ttk.Button] = None
+        self.combined_columns: List[str] = []
+        self.combined_rows: List[List[str]] = []
+
         self._suspend_api_key_save = True
         self._load_local_config()
         self._suspend_api_key_save = False
@@ -1299,6 +1307,51 @@ class ReportAppV2:
         self.scrape_category_inners: Dict[Tuple[Path, str], ttk.Frame] = {}
         self.scrape_category_windows: Dict[Tuple[Path, str], int] = {}
         self.scrape_category_placeholders: Dict[Tuple[Path, str], Optional[tk.Widget]] = {}
+
+        # ---------------- Combined Tab ----------------
+        combined_tab = ttk.Frame(self.notebook)
+        self.notebook.add(combined_tab, text="Combined")
+
+        combined_top = CollapsibleFrame(combined_tab, "Date Columns by PDF", initially_open=True)
+        combined_top.pack(fill=tk.BOTH, expand=False, padx=8, pady=(8, 0))
+
+        date_frame = ttk.Frame(combined_top.content, padding=8)
+        date_frame.pack(fill=tk.BOTH, expand=True)
+        cols = ("pdf", "financial", "income", "shares")
+        self.combined_date_tree = ttk.Treeview(date_frame, columns=cols, show="headings", height=6)
+        self.combined_date_tree.heading("pdf", text="PDF")
+        self.combined_date_tree.heading("financial", text="Financial Dates")
+        self.combined_date_tree.heading("income", text="Income Dates")
+        self.combined_date_tree.heading("shares", text="Shares Dates")
+        self.combined_date_tree.column("pdf", width=240, anchor=tk.W, stretch=True)
+        self.combined_date_tree.column("financial", width=260, anchor=tk.W, stretch=True)
+        self.combined_date_tree.column("income", width=260, anchor=tk.W, stretch=True)
+        self.combined_date_tree.column("shares", width=260, anchor=tk.W, stretch=True)
+        ysc = ttk.Scrollbar(date_frame, orient=tk.VERTICAL, command=self.combined_date_tree.yview)
+        self.combined_date_tree.configure(yscrollcommand=ysc.set)
+        self.combined_date_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ysc.pack(side=tk.RIGHT, fill=tk.Y)
+
+        controls = ttk.Frame(combined_tab, padding=8)
+        controls.pack(fill=tk.X)
+        self.combined_create_button = ttk.Button(controls, text="Create", command=self.create_combined_dataset)
+        self.combined_create_button.pack(side=tk.LEFT)
+        self.combined_save_button = ttk.Button(controls, text="Save CSV", command=self.save_combined_to_csv, state="disabled")
+        self.combined_save_button.pack(side=tk.LEFT, padx=(6, 0))
+
+        table_container = ttk.Frame(combined_tab, padding=(8, 0, 8, 8))
+        table_container.pack(fill=tk.BOTH, expand=True)
+        table_container.rowconfigure(0, weight=1)
+        table_container.columnconfigure(0, weight=1)
+        self.combined_table = ttk.Treeview(table_container, columns=("init",), show="headings")
+        self.combined_table.heading("init", text="Combined table not yet created. Click 'Create'.")
+        self.combined_table.column("init", width=600, anchor=tk.W, stretch=True)
+        self.combined_table.grid(row=0, column=0, sticky="nsew")
+        ysb = ttk.Scrollbar(table_container, orient=tk.VERTICAL, command=self.combined_table.yview)
+        xsb = ttk.Scrollbar(table_container, orient=tk.HORIZONTAL, command=self.combined_table.xview)
+        self.combined_table.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+        ysb.grid(row=0, column=1, sticky="ns")
+        xsb.grid(row=1, column=0, sticky="ew")
 
     def _on_toggle_auto_scale_tables(self) -> None:
         enabled = self.auto_scale_tables_var.get()
@@ -1793,6 +1846,7 @@ class ReportAppV2:
         self.active_scrape_key = None
         self._refresh_scrape_results()
         self._clear_scrape_preview()
+        self.refresh_combined_tab()
 
     def load_pdfs(self) -> None:
         folder = self.folder_path.get()
@@ -1857,6 +1911,7 @@ class ReportAppV2:
 
         self._rebuild_review_grid()
         self._save_config()
+        self.refresh_combined_tab()
 
     def _apply_existing_assignments(self, entry: PDFEntry) -> None:
         record = self.assigned_pages.get(entry.path.name)
@@ -2003,6 +2058,7 @@ class ReportAppV2:
             self.scrape_type_notebook.tab(placeholder_tab, state="disabled")
             self._clear_scrape_preview()
             self.active_scrape_key = None
+            self.refresh_combined_tab()
             return
 
         # Create outer tabs for each category and inner pdf notebooks
@@ -2104,6 +2160,7 @@ class ReportAppV2:
         if not self.scrape_panels:
             self._clear_scrape_preview()
             self.active_scrape_key = None
+            self.refresh_combined_tab()
             return
 
         if default_entry is None or default_category is None:
@@ -2112,9 +2169,11 @@ class ReportAppV2:
             default_category = first_category
 
         if default_entry is None or default_category is None:
+            self.refresh_combined_tab()
             return
 
         self.set_active_scrape_panel(default_entry, default_category)
+        self.refresh_combined_tab()
 
     def _clear_scrape_preview(self) -> None:
         if not hasattr(self, "scrape_preview_label"):
@@ -3241,6 +3300,8 @@ class ReportAppV2:
                 self._display_scrape_preview_page(force=True)
             else:
                 self._show_scrape_preview(job.entry, job.category)
+        # update Combined date contrast as new CSVs appear
+        self.refresh_combined_tab()
 
     def _on_scrape_jobs_finished(self, total: int, errors: List[str]) -> None:
         self.scrape_button.configure(state="normal")
@@ -3698,6 +3759,8 @@ class ReportAppV2:
             entry = self._get_entry_by_path(path)
             if entry is not None:
                 self._show_scrape_preview(entry, category)
+        # Keep Combined contrast updated
+        self.refresh_combined_tab()
 
     # ------------------------------------------------------------------ Auto-load helper
     def _maybe_auto_load_last_company(self) -> None:
@@ -3720,6 +3783,234 @@ class ReportAppV2:
             return
         # Defer loading to allow UI to initialize
         self.root.after(0, self.load_pdfs)
+
+    # ------------------------------------------------------------------ Combined helpers and UI actions
+    def _combined_scrape_dir_for_entry(self, entry: PDFEntry) -> Path:
+        company = self.company_var.get().strip()
+        if company:
+            return self.companies_dir / company / "openapiscrape" / entry.path.stem
+        return entry.path.parent / "openapiscrape" / entry.path.stem
+
+    def _read_csv_path(self, path: Path) -> Tuple[List[str], List[List[str]]]:
+        header: List[str] = []
+        rows: List[List[str]] = []
+        if not path.exists():
+            return header, rows
+        try:
+            with path.open("r", encoding="utf-8", newline="") as fh:
+                reader = csv.reader(fh)
+                for raw in reader:
+                    if not raw:
+                        continue
+                    if not header:
+                        cand = normalize_header_row([c.strip() for c in raw])
+                        header = cand or [c.strip() for c in raw]
+                    else:
+                        rows.append([c.strip() for c in raw])
+        except Exception:
+            return [], []
+        return header, rows
+
+    @staticmethod
+    def _date_columns_from_header(header: List[str]) -> List[str]:
+        ignore = {"category", "subcategory", "item", "note"}
+        out: List[str] = []
+        for name in header:
+            if name.strip().lower() in ignore:
+                continue
+            out.append(name.strip())
+        return out
+
+    @staticmethod
+    def _parse_date_key(val: str) -> Tuple[int, int, int]:
+        s = val.strip()
+        # Try dd.mm.yyyy or dd/mm/yyyy
+        for sep in (".", "/"):
+            parts = s.split(sep)
+            if len(parts) == 3 and all(part.isdigit() for part in parts):
+                d, m, y = parts
+                try:
+                    return int(y), int(m), int(d)
+                except Exception:
+                    continue
+        # Fallback: try yyyy-mm-dd
+        try:
+            dt = datetime.strptime(s, "%Y-%m-%d")
+            return (dt.year, dt.month, dt.day)
+        except Exception:
+            pass
+        # Fallback lexical bucket
+        return (0, 0, 0)
+
+    def refresh_combined_tab(self) -> None:
+        # Refresh the date contrast tree
+        if self.combined_date_tree is None:
+            return
+        tree = self.combined_date_tree
+        for iid in tree.get_children(""):
+            tree.delete(iid)
+        for entry in self.pdf_entries:
+            base = self._combined_scrape_dir_for_entry(entry)
+            fin_header, _ = self._read_csv_path(base / "Financial.csv")
+            inc_header, _ = self._read_csv_path(base / "Income.csv")
+            sh_header, _ = self._read_csv_path(base / "Shares.csv")
+            fin_dates = ", ".join(self._date_columns_from_header(fin_header)) if fin_header else ""
+            inc_dates = ", ".join(self._date_columns_from_header(inc_header)) if inc_header else ""
+            sh_dates = ", ".join(self._date_columns_from_header(sh_header)) if sh_header else ""
+            tree.insert("", "end", values=(entry.path.name, fin_dates, inc_dates, sh_dates))
+
+    def create_combined_dataset(self) -> None:
+        if not self.pdf_entries:
+            messagebox.showinfo("Combined", "Load PDFs and run AIScrape to produce CSVs first.")
+            return
+        # Build combined map and check NOTE consistency
+        key_data: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        note_sets: Dict[Tuple[str, str, str], set] = {}
+        all_dates: List[str] = []
+        date_seen: set = set()
+
+        def add_row(header: List[str], row: List[str]) -> None:
+            # Map indices
+            hmap = {h.strip().upper(): idx for idx, h in enumerate(header)}
+            cat = row[hmap.get("CATEGORY", -1)].strip() if "CATEGORY" in hmap else ""
+            sub = row[hmap.get("SUBCATEGORY", -1)].strip() if "SUBCATEGORY" in hmap else ""
+            item = row[hmap.get("ITEM", -1)].strip() if "ITEM" in hmap else ""
+            if not (cat or sub or item):
+                return
+            key = (cat, sub, item)
+            note_val = row[hmap.get("NOTE", -1)].strip() if "NOTE" in hmap else ""
+            # Track note set
+            s = note_sets.setdefault(key, set())
+            if note_val:
+                s.add(note_val)
+            rec = key_data.setdefault(key, {"NOTE": note_val, "values": {}})
+            if note_val and not rec["NOTE"]:
+                rec["NOTE"] = note_val
+            # Collect date columns
+            for idx, name in enumerate(header):
+                name_s = name.strip()
+                if name_s.lower() in {"category", "subcategory", "item", "note"}:
+                    continue
+                val = row[idx].strip() if idx < len(row) else ""
+                if not val:
+                    continue
+                rec["values"][name_s] = val
+                if name_s not in date_seen:
+                    date_seen.add(name_s)
+                    all_dates.append(name_s)
+
+        # Iterate all CSVs for each pdf and category
+        for entry in self.pdf_entries:
+            base = self._combined_scrape_dir_for_entry(entry)
+            for category in COLUMNS:
+                path = base / f"{category}.csv"
+                header, rows = self._read_csv_path(path)
+                if not header or not rows:
+                    continue
+                # Ensure header normalized for lookup, but keep original strings for date names
+                # Normalize by passing through normalize_header_row
+                cand = normalize_header_row(header)
+                if cand is not None:
+                    header = cand
+                for row in rows:
+                    # Pad row
+                    if len(row) < len(header):
+                        row = row + [""] * (len(header) - len(row))
+                    add_row(header, row)
+
+        # Check note consistency
+        conflicts: List[Tuple[Tuple[str, str, str], List[str]]] = []
+        for key, s in note_sets.items():
+            uniq = sorted({v for v in s if v is not None})
+            # If more than 1 unique non-empty NOTE
+            if len(uniq) > 1:
+                conflicts.append((key, uniq))
+        if conflicts:
+            msg_lines = ["Conflicting NOTE values found for some entries. Resolve before combining.", ""]
+            for key, vals in conflicts[:20]:
+                cat, sub, item = key
+                msg_lines.append(f"- {cat} | {sub} | {item}: {', '.join(vals)}")
+            if len(conflicts) > 20:
+                msg_lines.append(f"... and {len(conflicts) - 20} more")
+            messagebox.showerror("Combined – NOTE conflict", "\n".join(msg_lines))
+            return
+
+        # Sort date columns by parsed date (desc), fallback by name
+        def date_sort_key(name: str) -> Tuple[int, int, int, str]:
+            y, m, d = self._parse_date_key(name)
+            return (y, m, d, name)
+
+        all_dates_sorted = sorted(all_dates, key=date_sort_key, reverse=True)
+        columns = ["CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"] + all_dates_sorted
+
+        # Build rows sorted by key
+        def key_sort(k: Tuple[str, str, str]) -> Tuple[str, str, str]:
+            return (k[0] or "", k[1] or "", k[2] or "")
+
+        rows_out: List[List[str]] = []
+        for key in sorted(key_data.keys(), key=key_sort):
+            rec = key_data[key]
+            cat, sub, item = key
+            note_val = rec.get("NOTE", "")
+            values_map: Dict[str, str] = rec.get("values", {})
+            row = [cat, sub, item, note_val] + [values_map.get(d, "") for d in all_dates_sorted]
+            rows_out.append(row)
+
+        # Update UI table
+        self._populate_combined_table(columns, rows_out)
+        self.combined_columns = columns
+        self.combined_rows = rows_out
+        if self.combined_save_button is not None:
+            self.combined_save_button.configure(state="normal")
+
+        messagebox.showinfo("Combined", f"Combined dataset created with {len(rows_out)} rows and {len(columns)} columns.")
+
+    def _populate_combined_table(self, columns: List[str], rows: List[List[str]]) -> None:
+        if self.combined_table is None:
+            return
+        tv = self.combined_table
+        # Clear existing
+        for iid in tv.get_children(""):
+            tv.delete(iid)
+        # Configure columns
+        col_ids = [f"c{idx}" for idx in range(len(columns))]
+        tv.configure(columns=col_ids, displaycolumns=col_ids, show="headings")
+        for idx, cid in enumerate(col_ids):
+            name = columns[idx]
+            anchor = tk.W if name.lower() in {"category", "subcategory", "item", "note"} else tk.E
+            tv.heading(cid, text=name)
+            width = self.get_scrape_column_width(name)
+            tv.column(cid, width=width, anchor=anchor, stretch=True)
+        # Insert rows
+        for row in rows:
+            values = list(row[:len(col_ids)])
+            if len(values) < len(col_ids):
+                values += [""] * (len(col_ids) - len(values))
+            tv.insert("", "end", values=values)
+
+    def save_combined_to_csv(self) -> None:
+        if not self.combined_columns or not self.combined_rows:
+            messagebox.showinfo("Save Combined", "No combined data to save. Click 'Create' first.")
+            return
+        company = self.company_var.get().strip()
+        target_dir: Optional[Path] = None
+        if company:
+            target_dir = self.companies_dir / company / "openapiscrape"
+        elif self.pdf_entries:
+            target_dir = self.pdf_entries[0].path.parent / "openapiscrape"
+        else:
+            messagebox.showinfo("Save Combined", "Select a company or load PDFs first.")
+            return
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            out_path = target_dir / "Combined.csv"
+            with out_path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
+                writer.writerow(self.combined_columns)
+                writer.writerows(self.combined_rows)
+            messagebox.showinfo("Save Combined", f"Saved combined CSV to:\n{out_path}")
+        except Exception as exc:
+            messagebox.showerror("Save Combined", f"Failed to save combined CSV: {exc}")
 
 
 def main() -> None:
