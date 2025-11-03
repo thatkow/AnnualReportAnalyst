@@ -769,7 +769,7 @@ class ScrapeResultPanel:
 
         normalized = self._normalize_state_label(state_label)
 
-        # --- Update NOTE column immediately ---
+        # --- Update NOTE column immediately on current table ---
         note_index = self._note_column_index()
         if note_index is not None:
             values = list(self.table.item(item_id, "values"))
@@ -778,38 +778,53 @@ class ScrapeResultPanel:
             values[note_index] = state_label
             self.table.item(item_id, values=values)
             self._apply_note_color_to_item(item_id)
-            self.table.update_idletasks()  # ensures last row redraws immediately
+            self.table.update_idletasks()
 
-        # --- Apply state locally or across all panels ---
         key = self.row_keys.get(item_id)
-        if apply_all and key:
-            # propagate to all panels
-            self.app.apply_row_state_to_all(key, normalized)
 
-            # Also propagate NOTE + color changes
-            for panel in self.app.scrape_panels.values():
-                for other_id, other_key in panel.row_keys.items():
-                    if other_key == key:
-                        vals = list(panel.table.item(other_id, "values"))
-                        if len(vals) <= note_index:
-                            vals.extend([""] * (note_index + 1 - len(vals)))
-                        vals[note_index] = state_label
-                        panel.table.item(other_id, values=vals)
-                        panel._apply_note_color_to_item(other_id)
-                        panel.table.update_idletasks()
-                        panel.save_table_to_csv()
-        else:
-            # single row only
+        # --- Apply to all matching rows across panels (non-recursive) ---
+        if apply_all and key and not getattr(self, "_is_propagating", False):
+            self._is_propagating = True
+            try:
+                # Just update logical state, no config reload
+                if hasattr(self.app, "scrape_row_state_by_key"):
+                    self.app.scrape_row_state_by_key[key] = normalized
+
+                for panel in self.app.scrape_panels.values():
+                    # Skip this panel (already updated)
+                    if panel is self:
+                        continue
+
+                    # Update all matching rows in that panel
+                    for other_id, other_key in panel.row_keys.items():
+                        if other_key == key:
+                            # --- update NOTE field ---
+                            vals = list(panel.table.item(other_id, "values"))
+                            if len(vals) <= note_index:
+                                vals.extend([""] * (note_index + 1 - len(vals)))
+                            vals[note_index] = state_label
+                            panel.table.item(other_id, values=vals)
+
+                            # --- apply color from user-defined mapping ---
+                            panel._apply_note_color_to_item(other_id)
+                            panel.table.update_idletasks()
+                            break
+
+                    # persist that panel’s table
+                    panel.save_table_to_csv()
+            finally:
+                self._is_propagating = False
+
+        # --- Local single-row update ---
+        elif not apply_all:
             self.update_row_state(item_id, normalized)
             self.table.update_idletasks()
 
-        # --- Persist & refresh ---
+        # --- Save, deselect, and clear context ---
         self.save_table_to_csv()
-        self.update_note_coloring()
-        self.app.reload_scrape_panels()
+        self.table.selection_remove(self.table.selection())  # ✅ clear highlight
         self._context_item = None
 
- 
 
     def update_row_state(self, item_id: str, state: Optional[str]) -> None:
         if state in (None, ""):
