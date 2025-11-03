@@ -17,36 +17,34 @@ Include **every** line under:
 
 Continue until the next primary statement (e.g., Income Statement, Cash Flows).
 
-**Do not remove or skip any scraped rows**. Every line found within the detected
-statement must be included in the final CSV, even if it represents totals,
-subtotals, or non-material sections.
+✅ **Never remove, skip, or merge any scraped rows.**
+If the document contains totals, subtotals, or blank lines, **retain them all**
+as separate rows. Classification replaces exclusion — not deletion.
 
 ═══════════════════════════════════════════════════════════════════════════════
 2. SCALE FACTOR DETECTION
 Detect the presentation scale (e.g., “dollars in millions”, “amounts in thousands”, etc.).
 Select the appropriate multiplier:
-• “in thousands”, “000s”, “Amounts in thousands” → 1,000  
-• “in millions”, “USD millions”, “AUD $ million”, “$M” → 1,000,000  
-• “in billions”, “bn”, “billion” → 1,000,000,000  
+• “in thousands”, “000s”, “Amounts in thousands” → 1,000
+• “in millions”, “USD millions”, “AUD $ million”, “$M” → 1,000,000
+• “in billions”, “bn”, “billion” → 1,000,000,000
 If none specified, use 1.
 
-Do not apply the multiplier — just detect and output it as:
+Do **not** apply the multiplier — just output it as:
 Multiplier: <value>
 
 ═══════════════════════════════════════════════════════════════════════════════
 3. DATE COLUMN DETECTION AND NORMALIZATION
 Detect all date column headers in the balance sheet (usually reporting dates).
 
-Normalize all detected dates to the format DD.MM.YYYY — no exceptions.
+Normalize all detected dates to the format DD.MM.YYYY.
 
 Examples:
-30 June 2024 → 30.06.2024  
-June 30, 2023 → 30.06.2023  
-31/12/23 → 31.12.2023  
-2023-12-31 → 31.12.2023  
-Dec 31 2022 → 31.12.2022  
-2023 → 31.12.2023 (assume year-end)  
-Jun 2023 → 30.06.2023 (assume end of that month)
+30 June 2024 → 30.06.2024
+June 30, 2023 → 30.06.2023
+31/12/23 → 31.12.2023
+2023 → 31.12.2023 (assume year-end)
+Jun 2023 → 30.06.2023 (assume month-end)
 
 Always output normalized dates in the CSV header exactly as DD.MM.YYYY.
 
@@ -59,18 +57,19 @@ Leave SUBCATEGORY blank if none applies.
 
 ═══════════════════════════════════════════════════════════════════════════════
 5. CLASSIFICATION RULES
-For each row, classify using the NOTE column as follows:
+Each row must be given a NOTE value as follows:
 
 | Context | NOTE |
 |----------|------|
-| ASSETS section | **asis** |
-| LIABILITIES section | **negated** |
-| SHAREHOLDERS’ EQUITY — “Noncontrolling interests” | **negated** |
-| SHAREHOLDERS’ EQUITY — all other items | **excluded** |
-| Totals, subtotals, or redeemable lines | **excluded** |
+| ASSETS section | asis |
+| LIABILITIES section | negated |
+| SHAREHOLDERS’ EQUITY — “Noncontrolling interests” | negated |
+| SHAREHOLDERS’ EQUITY — all other items | excluded |
+| Totals, subtotals, or redeemable lines | excluded |
 
-**Never drop any rows** — classification replaces exclusion.
-Every scraped line must appear in the final CSV with one of these NOTE labels.
+✅ **All rows must remain in the CSV.**
+Totals, subtotals, and group sums (e.g., “TOTAL ASSETS”) are **never dropped**;
+they are kept with NOTE = "excluded".
 
 ═══════════════════════════════════════════════════════════════════════════════
 6. OUTPUT FORMAT
@@ -89,8 +88,8 @@ Formatting rules:
 - Parentheses → negative
 - Dash or blank → 0
 - Do not scale numbers
-- **Include every row**, even those with NOTE = "excluded"
-- Normalize all date headers to DD.MM.YYYY
+- Include **every** scraped line (no omissions)
+- Normalize date headers to DD.MM.YYYY
 
 ═══════════════════════════════════════════════════════════════════════════════
 7. OUTPUT EXAMPLE
@@ -98,10 +97,10 @@ Formatting rules:
 Multiplier: 1000000
 CATEGORY,SUBCATEGORY,ITEM,NOTE,31.12.2024,31.12.2023
 "ASSETS","INSURANCE AND OTHER","CASH AND CASH EQUIVALENTS","asis",44333,34268
-"ASSETS","INSURANCE AND OTHER","INVESTMENTS IN EQUITY SECURITIES","asis",271588,353842
-"ASSETS","RAILROAD, UTILITIES AND ENERGY","PROPERTY, PLANT AND EQUIPMENT","asis",175030,169447
+"ASSETS","INSURANCE AND OTHER","TOTAL INSURANCE AND OTHER","excluded",725989,741993
+"ASSETS","","TOTAL ASSETS","excluded",948452,958784
 "LIABILITIES","INSURANCE AND OTHER","UNPAID LOSSES AND LOSS ADJUSTMENT EXPENSES","negated",115151,111082
-"LIABILITIES","RAILROAD, UTILITIES AND ENERGY","REGULATORY LIABILITIES","negated",7033,6818
+"LIABILITIES","","TOTAL LIABILITIES","excluded",467835,443854
 "SHAREHOLDERS’ EQUITY","","NONCONTROLLING INTERESTS","negated",2287,6236
-"SHAREHOLDERS’ EQUITY","","RETAINED EARNINGS","excluded",696218,607350
-"","","TOTAL LIABILITIES AND SHAREHOLDERS’ EQUITY","excluded",1153881,1069978
+"SHAREHOLDERS’ EQUITY","","TOTAL SHAREHOLDERS’ EQUITY","excluded",480617,514930
+"","","TOTAL LIABILITIES AND SHAREHOLDERS’ EQUITY","excluded",948452,958784
