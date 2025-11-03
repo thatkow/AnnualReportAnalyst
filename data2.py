@@ -784,20 +784,8 @@ class ScrapeResultPanel:
         key = self.row_keys.get(item_id)
         if apply_all and key:
             # propagate to all panels
-            self.app.apply_row_state_to_all(key, normalized)
-
-            # Also propagate NOTE + color changes
-            for panel in self.app.scrape_panels.values():
-                for other_id, other_key in panel.row_keys.items():
-                    if other_key == key:
-                        vals = list(panel.table.item(other_id, "values"))
-                        if len(vals) <= note_index:
-                            vals.extend([""] * (note_index + 1 - len(vals)))
-                        vals[note_index] = state_label
-                        panel.table.item(other_id, values=vals)
-                        panel._apply_note_color_to_item(other_id)
-                        panel.table.update_idletasks()
-                        panel.save_table_to_csv()
+            propagated_note = self._get_note_value_for_item(item_id)
+            self.app.apply_row_state_to_all(key, normalized, propagated_note)
         else:
             # single row only
             self.update_row_state(item_id, normalized)
@@ -2126,7 +2114,12 @@ class ReportAppV2:
         for key in to_remove:
             self.scrape_row_registry.pop(key, None)
 
-    def apply_row_state_to_all(self, key: Tuple[str, str, str], state: Optional[str]) -> None:
+    def apply_row_state_to_all(
+        self,
+        key: Tuple[str, str, str],
+        state: Optional[str],
+        note_value: Optional[str] = None,
+    ) -> None:
         """
         Apply the given row state across all panels with the same
         (CATEGORY, SUBCATEGORY, ITEM) key, including correct note-color update.
@@ -2136,6 +2129,10 @@ class ReportAppV2:
         else:
             self.scrape_row_state_by_key[key] = state
 
+        normalized_note_value = (note_value or "").strip()
+        if not normalized_note_value:
+            normalized_note_value = state if state else "asis"
+
         for panel, item_id in list(self.scrape_row_registry.get(key, [])):
             # Update stored state and NOTE column
             panel.update_row_state(item_id, state)
@@ -2144,7 +2141,7 @@ class ReportAppV2:
                 vals = list(panel.table.item(item_id, "values"))
                 if len(vals) <= note_idx:
                     vals.extend([""] * (note_idx + 1 - len(vals)))
-                vals[note_idx] = state if state else "asis"
+                vals[note_idx] = normalized_note_value
                 panel.table.item(item_id, values=vals)
 
                 # Use configured note color from "Configure Note Colors..."
