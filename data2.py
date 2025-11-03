@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk, colorchooser
 
 try:
     import fitz  # type: ignore[import-untyped]
@@ -57,6 +57,25 @@ SCRAPE_PLACEHOLDER_ROWS = 10
 
 SHIFT_MASK = 0x0001
 CONTROL_MASK = 0x0004
+
+# Default note color scheme and fallback palette
+DEFAULT_NOTE_COLOR_SCHEME: Dict[str, str] = {
+    "1": "#FFF2CC",  # light yellow
+    "2": "#E2EFDA",  # light green
+    "3": "#FCE4D6",  # light orange
+    "4": "#E7E6FF",  # light purple
+    "5": "#DDEBF7",  # light blue
+    "6": "#F4CCCC",  # light red/pink
+    "7": "#D9EAD3",
+    "8": "#CFE2F3",
+    "9": "#FFD966",
+    "10": "#D9D2E9",
+}
+FALLBACK_NOTE_PALETTE: List[str] = [
+    "#FFF2CC", "#E2EFDA", "#FCE4D6", "#E7E6FF", "#DDEBF7",
+    "#F4CCCC", "#D9EAD3", "#CFE2F3", "#FFD966", "#D9D2E9",
+    "#F8CBAD", "#C9DAF8", "#EAD1DC", "#D0E0E3", "#E6B8AF",
+]
 
 
 def normalize_header_row(cells: List[str]) -> Optional[List[str]]:
@@ -650,26 +669,38 @@ class ScrapeResultPanel:
             normalized_rows.append(trimmed)
         rows = normalized_rows
 
-        register_rows = self.has_csv_data
-        self._populate(rows, register=register_rows, header=new_columns)
-        if register_rows:
-            self.has_csv_data = bool(rows)
-            try:
-                with self.csv_path.open("w", encoding="utf-8", newline="") as fh:
-                    writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
-                    writer.writerow(new_columns)
-                    if rows:
-                        writer.writerows(rows)
-            except OSError:
-                logger.exception(
-                    "Unable to persist CSV update after deleting column for %s - %s",
-                    self.entry.path.name,
-                    self.category,
-                )
-        else:
-            self.has_csv_data = False
-
+        # Re-populate and immediately write out the updated table
+        self._populate(rows, register=self.has_csv_data, header=new_columns)
+        self.has_csv_data = bool(rows)
+        self.save_table_to_csv()
         self._update_action_states()
+
+    def save_table_to_csv(self) -> None:
+        try:
+            self.target_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.exception(
+                "Unable to ensure scrape directory exists: %s", self.target_dir
+            )
+            return
+        try:
+            with self.csv_path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
+                writer.writerow(self.current_columns)
+                for item_id in self.table.get_children(""):
+                    values = list(self.table.item(item_id, "values"))
+                    expected_len = len(self.current_columns)
+                    if len(values) < expected_len:
+                        values.extend([""] * (expected_len - len(values)))
+                    else:
+                        values = values[:expected_len]
+                    writer.writerow(values)
+        except OSError:
+            logger.exception(
+                "Unable to persist CSV after table modification for %s - %s",
+                self.entry.path.name,
+                self.category,
+            )
 
     def _populate(
         self,
@@ -702,6 +733,8 @@ class ScrapeResultPanel:
                 initial_state = self.app.scrape_row_state_by_key.get(key)
                 if initial_state:
                     self.update_row_state(item_id, initial_state)
+            # Apply note-based coloring per row
+            self._apply_note_color_to_item(item_id)
         self._current_row_count = max(len(rows), 1)
         self._update_table_height()
 
@@ -750,12 +783,26 @@ class ScrapeResultPanel:
             self._apply_state_to_item(item_id, state)
             if self._context_item == item_id:
                 self._row_state_var.set(state)
+        # Immediately write out on modification
+        self.save_table_to_csv()
 
     def _apply_state_to_item(self, item_id: str, state: Optional[str]) -> None:
         existing_tags = list(self.table.item(item_id, "tags"))
-        filtered_tags = [tag for tag in existing_tags if not tag.startswith("state-")]
+        # Preserve note-color tag(s), replace state-* tag
+        note_tags = [tag for tag in existing_tags if tag.startswith("note-color-")]
+        filtered_tags = [tag for tag in existing_tags if not tag.startswith("state-") and not tag.startswith("note-color-")]
         if state:
             filtered_tags.append(f"state-{state}")
+        # Ensure note color tag is last to override background
+        note_tag = None
+        if not note_tags:
+            # recompute and add note tag if any
+            self._apply_note_color_to_item(item_id)
+            note_tags = [tag for tag in self.table.item(item_id, "tags") if tag.startswith("note-color-")]
+        if note_tags:
+            note_tag = note_tags[-1]
+        if note_tag:
+            filtered_tags.append(note_tag)
         self.table.item(item_id, tags=filtered_tags)
 
     @staticmethod
@@ -795,6 +842,41 @@ class ScrapeResultPanel:
         elif getattr(event, "num", None) == 5:
             self.table.yview_scroll(1, "units")
         return "break"
+
+    # Note coloring helpers
+    def _note_column_index(self) -> Optional[int]:
+        for idx, name in enumerate(self.current_columns):
+            if name.strip().lower() == "note":
+                return idx
+        return None
+
+    def _get_note_value_for_item(self, item_id: str) -> str:
+        idx = self._note_column_index()
+        if idx is None:
+            return ""
+        values = list(self.table.item(item_id, "values"))
+        if idx < len(values):
+            return str(values[idx]).strip()
+        return ""
+
+    def _apply_note_color_to_item(self, item_id: str) -> None:
+        note_val = self._get_note_value_for_item(item_id)
+        color = self.app.get_note_color(note_val)
+        existing_tags = list(self.table.item(item_id, "tags"))
+        # remove any previous note-color-*
+        filtered = [t for t in existing_tags if not t.startswith("note-color-")]
+        if color:
+            tag = f"note-color-{color.replace('#','')}"
+            try:
+                self.table.tag_configure(tag, background=color)
+            except Exception:
+                pass
+            filtered.append(tag)
+        self.table.item(item_id, tags=filtered)
+
+    def update_note_coloring(self) -> None:
+        for item_id in self.table.get_children(""):
+            self._apply_note_color_to_item(item_id)
 
 
 @dataclass
@@ -858,6 +940,9 @@ class ReportAppV2:
             "note": 140,
             "dates": 140,
         }
+        # Note color scheme and fallback palette
+        self.note_color_scheme: Dict[str, str] = dict(DEFAULT_NOTE_COLOR_SCHEME)
+        self.fallback_note_palette: List[str] = list(FALLBACK_NOTE_PALETTE)
 
         self.pdf_entries: List[PDFEntry] = []
         self.category_rows: Dict[Tuple[Path, str], CategoryRow] = {}
@@ -916,6 +1001,10 @@ class ReportAppV2:
         view_menu.add_command(
             label="Configure Scrape Column Widths…",
             command=self._configure_scrape_column_widths,
+        )
+        view_menu.add_command(
+            label="Configure Note Colors…",
+            command=self._configure_note_colors,
         )
         menu_bar.add_cascade(label="View", menu=view_menu)
 
@@ -1195,6 +1284,7 @@ class ReportAppV2:
             "openai_models": openai_models,
             "upload_modes": upload_modes,
             "scrape_column_widths": dict(self.scrape_column_widths),
+            "note_colors": dict(self.note_color_scheme),
         }
         return payload
 
@@ -1281,6 +1371,15 @@ class ReportAppV2:
                         self.scrape_column_widths[key] = max(40, int(value))
                 except (TypeError, ValueError):
                     continue
+
+        note_colors = data.get("note_colors")
+        if isinstance(note_colors, dict):
+            scheme: Dict[str, str] = {}
+            for k, v in note_colors.items():
+                if isinstance(k, str) and isinstance(v, str) and v.strip():
+                    scheme[k.strip()] = v.strip()
+            if scheme:
+                self.note_color_scheme = scheme
 
     def _load_local_config(self) -> None:
         self.local_config_data = {}
@@ -1900,6 +1999,8 @@ class ReportAppV2:
                     self.auto_scale_tables_var.get(),
                 )
                 panel.load_from_files()
+                # Ensure note coloring is applied on load
+                panel.update_note_coloring()
                 self.scrape_panels[key] = panel
                 if panel.has_csv_data or pages:
                     if default_entry is None:
@@ -2251,7 +2352,7 @@ class ReportAppV2:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         text_widget.configure(yscrollcommand=scrollbar.set)
 
-        ttk.Button(window, text="Close", command=window.destroy).pack(pady=(0, 8))
+        ttk.Button(window, text="Close", command=window.destroy()).pack(pady=(0, 8))
 
     def _open_with_default_app(self, path: Path, failure_title: str) -> None:
         try:
@@ -3336,6 +3437,7 @@ class ReportAppV2:
             self._save_pattern_config()
             for panel in self.scrape_panels.values():
                 panel._apply_table_columns(panel.current_columns)
+                panel.update_note_coloring()
             window.destroy()
 
         ttk.Button(buttons, text="Cancel", command=on_cancel).pack(side=tk.RIGHT)
@@ -3343,6 +3445,116 @@ class ReportAppV2:
 
         window.bind("<Escape>", lambda _e: on_cancel())
         window.bind("<Return>", lambda _e: on_save())
+        window.grab_set()
+        window.focus_force()
+
+    # ------------------------------------------------------------------ Note colors configuration
+    def get_note_color(self, note_value: str) -> Optional[str]:
+        key = (note_value or "").strip()
+        if not key:
+            return None
+        color = self.note_color_scheme.get(key)
+        if color:
+            return color
+        # Fallback palette selection for unmapped values
+        idx = sum(ord(ch) for ch in key) % len(self.fallback_note_palette)
+        return self.fallback_note_palette[idx]
+
+    def apply_note_colors_to_all_panels(self) -> None:
+        for panel in self.scrape_panels.values():
+            panel.update_note_coloring()
+
+    def _configure_note_colors(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Configure Note Colors")
+        window.transient(self.root)
+        window.resizable(False, False)
+
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        columns = ("value", "color")
+        tv = ttk.Treeview(frame, columns=columns, show="headings", height=8)
+        tv.heading("value", text="Note Value")
+        tv.heading("color", text="Color (hex)")
+        tv.column("value", width=140, anchor=tk.W)
+        tv.column("color", width=120, anchor=tk.W)
+        tv.pack(fill=tk.BOTH, expand=True)
+
+        local_map: Dict[str, str] = dict(self.note_color_scheme)
+
+        def refresh_view() -> None:
+            for iid in tv.get_children(""):
+                tv.delete(iid)
+            for k in sorted(local_map.keys(), key=lambda s: (s.isdigit(), int(s) if s.isdigit() else s)):
+                tv.insert("", "end", values=(k, local_map[k]))
+
+        btns = ttk.Frame(frame)
+        btns.pack(fill=tk.X, pady=(8, 0))
+
+        def add_mapping() -> None:
+            key = simpledialog.askstring("Add Note Mapping", "Enter note value:", parent=window)
+            if key is None:
+                return
+            key = key.strip()
+            if not key:
+                return
+            initial = local_map.get(key, "#FFF2CC")
+            color = colorchooser.askcolor(color=initial, title=f"Choose color for note '{key}'")[1]
+            if not color:
+                return
+            local_map[key] = color
+            refresh_view()
+
+        def edit_color() -> None:
+            sel = tv.selection()
+            if not sel:
+                return
+            values = tv.item(sel[0], "values")
+            if not values:
+                return
+            key = str(values[0])
+            current = local_map.get(key, "#FFF2CC")
+            color = colorchooser.askcolor(color=current, title=f"Choose color for note '{key}'")[1]
+            if not color:
+                return
+            local_map[key] = color
+            refresh_view()
+
+        def remove_mapping() -> None:
+            sel = tv.selection()
+            if not sel:
+                return
+            values = tv.item(sel[0], "values")
+            if not values:
+                return
+            key = str(values[0])
+            if key in local_map:
+                del local_map[key]
+            refresh_view()
+
+        def reset_defaults() -> None:
+            local_map.clear()
+            local_map.update(DEFAULT_NOTE_COLOR_SCHEME)
+            refresh_view()
+
+        def on_save() -> None:
+            self.note_color_scheme = dict(local_map)
+            self._save_pattern_config()
+            self.apply_note_colors_to_all_panels()
+            window.destroy()
+
+        def on_cancel() -> None:
+            window.destroy()
+
+        ttk.Button(btns, text="Add", command=add_mapping).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Set Color", command=edit_color).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(btns, text="Remove", command=remove_mapping).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(btns, text="Reset Defaults", command=reset_defaults).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(btns, text="Cancel", command=on_cancel).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Save", command=on_save).pack(side=tk.RIGHT, padx=(0, 8))
+
+        refresh_view()
         window.grab_set()
         window.focus_force()
 
