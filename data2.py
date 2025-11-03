@@ -1285,11 +1285,16 @@ class ReportAppV2:
         tables_frame = ttk.Frame(scrape_split)
         scrape_split.add(tables_frame, weight=1)
 
-        self.scrape_pdf_notebook = ttk.Notebook(tables_frame)
-        self.scrape_pdf_notebook.pack(fill=tk.BOTH, expand=True)
-        self.scrape_pdf_tabs: Dict[Path, ttk.Frame] = {}
-        self.scrape_pdf_category_notebooks: Dict[Path, ttk.Notebook] = {}
-        self.scrape_category_tabs: Dict[Tuple[Path, str], ttk.Frame] = {}
+        # Outer dimension: types (Financial, Income, Shares)
+        self.scrape_type_notebook = ttk.Notebook(tables_frame)
+        self.scrape_type_notebook.pack(fill=tk.BOTH, expand=True)
+
+        # Mappings for the new structure
+        self.scrape_type_tabs: Dict[str, ttk.Frame] = {}
+        self.scrape_type_pdf_notebooks: Dict[str, ttk.Notebook] = {}
+        self.scrape_pdf_tabs_by_type: Dict[Tuple[str, Path], ttk.Frame] = {}
+
+        # Content containers for panels (keyed by (Path, Category) for compatibility)
         self.scrape_category_canvases: Dict[Tuple[Path, str], tk.Canvas] = {}
         self.scrape_category_inners: Dict[Tuple[Path, str], ttk.Frame] = {}
         self.scrape_category_windows: Dict[Tuple[Path, str], int] = {}
@@ -1966,26 +1971,27 @@ class ReportAppV2:
         self._refresh_scrape_results()
 
     def _refresh_scrape_results(self) -> None:
-        if not hasattr(self, "scrape_pdf_notebook"):
+        if not hasattr(self, "scrape_type_notebook"):
             return
 
         for panel in self.scrape_panels.values():
             panel.destroy()
         self.scrape_panels.clear()
 
-        for child in list(self.scrape_pdf_notebook.winfo_children()):
+        for child in list(self.scrape_type_notebook.winfo_children()):
             child.destroy()
 
-        self.scrape_pdf_tabs.clear()
-        self.scrape_pdf_category_notebooks.clear()
-        self.scrape_category_tabs.clear()
+        # Reset mappings
+        self.scrape_type_tabs.clear()
+        self.scrape_type_pdf_notebooks.clear()
+        self.scrape_pdf_tabs_by_type.clear()
         self.scrape_category_canvases.clear()
         self.scrape_category_inners.clear()
         self.scrape_category_windows.clear()
         self.scrape_category_placeholders.clear()
 
         if not self.pdf_entries:
-            placeholder_tab = ttk.Frame(self.scrape_pdf_notebook)
+            placeholder_tab = ttk.Frame(self.scrape_type_notebook)
             ttk.Label(
                 placeholder_tab,
                 text="Load PDFs and choose pages to prepare scraping results.",
@@ -1993,31 +1999,39 @@ class ReportAppV2:
                 wraplength=360,
                 justify=tk.LEFT,
             ).pack(anchor="w", padx=12, pady=12)
-            self.scrape_pdf_notebook.add(placeholder_tab, text="No PDFs")
-            self.scrape_pdf_notebook.tab(placeholder_tab, state="disabled")
+            self.scrape_type_notebook.add(placeholder_tab, text="No PDFs")
+            self.scrape_type_notebook.tab(placeholder_tab, state="disabled")
             self._clear_scrape_preview()
             self.active_scrape_key = None
             return
 
-        company = self.company_var.get().strip()
-        entry_lookup: Dict[Path, PDFEntry] = {entry.path: entry for entry in self.pdf_entries}
-        default_entry: Optional[PDFEntry] = None
-        default_category: Optional[str] = None
+        # Create outer tabs for each category and inner pdf notebooks
+        for category in COLUMNS:
+            type_tab = ttk.Frame(self.scrape_type_notebook)
+            self.scrape_type_notebook.add(type_tab, text=category)
+            self.scrape_type_tabs[category] = type_tab
 
-        for entry in self.pdf_entries:
-            pdf_tab = ttk.Frame(self.scrape_pdf_notebook)
-            self.scrape_pdf_notebook.add(pdf_tab, text=entry.path.name)
-            self.scrape_pdf_tabs[entry.path] = pdf_tab
+            inner_notebook = ttk.Notebook(type_tab)
+            inner_notebook.pack(fill=tk.BOTH, expand=True)
+            self.scrape_type_pdf_notebooks[category] = inner_notebook
+            inner_notebook.bind(
+                "<<NotebookTabChanged>>",
+                lambda _e, cat=category: self._on_scrape_inner_pdf_tab_changed(cat),
+            )
 
-            category_notebook = ttk.Notebook(pdf_tab)
-            category_notebook.pack(fill=tk.BOTH, expand=True)
-            self.scrape_pdf_category_notebooks[entry.path] = category_notebook
-            # Bind tab change to update preview when category tabs change
-            category_notebook.bind("<<NotebookTabChanged>>", lambda _e, p=entry.path: self._on_scrape_category_tab_changed(p))
+        # Bind top-level type tab change
+        self.scrape_type_notebook.bind("<<NotebookTabChanged>>", self._on_scrape_type_tab_changed)
 
-            for category in COLUMNS:
-                tab = ttk.Frame(category_notebook)
-                category_notebook.add(tab, text=category)
+        # Build pdf tabs inside each category
+        for category in COLUMNS:
+            inner_nb = self.scrape_type_pdf_notebooks.get(category)
+            if inner_nb is None:
+                continue
+            for entry in self.pdf_entries:
+                tab = ttk.Frame(inner_nb)
+                inner_nb.add(tab, text=entry.path.name)
+                self.scrape_pdf_tabs_by_type[(category, entry.path)] = tab
+
                 canvas = tk.Canvas(tab)
                 canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
                 scrollbar = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=canvas.yview)
@@ -2040,26 +2054,28 @@ class ReportAppV2:
                 )
                 placeholder.pack(anchor="w", padx=12, pady=12)
                 key = (entry.path, category)
-                self.scrape_category_tabs[key] = tab
                 self.scrape_category_canvases[key] = canvas
                 self.scrape_category_inners[key] = inner
                 self.scrape_category_windows[key] = window
                 self.scrape_category_placeholders[key] = placeholder
 
-        # Bind top-level PDF tabs change
-        self.scrape_pdf_notebook.bind("<<NotebookTabChanged>>", self._on_scrape_pdf_tab_changed)
+        company = self.company_var.get().strip()
+        entry_lookup: Dict[Path, PDFEntry] = {entry.path: entry for entry in self.pdf_entries}
+        default_entry: Optional[PDFEntry] = None
+        default_category: Optional[str] = None
 
         for entry in self.pdf_entries:
             if company:
-                target_base = self.companies_dir / company / "openapiscrape" / entry.path.stem
+                target_base_base = self.companies_dir / company / "openapiscrape" / entry.path.stem
             else:
-                target_base = entry.path.parent / "openapiscrape" / entry.path.stem
+                target_base_base = entry.path.parent / "openapiscrape" / entry.path.stem
             for category in COLUMNS:
                 key = (entry.path, category)
                 parent_inner = self.scrape_category_inners.get(key)
                 if parent_inner is None:
                     continue
                 pages = self._get_selected_pages(entry, category)
+                target_base = target_base_base
                 csv_path = target_base / f"{category}.csv"
                 multiplier_path = target_base / f"{category}_multiplier.txt"
                 if not pages and not csv_path.exists() and not multiplier_path.exists():
@@ -2173,19 +2189,22 @@ class ReportAppV2:
     def set_active_scrape_panel(self, entry: PDFEntry, category: str) -> None:
         key = (entry.path, category)
         self.active_scrape_key = key
-        pdf_tab = self.scrape_pdf_tabs.get(entry.path)
-        if pdf_tab is not None:
+        # Select outer category tab
+        type_tab = self.scrape_type_tabs.get(category)
+        if type_tab is not None:
             try:
-                self.scrape_pdf_notebook.select(pdf_tab)
+                self.scrape_type_notebook.select(type_tab)
             except Exception:
                 pass
-        category_tab = self.scrape_category_tabs.get(key)
-        category_notebook = self.scrape_pdf_category_notebooks.get(entry.path)
-        if category_tab is not None and category_notebook is not None:
-            try:
-                category_notebook.select(category_tab)
-            except Exception:
-                pass
+        # Select inner pdf tab for that category
+        inner_nb = self.scrape_type_pdf_notebooks.get(category)
+        if inner_nb is not None:
+            pdf_tab = self.scrape_pdf_tabs_by_type.get((category, entry.path))
+            if pdf_tab is not None:
+                try:
+                    inner_nb.select(pdf_tab)
+                except Exception:
+                    pass
         for panel_key, panel in self.scrape_panels.items():
             panel.set_active(panel_key == key)
         self._show_scrape_preview(entry, category)
@@ -3236,20 +3255,43 @@ class ReportAppV2:
             )
 
     # ------------------------------------------------------------------ Scrape tab change handlers
-    def _on_scrape_pdf_tab_changed(self, event: tk.Event) -> None:  # type: ignore[override]
+    def _on_scrape_type_tab_changed(self, event: tk.Event) -> None:  # type: ignore[override]
         try:
             widget = event.widget
         except Exception:
             return
-        if widget is not self.scrape_pdf_notebook:
+        if widget is not self.scrape_type_notebook:
             return
-        selected_id = self.scrape_pdf_notebook.select()
+        selected_id = self.scrape_type_notebook.select()
         if not selected_id:
             return
         selected_widget = self.root.nametowidget(selected_id)
-        selected_path: Optional[Path] = None
-        for path, frame in self.scrape_pdf_tabs.items():
+        selected_category: Optional[str] = None
+        for cat, frame in self.scrape_type_tabs.items():
             if frame is selected_widget:
+                selected_category = cat
+                break
+        if selected_category is None:
+            return
+        inner_nb = self.scrape_type_pdf_notebooks.get(selected_category)
+        if inner_nb is None:
+            return
+        pdf_sel_id = inner_nb.select()
+        if not pdf_sel_id:
+            # Try to select first tab
+            children = inner_nb.winfo_children()
+            if not children:
+                return
+            try:
+                inner_nb.select(children[0])
+                pdf_widget = children[0]
+            except Exception:
+                pdf_widget = children[0]
+        else:
+            pdf_widget = self.root.nametowidget(pdf_sel_id)
+        selected_path: Optional[Path] = None
+        for (cat, path), frame in self.scrape_pdf_tabs_by_type.items():
+            if cat == selected_category and frame is pdf_widget:
                 selected_path = path
                 break
         if selected_path is None:
@@ -3257,37 +3299,25 @@ class ReportAppV2:
         entry = self._get_entry_by_path(selected_path)
         if entry is None:
             return
-        cat_nb = self.scrape_pdf_category_notebooks.get(selected_path)
-        category: Optional[str] = None
-        if cat_nb is not None:
-            cat_sel_id = cat_nb.select()
-            if cat_sel_id:
-                cat_widget = self.root.nametowidget(cat_sel_id)
-                for (p, cat), frame in self.scrape_category_tabs.items():
-                    if p == selected_path and frame is cat_widget:
-                        category = cat
-                        break
-        if category is None:
-            category = COLUMNS[0]
-        self.set_active_scrape_panel(entry, category)
+        self.set_active_scrape_panel(entry, selected_category)
 
-    def _on_scrape_category_tab_changed(self, pdf_path: Path) -> None:
-        entry = self._get_entry_by_path(pdf_path)
-        if entry is None:
+    def _on_scrape_inner_pdf_tab_changed(self, category: str) -> None:
+        inner_nb = self.scrape_type_pdf_notebooks.get(category)
+        if inner_nb is None:
             return
-        cat_nb = self.scrape_pdf_category_notebooks.get(pdf_path)
-        if cat_nb is None:
-            return
-        sel_id = cat_nb.select()
+        sel_id = inner_nb.select()
         if not sel_id:
             return
         sel_widget = self.root.nametowidget(sel_id)
-        category: Optional[str] = None
-        for (p, cat), frame in self.scrape_category_tabs.items():
-            if p == pdf_path and frame is sel_widget:
-                category = cat
+        selected_path: Optional[Path] = None
+        for (cat, path), frame in self.scrape_pdf_tabs_by_type.items():
+            if cat == category and frame is sel_widget:
+                selected_path = path
                 break
-        if category is None:
+        if selected_path is None:
+            return
+        entry = self._get_entry_by_path(selected_path)
+        if entry is None:
             return
         self.set_active_scrape_panel(entry, category)
 
