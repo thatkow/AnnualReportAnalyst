@@ -745,7 +745,12 @@ class ScrapeResultPanel:
         row_id = self.table.identify_row(event.y)
         if not row_id:
             return
-        self.table.selection_set(row_id)
+        # Ensure both selection and focus are set to the clicked row
+        try:
+            self.table.selection_set(row_id)
+            self.table.focus(row_id)
+        except Exception:
+            self.table.selection_set(row_id)
         self._context_item = row_id
         state_value = self.row_states.get(row_id, "asis")
         if not state_value:
@@ -770,9 +775,13 @@ class ScrapeResultPanel:
                 self.update_row_state(item_id, normalized)
         else:
             self.update_row_state(item_id, normalized)
+        # Refresh note-based coloring immediately
+        self.update_note_coloring()
         # After any row state change, write out and reload the tables
         self.save_table_to_csv()
         self.app.reload_scrape_panels()
+        # Clear context item to avoid stale references
+        self._context_item = None
 
     def update_row_state(self, item_id: str, state: Optional[str]) -> None:
         if state in (None, ""):
@@ -786,6 +795,8 @@ class ScrapeResultPanel:
             self._apply_state_to_item(item_id, state)
             if self._context_item == item_id:
                 self._row_state_var.set(state)
+        # Ensure note coloring remains in sync with any changes
+        self._apply_note_color_to_item(item_id)
         # Immediately write out on modification
         self.save_table_to_csv()
 
@@ -2492,7 +2503,7 @@ class ReportAppV2:
         self.fullscreen_preview_window = None
         self.fullscreen_preview_image = None
         self.fullscreen_preview_entry = None
-               self.fullscreen_preview_page = None
+        self.fullscreen_preview_page = None
 
     def render_page(
         self,
