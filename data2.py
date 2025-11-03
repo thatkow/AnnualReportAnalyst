@@ -372,6 +372,12 @@ class ScrapeResultPanel:
         self.open_csv_button.pack(side=tk.LEFT)
         self.view_raw_button = ttk.Button(actions_row, text="View Raw", command=self.view_raw_text)
         self.view_raw_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.delete_column_button = ttk.Button(
+            actions_row,
+            text="Delete Column",
+            command=self.delete_column,
+        )
+        self.delete_column_button.pack(side=tk.LEFT, padx=(6, 0))
 
         table_container = ttk.Frame(self.frame)
         table_container.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
@@ -585,6 +591,68 @@ class ScrapeResultPanel:
             self.raw_path,
             f"{self.entry.path.name} – {self.category} raw response",
         )
+
+    def delete_column(self) -> None:
+        column_count = len(self.current_columns)
+        if column_count <= 1:
+            messagebox.showinfo("Delete Column", "Cannot delete the last remaining column.")
+            return
+
+        options = "\n".join(
+            f"{idx + 1}. {name}" for idx, name in enumerate(self.current_columns)
+        )
+        selection = simpledialog.askinteger(
+            "Delete Column",
+            f"Select the column number to delete:\n{options}",
+            parent=self.frame,
+            minvalue=1,
+            maxvalue=column_count,
+        )
+        if selection is None:
+            return
+
+        index = selection - 1
+        new_columns = self.current_columns[:index] + self.current_columns[index + 1 :]
+        if not new_columns:
+            messagebox.showinfo("Delete Column", "Cannot delete the last remaining column.")
+            return
+
+        rows: List[List[str]] = []
+        for item_id in self.table.get_children(""):
+            values = list(self.table.item(item_id, "values"))
+            if index < len(values):
+                del values[index]
+            rows.append(values)
+
+        normalized_rows: List[List[str]] = []
+        expected_len = len(new_columns)
+        for values in rows:
+            trimmed = list(values[:expected_len])
+            if len(trimmed) < expected_len:
+                trimmed.extend([""] * (expected_len - len(trimmed)))
+            normalized_rows.append(trimmed)
+        rows = normalized_rows
+
+        register_rows = self.has_csv_data
+        self._populate(rows, register=register_rows, header=new_columns)
+        if register_rows:
+            self.has_csv_data = bool(rows)
+            try:
+                with self.csv_path.open("w", encoding="utf-8", newline="") as fh:
+                    writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
+                    writer.writerow(new_columns)
+                    if rows:
+                        writer.writerows(rows)
+            except OSError:
+                logger.exception(
+                    "Unable to persist CSV update after deleting column for %s - %s",
+                    self.entry.path.name,
+                    self.category,
+                )
+        else:
+            self.has_csv_data = False
+
+        self._update_action_states()
 
     def _populate(
         self,
