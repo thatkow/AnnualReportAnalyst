@@ -770,6 +770,9 @@ class ScrapeResultPanel:
                 self.update_row_state(item_id, normalized)
         else:
             self.update_row_state(item_id, normalized)
+        # After any row state change, write out and reload the tables
+        self.save_table_to_csv()
+        self.app.reload_scrape_panels()
 
     def update_row_state(self, item_id: str, state: Optional[str]) -> None:
         if state in (None, ""):
@@ -969,6 +972,8 @@ class ReportAppV2:
 
         self.downloads_dir = tk.StringVar(master=self.root)
         self.recent_download_minutes = tk.IntVar(master=self.root, value=5)
+        # Auto-load last company toggle
+        self.auto_load_last_company_var = tk.BooleanVar(master=self.root, value=False)
 
         self._suspend_api_key_save = True
         self._load_local_config()
@@ -977,6 +982,7 @@ class ReportAppV2:
         self._load_pattern_config()
         self._load_config()
         self._refresh_company_options()
+        self._maybe_auto_load_last_company()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -990,6 +996,11 @@ class ReportAppV2:
         company_menu = tk.Menu(menu_bar, tearoff=False)
         company_menu.add_command(label="Select Company…", command=self._open_company_selector)
         company_menu.add_command(label="Load PDFs", command=self.load_pdfs)
+        company_menu.add_checkbutton(
+            label="Auto Load Last Company on Startup",
+            variable=self.auto_load_last_company_var,
+            command=self._on_toggle_auto_load_last_company,
+        )
         menu_bar.add_cascade(label="Company", menu=company_menu)
 
         view_menu = tk.Menu(menu_bar, tearoff=False)
@@ -1229,6 +1240,9 @@ class ReportAppV2:
         enabled = self.auto_scale_tables_var.get()
         for panel in self.scrape_panels.values():
             panel.set_auto_scale(enabled)
+
+    def _on_toggle_auto_load_last_company(self) -> None:
+        self._save_config()
 
     def _maximize_window(self) -> None:
         try:
@@ -1480,10 +1494,15 @@ class ReportAppV2:
         if isinstance(last_company, str):
             self.company_var.set(last_company)
 
+        auto_load = data.get("auto_load_last_company")
+        if isinstance(auto_load, bool):
+            self.auto_load_last_company_var.set(auto_load)
+
     def _save_config(self) -> None:
         data = {
             "downloads_dir": self.downloads_dir.get().strip(),
             "last_company": self.company_var.get().strip(),
+            "auto_load_last_company": bool(self.auto_load_last_company_var.get()),
         }
         try:
             with self.config_path.open("w", encoding="utf-8") as fh:
@@ -2234,7 +2253,7 @@ class ReportAppV2:
         if getattr(event, "delta", 0):
             step = -1 if event.delta > 0 else 1
         else:
-            step = -1 if getattr(event, "num", 0) == 4 else 1
+            step = -1 if event.num == 4 else 1
         self.review_canvas.yview_scroll(step, "units")
 
     def _on_thumbnail_scale(self, value: str) -> None:
@@ -2473,7 +2492,7 @@ class ReportAppV2:
         self.fullscreen_preview_window = None
         self.fullscreen_preview_image = None
         self.fullscreen_preview_entry = None
-        self.fullscreen_preview_page = None
+               self.fullscreen_preview_page = None
 
     def render_page(
         self,
@@ -3557,6 +3576,40 @@ class ReportAppV2:
         refresh_view()
         window.grab_set()
         window.focus_force()
+
+    # ------------------------------------------------------------------ Scrape panel reload helper
+    def reload_scrape_panels(self) -> None:
+        for key, panel in self.scrape_panels.items():
+            panel.load_from_files()
+            panel.update_note_coloring()
+            panel.set_active(self.active_scrape_key == (panel.entry.path, panel.category))
+        if self.active_scrape_key is not None:
+            path, category = self.active_scrape_key
+            entry = self._get_entry_by_path(path)
+            if entry is not None:
+                self._show_scrape_preview(entry, category)
+
+    # ------------------------------------------------------------------ Auto-load helper
+    def _maybe_auto_load_last_company(self) -> None:
+        try:
+            if not self.auto_load_last_company_var.get():
+                return
+        except Exception:
+            return
+        company = self.company_var.get().strip()
+        if not company:
+            return
+        folder_str = self.folder_path.get().strip()
+        if not folder_str:
+            return
+        folder = Path(folder_str)
+        if not folder.exists():
+            return
+        has_pdf = any(folder.rglob("*.pdf"))
+        if not has_pdf:
+            return
+        # Defer loading to allow UI to initialize
+        self.root.after(0, self.load_pdfs)
 
 
 def main() -> None:
