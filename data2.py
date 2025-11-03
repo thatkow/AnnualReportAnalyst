@@ -322,6 +322,7 @@ class ScrapeResultPanel:
         entry: PDFEntry,
         category: str,
         target_dir: Path,
+        auto_scale_tables: bool,
     ) -> None:
         self.app = app
         self.entry = entry
@@ -384,6 +385,8 @@ class ScrapeResultPanel:
         table_container.columnconfigure(0, weight=1)
         table_container.rowconfigure(0, weight=1)
 
+        self.auto_scale_tables = auto_scale_tables
+        self._current_row_count = SCRAPE_PLACEHOLDER_ROWS
         self.current_columns: List[str] = list(SCRAPE_EXPECTED_COLUMNS)
         self._column_ids: List[str] = [f"col{idx}" for idx in range(len(self.current_columns))]
         self.table = ttk.Treeview(
@@ -493,6 +496,19 @@ class ScrapeResultPanel:
             anchor = tk.W if heading_text.lower() in text_columns else tk.E
             self.table.heading(column_id, text=heading_text)
             self.table.column(column_id, anchor=anchor, width=140, stretch=True)
+
+    def set_auto_scale(self, enabled: bool) -> None:
+        if self.auto_scale_tables == enabled:
+            return
+        self.auto_scale_tables = enabled
+        self._update_table_height()
+
+    def _update_table_height(self) -> None:
+        if self.auto_scale_tables:
+            height = max(self._current_row_count, 1)
+        else:
+            height = SCRAPE_PLACEHOLDER_ROWS
+        self.table.configure(height=height)
 
     def set_placeholder(self, fill: str) -> None:
         column_count = len(self._column_ids)
@@ -685,8 +701,8 @@ class ScrapeResultPanel:
                 initial_state = self.app.scrape_row_state_by_key.get(key)
                 if initial_state:
                     self.update_row_state(item_id, initial_state)
-        display_rows = max(len(rows), 1)
-        self.table.configure(height=display_rows)
+        self._current_row_count = max(len(rows), 1)
+        self._update_table_height()
 
     def _handle_activate(self, _: tk.Event) -> None:  # type: ignore[override]
         self.app._on_scrape_panel_clicked(self)
@@ -815,6 +831,8 @@ class ReportAppV2:
         self.prompts_dir = self.app_root / "prompts"
 
         self.company_var = tk.StringVar(master=self.root)
+        self.company_options: List[str] = []
+        self.company_selector_window: Optional[tk.Toplevel] = None
         self.folder_path = tk.StringVar(master=self.root)
         self.thumbnail_width_var = tk.IntVar(master=self.root, value=220)
         self.api_key_var = tk.StringVar(master=self.root)
@@ -831,6 +849,7 @@ class ReportAppV2:
         self.year_whitespace_as_space_var = tk.BooleanVar(master=self.root, value=True)
         self.openai_model_vars: Dict[str, tk.StringVar] = {}
         self.scrape_upload_mode_vars: Dict[str, tk.StringVar] = {}
+        self.auto_scale_tables_var = tk.BooleanVar(master=self.root, value=True)
 
         self.pdf_entries: List[PDFEntry] = []
         self.category_rows: Dict[Tuple[Path, str], CategoryRow] = {}
@@ -869,24 +888,29 @@ class ReportAppV2:
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         menu_bar = tk.Menu(self.root)
+
         file_menu = tk.Menu(menu_bar, tearoff=False)
         file_menu.add_command(label="New Company", command=self.create_company)
         file_menu.add_command(label="Set Downloads Dir", command=self._set_downloads_dir)
         menu_bar.add_cascade(label="File", menu=file_menu)
+
+        company_menu = tk.Menu(menu_bar, tearoff=False)
+        company_menu.add_command(label="Select Company…", command=self._open_company_selector)
+        company_menu.add_command(label="Load PDFs", command=self.load_pdfs)
+        menu_bar.add_cascade(label="Company", menu=company_menu)
+
+        view_menu = tk.Menu(menu_bar, tearoff=False)
+        view_menu.add_checkbutton(
+            label="Auto Scale Scrape Tables",
+            variable=self.auto_scale_tables_var,
+            command=self._on_toggle_auto_scale_tables,
+        )
+        menu_bar.add_cascade(label="View", menu=view_menu)
+
         try:
             self.root.config(menu=menu_bar)
         except tk.TclError:
             pass
-
-        top = ttk.Frame(self.root, padding=8)
-        top.pack(fill=tk.X)
-
-        ttk.Label(top, text="Company:").pack(side=tk.LEFT)
-        self.company_combo = ttk.Combobox(top, textvariable=self.company_var, state="readonly", width=30)
-        self.company_combo.pack(side=tk.LEFT, padx=(4, 8))
-        self.company_combo.bind("<<ComboboxSelected>>", self._on_company_selected)
-
-        ttk.Button(top, text="Load PDFs", command=self.load_pdfs).pack(side=tk.LEFT)
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -1099,6 +1123,11 @@ class ReportAppV2:
         self.scrape_category_inners: Dict[Tuple[Path, str], ttk.Frame] = {}
         self.scrape_category_windows: Dict[Tuple[Path, str], int] = {}
         self.scrape_category_placeholders: Dict[Tuple[Path, str], Optional[tk.Widget]] = {}
+
+    def _on_toggle_auto_scale_tables(self) -> None:
+        enabled = self.auto_scale_tables_var.get()
+        for panel in self.scrape_panels.values():
+            panel.set_auto_scale(enabled)
 
     def _maximize_window(self) -> None:
         try:
@@ -1341,28 +1370,98 @@ class ReportAppV2:
             messagebox.showwarning("Save Config", "Unable to save configuration to disk.")
 
     # ------------------------------------------------------------------ Companies
+    def _open_company_selector(self) -> None:
+        if not self.company_options:
+            messagebox.showinfo("Select Company", "No companies available. Create one first.")
+            return
+
+        if self.company_selector_window is not None and self.company_selector_window.winfo_exists():
+            try:
+                self.company_selector_window.lift()
+                self.company_selector_window.focus_force()
+            except tk.TclError:
+                pass
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title("Select Company")
+        window.transient(self.root)
+        window.resizable(False, False)
+        window.grab_set()
+        self.company_selector_window = window
+
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="Company:").pack(anchor="w")
+        initial = self.company_var.get().strip()
+        if initial not in self.company_options and self.company_options:
+            initial = self.company_options[0]
+        combo_var = tk.StringVar(value=initial)
+        combo = ttk.Combobox(frame, state="readonly", values=self.company_options, textvariable=combo_var)
+        combo.pack(fill=tk.X, pady=(4, 12))
+
+        button_row = ttk.Frame(frame)
+        button_row.pack(fill=tk.X)
+
+        def close_dialog() -> None:
+            if self.company_selector_window is None:
+                return
+            try:
+                window.grab_release()
+            except tk.TclError:
+                pass
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+            self.company_selector_window = None
+
+        def on_confirm() -> None:
+            selection = combo.get().strip()
+            if selection:
+                self._set_active_company(selection)
+            close_dialog()
+
+        def on_cancel() -> None:
+            close_dialog()
+
+        ttk.Button(button_row, text="Cancel", command=on_cancel).pack(side=tk.RIGHT)
+        ttk.Button(button_row, text="Select", command=on_confirm).pack(side=tk.RIGHT, padx=(0, 8))
+
+        window.bind("<Return>", lambda _e: on_confirm())
+        window.bind("<Escape>", lambda _e: on_cancel())
+        window.protocol("WM_DELETE_WINDOW", on_cancel)
+        combo.focus_set()
+
+    def _set_active_company(self, name: str, *, save: bool = True) -> None:
+        normalized = name.strip()
+        if not normalized:
+            return
+        if normalized not in self.company_options:
+            self.company_options.append(normalized)
+            self.company_options.sort()
+        self.company_var.set(normalized)
+        self._set_folder_for_company(normalized)
+        if save:
+            self._save_config()
+
     def _refresh_company_options(self) -> None:
         if not self.companies_dir.exists():
             self.companies_dir.mkdir(parents=True, exist_ok=True)
 
         companies = sorted([p.name for p in self.companies_dir.iterdir() if p.is_dir()])
-        self.company_combo.configure(values=companies)
+        self.company_options = companies
 
-        current = self.company_var.get()
+        current = self.company_var.get().strip()
         if current and current in companies:
-            self.company_combo.set(current)
-            self._set_folder_for_company(current)
+            self._set_active_company(current, save=False)
         elif companies:
-            first = companies[0]
-            self.company_combo.set(first)
-            self.company_var.set(first)
-            self._set_folder_for_company(first)
-
-    def _on_company_selected(self, _: tk.Event) -> None:  # type: ignore[override]
-        name = self.company_var.get()
-        if name:
-            self._set_folder_for_company(name)
-            self._save_config()
+            self._set_active_company(companies[0], save=False)
+        else:
+            self.company_var.set("")
+            self.folder_path.set("")
+            self.clear_entries()
 
     def _set_folder_for_company(self, company: str) -> None:
         folder = self.companies_dir / company / "raw"
@@ -1764,7 +1863,14 @@ class ReportAppV2:
                 if placeholder is not None:
                     placeholder.destroy()
                     self.scrape_category_placeholders[key] = None
-                panel = ScrapeResultPanel(parent_inner, self, entry, category, target_base)
+                panel = ScrapeResultPanel(
+                    parent_inner,
+                    self,
+                    entry,
+                    category,
+                    target_base,
+                    self.auto_scale_tables_var.get(),
+                )
                 panel.load_from_files()
                 self.scrape_panels[key] = panel
                 if panel.has_csv_data or pages:
@@ -2948,11 +3054,9 @@ class ReportAppV2:
             except Exception as exc:
                 messagebox.showwarning("Move PDF", f"Could not move '{pdf_path.name}': {exc}")
 
-        self._refresh_company_options()
-        self.company_combo.set(safe_name)
         self.company_var.set(safe_name)
-        self._set_folder_for_company(safe_name)
-        self._save_config()
+        self._refresh_company_options()
+        self._set_active_company(safe_name)
         self._open_in_file_manager(raw_dir)
 
         if preview_window is not None and preview_window.winfo_exists():
