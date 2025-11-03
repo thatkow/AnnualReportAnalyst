@@ -1835,6 +1835,8 @@ class ReportAppV2:
             category_notebook = ttk.Notebook(pdf_tab)
             category_notebook.pack(fill=tk.BOTH, expand=True)
             self.scrape_pdf_category_notebooks[entry.path] = category_notebook
+            # Bind tab change to update preview when category tabs change
+            category_notebook.bind("<<NotebookTabChanged>>", lambda _e, p=entry.path: self._on_scrape_category_tab_changed(p))
 
             for category in COLUMNS:
                 tab = ttk.Frame(category_notebook)
@@ -1866,6 +1868,9 @@ class ReportAppV2:
                 self.scrape_category_inners[key] = inner
                 self.scrape_category_windows[key] = window
                 self.scrape_category_placeholders[key] = placeholder
+
+        # Bind top-level PDF tabs change
+        self.scrape_pdf_notebook.bind("<<NotebookTabChanged>>", self._on_scrape_pdf_tab_changed)
 
         for entry in self.pdf_entries:
             if company:
@@ -1967,8 +1972,6 @@ class ReportAppV2:
 
     def set_active_scrape_panel(self, entry: PDFEntry, category: str) -> None:
         key = (entry.path, category)
-        if key not in self.scrape_panels:
-            return
         self.active_scrape_key = key
         pdf_tab = self.scrape_pdf_tabs.get(entry.path)
         if pdf_tab is not None:
@@ -2931,6 +2934,31 @@ class ReportAppV2:
                     job.model_name,
                 )
                 logger.info("AIScrape mode=%s", job.upload_mode)
+
+                # Ensure target dir exists and save cut PDF into openapiscrape/PDF_FOLDER
+                job.target_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    pdf_folder = job.target_dir / "PDF_FOLDER"
+                    pdf_folder.mkdir(parents=True, exist_ok=True)
+                    out_pdf = pdf_folder / f"{job.category}.pdf"
+                    if job.temp_pdf is not None and job.temp_pdf.exists():
+                        shutil.copyfile(job.temp_pdf, out_pdf)
+                    else:
+                        # Create a cut PDF even for text mode
+                        tmp_cut = self._export_pages_to_pdf(job.entry.doc, job.pages)
+                        if tmp_cut is not None and tmp_cut.exists():
+                            try:
+                                shutil.copyfile(tmp_cut, out_pdf)
+                            finally:
+                                try:
+                                    tmp_cut.unlink()
+                                except Exception:
+                                    pass
+                except Exception:
+                    logger.exception(
+                        "Failed to save cut PDF for %s | %s", job.entry.path.name, job.category
+                    )
+
                 response_text = self._call_openai_for_job(job, api_key)
                 multiplier, header, rows = self._parse_multiplier_response(response_text)
                 logger.info(
@@ -3006,6 +3034,68 @@ class ReportAppV2:
                 "AIScrape",
                 f"Saved {total} OpenAI response(s) to 'openapiscrape'.",
             )
+
+    # ------------------------------------------------------------------ Scrape tab change handlers
+    def _on_scrape_pdf_tab_changed(self, event: tk.Event) -> None:  # type: ignore[override]
+        try:
+            widget = event.widget
+        except Exception:
+            return
+        if widget is not self.scrape_pdf_notebook:
+            return
+        selected_id = self.scrape_pdf_notebook.select()
+        if not selected_id:
+            return
+        selected_widget = self.root.nametowidget(selected_id)
+        selected_path: Optional[Path] = None
+        for path, frame in self.scrape_pdf_tabs.items():
+            if frame is selected_widget:
+                selected_path = path
+                break
+        if selected_path is None:
+            return
+        entry = self._get_entry_by_path(selected_path)
+        if entry is None:
+            return
+        cat_nb = self.scrape_pdf_category_notebooks.get(selected_path)
+        category: Optional[str] = None
+        if cat_nb is not None:
+            cat_sel_id = cat_nb.select()
+            if cat_sel_id:
+                cat_widget = self.root.nametowidget(cat_sel_id)
+                for (p, cat), frame in self.scrape_category_tabs.items():
+                    if p == selected_path and frame is cat_widget:
+                        category = cat
+                        break
+        if category is None:
+            category = COLUMNS[0]
+        self.set_active_scrape_panel(entry, category)
+
+    def _on_scrape_category_tab_changed(self, pdf_path: Path) -> None:
+        entry = self._get_entry_by_path(pdf_path)
+        if entry is None:
+            return
+        cat_nb = self.scrape_pdf_category_notebooks.get(pdf_path)
+        if cat_nb is None:
+            return
+        sel_id = cat_nb.select()
+        if not sel_id:
+            return
+        sel_widget = self.root.nametowidget(sel_id)
+        category: Optional[str] = None
+        for (p, cat), frame in self.scrape_category_tabs.items():
+            if p == pdf_path and frame is sel_widget:
+                category = cat
+                break
+        if category is None:
+            return
+        self.set_active_scrape_panel(entry, category)
+
+    def _get_entry_by_path(self, path: Path) -> Optional[PDFEntry]:
+        for entry in self.pdf_entries:
+            if entry.path == path:
+                return entry
+        return None
 
     # ------------------------------------------------------------------ Company creation
     def _set_downloads_dir(self) -> None:
