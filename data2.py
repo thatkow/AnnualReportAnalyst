@@ -766,22 +766,46 @@ class ScrapeResultPanel:
         item_id = self._context_item
         if not item_id:
             return
+
         normalized = self._normalize_state_label(state_label)
-        if apply_all:
-            key = self.row_keys.get(item_id)
-            if key:
-                self.app.apply_row_state_to_all(key, normalized)
-            else:
-                self.update_row_state(item_id, normalized)
+
+        # --- Update NOTE column immediately ---
+        note_index = self._note_column_index()
+        if note_index is not None:
+            values = list(self.table.item(item_id, "values"))
+            if len(values) <= note_index:
+                values.extend([""] * (note_index + 1 - len(values)))
+            values[note_index] = state_label
+            self.table.item(item_id, values=values)
+            self._apply_note_color_to_item(item_id)
+
+        # --- Apply state locally or across all panels ---
+        key = self.row_keys.get(item_id)
+        if apply_all and key:
+            # Use the built-in app-wide propagation method
+            self.app.apply_row_state_to_all(key, normalized)
+
+            # Also propagate NOTE value & color across all panels
+            for panel in self.app.scrape_panels.values():
+                for other_id, other_key in panel.row_keys.items():
+                    if other_key == key:
+                        vals = list(panel.table.item(other_id, "values"))
+                        if len(vals) <= note_index:
+                            vals.extend([""] * (note_index + 1 - len(vals)))
+                        vals[note_index] = state_label
+                        panel.table.item(other_id, values=vals)
+                        panel._apply_note_color_to_item(other_id)
+                        panel.save_table_to_csv()
         else:
             self.update_row_state(item_id, normalized)
-        # Refresh note-based coloring immediately
-        self.update_note_coloring()
-        # After any row state change, write out and reload the tables
+
+        # --- Persist current table & refresh ---
         self.save_table_to_csv()
+        self.update_note_coloring()
         self.app.reload_scrape_panels()
-        # Clear context item to avoid stale references
+
         self._context_item = None
+ 
 
     def update_row_state(self, item_id: str, state: Optional[str]) -> None:
         if state in (None, ""):
