@@ -495,7 +495,8 @@ class ScrapeResultPanel:
             heading_text = headings[idx]
             anchor = tk.W if heading_text.lower() in text_columns else tk.E
             self.table.heading(column_id, text=heading_text)
-            self.table.column(column_id, anchor=anchor, width=140, stretch=True)
+            width = self.app.get_scrape_column_width(heading_text)
+            self.table.column(column_id, anchor=anchor, width=width, stretch=True)
 
     def set_auto_scale(self, enabled: bool) -> None:
         if self.auto_scale_tables == enabled:
@@ -850,6 +851,13 @@ class ReportAppV2:
         self.openai_model_vars: Dict[str, tk.StringVar] = {}
         self.scrape_upload_mode_vars: Dict[str, tk.StringVar] = {}
         self.auto_scale_tables_var = tk.BooleanVar(master=self.root, value=True)
+        self.scrape_column_widths: Dict[str, int] = {
+            "category": 140,
+            "subcategory": 140,
+            "item": 140,
+            "note": 140,
+            "dates": 140,
+        }
 
         self.pdf_entries: List[PDFEntry] = []
         self.category_rows: Dict[Tuple[Path, str], CategoryRow] = {}
@@ -904,6 +912,10 @@ class ReportAppV2:
             label="Auto Scale Scrape Tables",
             variable=self.auto_scale_tables_var,
             command=self._on_toggle_auto_scale_tables,
+        )
+        view_menu.add_command(
+            label="Configure Scrape Column Widths…",
+            command=self._configure_scrape_column_widths,
         )
         menu_bar.add_cascade(label="View", menu=view_menu)
 
@@ -1182,6 +1194,7 @@ class ReportAppV2:
             "downloads_minutes": int(self.recent_download_minutes.get()),
             "openai_models": openai_models,
             "upload_modes": upload_modes,
+            "scrape_column_widths": dict(self.scrape_column_widths),
         }
         return payload
 
@@ -1258,6 +1271,16 @@ class ReportAppV2:
                 mode_value = modes.get(column)
                 if isinstance(mode_value, str) and mode_value in {"pdf", "text"}:
                     var.set(mode_value)
+
+        widths = data.get("scrape_column_widths")
+        if isinstance(widths, dict):
+            for key in ("category", "subcategory", "item", "note", "dates"):
+                value = widths.get(key)
+                try:
+                    if value is not None:
+                        self.scrape_column_widths[key] = max(40, int(value))
+                except (TypeError, ValueError):
+                    continue
 
     def _load_local_config(self) -> None:
         self.local_config_data = {}
@@ -3171,6 +3194,67 @@ class ReportAppV2:
                 subprocess.Popen(["xdg-open", str(path)])
         except Exception:
             messagebox.showwarning("Open Folder", "Could not open the folder in the file manager.")
+
+    # ------------------------------------------------------------------ Scrape column widths
+    def get_scrape_column_width(self, heading_text: str) -> int:
+        key = heading_text.strip().lower()
+        if key in ("category", "subcategory", "item", "note"):
+            return int(self.scrape_column_widths.get(key, 140))
+        return int(self.scrape_column_widths.get("dates", 140))
+
+    def _configure_scrape_column_widths(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("Configure Scrape Column Widths")
+        window.transient(self.root)
+        window.resizable(False, False)
+
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        fields = [
+            ("CATEGORY", "category"),
+            ("SUBCATEGORY", "subcategory"),
+            ("ITEM", "item"),
+            ("NOTE", "note"),
+            ("DATES (all date columns)", "dates"),
+        ]
+        vars_map: Dict[str, tk.IntVar] = {}
+
+        for idx, (label_text, key) in enumerate(fields):
+            row = ttk.Frame(frame)
+            row.pack(fill=tk.X, pady=4)
+            ttk.Label(row, text=label_text, width=24).pack(side=tk.LEFT)
+            var = tk.IntVar(value=int(self.scrape_column_widths.get(key, 140)))
+            spin = tk.Spinbox(row, from_=40, to=1000, increment=10, textvariable=var, width=8)
+            spin.pack(side=tk.LEFT)
+            ttk.Label(row, text="px").pack(side=tk.LEFT, padx=(4, 0))
+            vars_map[key] = var
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill=tk.X, pady=(12, 0))
+
+        def on_cancel() -> None:
+            window.destroy()
+
+        def on_save() -> None:
+            for key, var in vars_map.items():
+                try:
+                    value = int(var.get())
+                except (TypeError, ValueError):
+                    value = 140
+                self.scrape_column_widths[key] = max(40, min(2000, value))
+            self._save_pattern_config()
+            for panel in self.scrape_panels.values():
+                panel._apply_table_columns(panel.current_columns)
+            window.destroy()
+
+        ttk.Button(buttons, text="Cancel", command=on_cancel).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="Save", command=on_save).pack(side=tk.RIGHT, padx=(0, 8))
+
+        window.bind("<Escape>", lambda _e: on_cancel())
+        window.bind("<Return>", lambda _e: on_save())
+        window.grab_set()
+        window.focus_force()
 
 
 def main() -> None:

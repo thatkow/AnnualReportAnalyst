@@ -10,11 +10,16 @@ Locate exactly one table titled:
 - “Consolidated Balance Sheet(s)” OR
 - “Consolidated Statement of Financial Position”.
 
-Include every line under:
+Include **every** line under:
 - ASSETS
 - LIABILITIES
 - SHAREHOLDERS’ EQUITY
+
 Continue until the next primary statement (e.g., Income Statement, Cash Flows).
+
+**Do not remove or skip any scraped rows**. Every line found within the detected
+statement must be included in the final CSV, even if it represents totals,
+subtotals, or non-material sections.
 
 ═══════════════════════════════════════════════════════════════════════════════
 2. SCALE FACTOR DETECTION
@@ -54,7 +59,7 @@ Leave SUBCATEGORY blank if none applies.
 
 ═══════════════════════════════════════════════════════════════════════════════
 5. CLASSIFICATION RULES
-Assign NOTE to each line as follows:
+For each row, classify using the NOTE column as follows:
 
 | Context | NOTE |
 |----------|------|
@@ -62,7 +67,10 @@ Assign NOTE to each line as follows:
 | LIABILITIES section | **negated** |
 | SHAREHOLDERS’ EQUITY — “Noncontrolling interests” | **negated** |
 | SHAREHOLDERS’ EQUITY — all other items | **excluded** |
-| Totals/Subtotals/Redeemable lines | **excluded** |
+| Totals, subtotals, or redeemable lines | **excluded** |
+
+**Never drop any rows** — classification replaces exclusion.
+Every scraped line must appear in the final CSV with one of these NOTE labels.
 
 ═══════════════════════════════════════════════════════════════════════════════
 6. OUTPUT FORMAT
@@ -81,7 +89,7 @@ Formatting rules:
 - Parentheses → negative
 - Dash or blank → 0
 - Do not scale numbers
-- Include every row (even “excluded”)
+- **Include every row**, even those with NOTE = "excluded"
 - Normalize all date headers to DD.MM.YYYY
 
 ═══════════════════════════════════════════════════════════════════════════════
