@@ -924,9 +924,6 @@ class ReportAppV2:
 
         scrape_controls = ttk.Frame(scrape_tab, padding=8)
         scrape_controls.pack(fill=tk.X)
-        ttk.Label(scrape_controls, text="API key:").pack(side=tk.LEFT)
-        self.api_key_entry = ttk.Entry(scrape_controls, textvariable=self.api_key_var, width=40, show="*")
-        self.api_key_entry.pack(side=tk.LEFT, padx=(4, 8))
         self.scrape_button = ttk.Button(scrape_controls, text="AIScrape", command=self.scrape_selected_pages)
         self.scrape_button.pack(side=tk.LEFT)
         self.open_scrape_dir_button = ttk.Button(
@@ -936,8 +933,20 @@ class ReportAppV2:
         self.scrape_progress = ttk.Progressbar(scrape_controls, orient=tk.HORIZONTAL, mode="determinate", length=200)
         self.scrape_progress.pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
 
-        model_frame = ttk.LabelFrame(scrape_tab, text="OpenAI models", padding=8)
-        model_frame.pack(fill=tk.X, padx=8)
+        openai_section = CollapsibleFrame(scrape_tab, "OpenAI Settings", initially_open=False)
+        openai_section.pack(fill=tk.X, padx=8)
+        openai_content = openai_section.content
+        settings_frame = ttk.Frame(openai_content, padding=8)
+        settings_frame.pack(fill=tk.X)
+
+        api_frame = ttk.Frame(settings_frame)
+        api_frame.pack(fill=tk.X)
+        ttk.Label(api_frame, text="API key:").pack(side=tk.LEFT)
+        self.api_key_entry = ttk.Entry(api_frame, textvariable=self.api_key_var, width=40, show="*")
+        self.api_key_entry.pack(side=tk.LEFT, padx=(4, 0), fill=tk.X, expand=True)
+
+        model_frame = ttk.LabelFrame(settings_frame, text="OpenAI models", padding=8)
+        model_frame.pack(fill=tk.X, pady=(8, 0))
         for column in COLUMNS:
             row = ttk.Frame(model_frame)
             row.pack(fill=tk.X, pady=2)
