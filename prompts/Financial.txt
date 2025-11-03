@@ -29,14 +29,31 @@ Do not apply the multiplier — just detect and output it as:
 Multiplier: <value>
 
 ═══════════════════════════════════════════════════════════════════════════════
-3. STRUCTURE
+3. DATE COLUMN DETECTION AND NORMALIZATION
+Detect all date column headers in the balance sheet (usually reporting dates).
+
+Normalize all detected dates to the format DD.MM.YYYY — no exceptions.
+
+Examples:
+30 June 2024 → 30.06.2024  
+June 30, 2023 → 30.06.2023  
+31/12/23 → 31.12.2023  
+2023-12-31 → 31.12.2023  
+Dec 31 2022 → 31.12.2022  
+2023 → 31.12.2023 (assume year-end)  
+Jun 2023 → 30.06.2023 (assume end of that month)
+
+Always output normalized dates in the CSV header exactly as DD.MM.YYYY.
+
+═══════════════════════════════════════════════════════════════════════════════
+4. STRUCTURE
 Identify:
 - CATEGORY = ASSETS / LIABILITIES / SHAREHOLDERS’ EQUITY
 - SUBCATEGORY = subsection heading (e.g., “Insurance and Other”)
 Leave SUBCATEGORY blank if none applies.
 
 ═══════════════════════════════════════════════════════════════════════════════
-4. CLASSIFICATION RULES
+5. CLASSIFICATION RULES
 Assign NOTE to each line as follows:
 
 | Context | NOTE |
@@ -48,14 +65,14 @@ Assign NOTE to each line as follows:
 | Totals/Subtotals/Redeemable lines | **excluded** |
 
 ═══════════════════════════════════════════════════════════════════════════════
-5. OUTPUT FORMAT
+6. OUTPUT FORMAT
 Output two parts:
 
 First line:
 Multiplier: <value>
 
 Then the CSV table:
-CATEGORY,SUBCATEGORY,ITEM,NOTE,2024,2023
+CATEGORY,SUBCATEGORY,ITEM,NOTE,<date1>,<date2>,...
 
 Formatting rules:
 - CATEGORY, SUBCATEGORY, and ITEM in UPPER CASE
@@ -65,12 +82,13 @@ Formatting rules:
 - Dash or blank → 0
 - Do not scale numbers
 - Include every row (even “excluded”)
+- Normalize all date headers to DD.MM.YYYY
 
 ═══════════════════════════════════════════════════════════════════════════════
-6. OUTPUT EXAMPLE
+7. OUTPUT EXAMPLE
 
 Multiplier: 1000000
-CATEGORY,SUBCATEGORY,ITEM,NOTE,2024,2023
+CATEGORY,SUBCATEGORY,ITEM,NOTE,31.12.2024,31.12.2023
 "ASSETS","INSURANCE AND OTHER","CASH AND CASH EQUIVALENTS","asis",44333,34268
 "ASSETS","INSURANCE AND OTHER","INVESTMENTS IN EQUITY SECURITIES","asis",271588,353842
 "ASSETS","RAILROAD, UTILITIES AND ENERGY","PROPERTY, PLANT AND EQUIPMENT","asis",175030,169447
