@@ -778,14 +778,15 @@ class ScrapeResultPanel:
             values[note_index] = state_label
             self.table.item(item_id, values=values)
             self._apply_note_color_to_item(item_id)
+            self.table.update_idletasks()  # ensures last row redraws immediately
 
         # --- Apply state locally or across all panels ---
         key = self.row_keys.get(item_id)
         if apply_all and key:
-            # Use the built-in app-wide propagation method
+            # propagate to all panels
             self.app.apply_row_state_to_all(key, normalized)
 
-            # Also propagate NOTE value & color across all panels
+            # Also propagate NOTE + color changes
             for panel in self.app.scrape_panels.values():
                 for other_id, other_key in panel.row_keys.items():
                     if other_key == key:
@@ -795,16 +796,19 @@ class ScrapeResultPanel:
                         vals[note_index] = state_label
                         panel.table.item(other_id, values=vals)
                         panel._apply_note_color_to_item(other_id)
+                        panel.table.update_idletasks()
                         panel.save_table_to_csv()
         else:
+            # single row only
             self.update_row_state(item_id, normalized)
+            self.table.update_idletasks()
 
-        # --- Persist current table & refresh ---
+        # --- Persist & refresh ---
         self.save_table_to_csv()
         self.update_note_coloring()
         self.app.reload_scrape_panels()
-
         self._context_item = None
+
  
 
     def update_row_state(self, item_id: str, state: Optional[str]) -> None:
@@ -821,8 +825,13 @@ class ScrapeResultPanel:
                 self._row_state_var.set(state)
         # Ensure note coloring remains in sync with any changes
         self._apply_note_color_to_item(item_id)
+
+        # Force redraw — fixes “last row not recoloring” issue
+        self.table.update_idletasks()
+
         # Immediately write out on modification
         self.save_table_to_csv()
+
 
     def _apply_state_to_item(self, item_id: str, state: Optional[str]) -> None:
         existing_tags = list(self.table.item(item_id, "tags"))
@@ -2118,12 +2127,33 @@ class ReportAppV2:
             self.scrape_row_registry.pop(key, None)
 
     def apply_row_state_to_all(self, key: Tuple[str, str, str], state: Optional[str]) -> None:
+        """
+        Apply the given row state across all panels with the same
+        (CATEGORY, SUBCATEGORY, ITEM) key, including correct note-color update.
+        """
         if state in (None, ""):
             self.scrape_row_state_by_key.pop(key, None)
         else:
             self.scrape_row_state_by_key[key] = state
+
         for panel, item_id in list(self.scrape_row_registry.get(key, [])):
+            # Update stored state and NOTE column
             panel.update_row_state(item_id, state)
+            note_idx = panel._note_column_index()
+            if note_idx is not None:
+                vals = list(panel.table.item(item_id, "values"))
+                if len(vals) <= note_idx:
+                    vals.extend([""] * (note_idx + 1 - len(vals)))
+                vals[note_idx] = state if state else "asis"
+                panel.table.item(item_id, values=vals)
+
+                # Use configured note color from "Configure Note Colors..."
+                panel._apply_note_color_to_item(item_id)
+
+            # Force redraw and save
+            panel.table.update_idletasks()
+            panel.save_table_to_csv()
+
 
     def set_active_scrape_panel(self, entry: PDFEntry, category: str) -> None:
         key = (entry.path, category)
