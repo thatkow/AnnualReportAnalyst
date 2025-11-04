@@ -398,6 +398,12 @@ class ScrapeResultPanel:
             command=self.delete_column,
         )
         self.delete_column_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.delete_csv_button = ttk.Button(
+            actions_row,
+            text="Delete CSV",
+            command=self.delete_csv,
+        )
+        self.delete_csv_button.pack(side=tk.LEFT, padx=(6, 0))
 
         table_container = ttk.Frame(self.frame)
         table_container.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
@@ -675,6 +681,28 @@ class ScrapeResultPanel:
         self.save_table_to_csv()
         self._update_action_states()
 
+    def delete_csv(self) -> None:
+        # Remove CSV file and reset table to placeholder "missing" state
+        confirm = messagebox.askyesno(
+            "Delete CSV",
+            f"Delete CSV for {self.entry.path.name} – {self.category}?\nThis cannot be undone.",
+            parent=self.frame,
+        )
+        if not confirm:
+            return
+        try:
+            if self.csv_path.exists():
+                self.csv_path.unlink()
+        except OSError as exc:
+            messagebox.showwarning("Delete CSV", f"Failed to delete CSV: {exc}")
+            return
+        # Reset table to empty/missing status
+        self.set_placeholder("-")
+        self.has_csv_data = False
+        self._update_action_states()
+        # Update Combined tab (date columns)
+        self.app.refresh_combined_tab()
+
     def save_table_to_csv(self) -> None:
         try:
             self.target_dir.mkdir(parents=True, exist_ok=True)
@@ -881,6 +909,8 @@ class ScrapeResultPanel:
     def _update_action_states(self) -> None:
         has_csv = self.csv_path.exists()
         self.open_csv_button.configure(state="normal" if has_csv else "disabled")
+        if hasattr(self, "delete_csv_button"):
+            self.delete_csv_button.configure(state="normal" if has_csv or self.has_csv_data else "disabled")
         has_raw = self.raw_path.exists()
         self.view_raw_button.configure(state="normal" if has_raw else "disabled")
 
@@ -2650,7 +2680,7 @@ class ReportAppV2:
         self.fullscreen_preview_window = None
         self.fullscreen_preview_image = None
         self.fullscreen_preview_entry = None
-        self.fullscreen_preview_page = None
+               self.fullscreen_preview_page = None
 
     def render_page(
         self,
