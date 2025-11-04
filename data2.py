@@ -378,7 +378,8 @@ class ScrapeResultPanel:
 
         multiplier_box = ttk.Frame(header)
         multiplier_box.pack(side=tk.RIGHT)
-        ttk.Label(multiplier_box, text="Multiplier:").pack(side=tk.LEFT)
+        ttk.Label(multiplier_box, text="Multiplier:").pack(side=tk.L
+eft)
         self.multiplier_var = tk.StringVar(master=self.frame)
         self.multiplier_entry = ttk.Entry(multiplier_box, textvariable=self.multiplier_var, width=16)
         self.multiplier_entry.pack(side=tk.LEFT, padx=(4, 0))
@@ -423,7 +424,8 @@ class ScrapeResultPanel:
         self._apply_table_columns(self.current_columns)
         self.table.grid(row=0, column=0, sticky="nsew")
 
-        y_scrollbar = ttk.Scrollbar(table_container, orient=tk.VERTICAL, command=self.table.yview)
+        y_scrollbar = ttk.Scrollbar(table_container, orient=tk.VERTICA
+L, command=self.table.yview)
         y_scrollbar.grid(row=0, column=1, sticky="ns")
         x_scrollbar = ttk.Scrollbar(table_container, orient=tk.HORIZONTAL, command=self.table.xview)
         x_scrollbar.grid(row=1, column=0, sticky="ew")
@@ -1362,14 +1364,10 @@ class ReportAppV2:
 
         date_frame = ttk.Frame(combined_top.content, padding=(8, 0, 8, 8))
         date_frame.pack(fill=tk.BOTH, expand=True)
-        cols = ("Type", "Category", "Item")  # dynamic columns will be added later
+        cols = ("Type",)  # dynamic columns will be added later; Category/Item hidden
         self.combined_date_tree = ttk.Treeview(date_frame, columns=cols, show="headings", height=6)
         self.combined_date_tree.heading("Type", text="Type")
-        self.combined_date_tree.heading("Category", text="Category")
-        self.combined_date_tree.heading("Item", text="Item")
-        self.combined_date_tree.column("Type", width=120, anchor=tk.W, stretch=False)
-        self.combined_date_tree.column("Category", width=180, anchor=tk.W, stretch=True)
-        self.combined_date_tree.column("Item", width=180, anchor=tk.W, stretch=True)
+        self.combined_date_tree.column("Type", width=140, anchor=tk.W, stretch=False)
         ysc = ttk.Scrollbar(date_frame, orient=tk.VERTICAL, command=self.combined_date_tree.yview)
         xsc = ttk.Scrollbar(date_frame, orient=tk.HORIZONTAL, command=self.combined_date_tree.xview)
         self.combined_date_tree.configure(yscrollcommand=ysc.set, xscrollcommand=xsc.set)
@@ -3960,6 +3958,44 @@ class ReportAppV2:
         # Removed UI text boxes; no-op retained for compatibility.
         return
 
+    def _union_pages_for_entry(self, entry: PDFEntry) -> List[int]:
+        pages_set: set[int] = set()
+        # From in-memory selections
+        for cat in COLUMNS:
+            for p in entry.selected_pages.get(cat, []):
+                try:
+                    pages_set.add(int(p))
+                except Exception:
+                    continue
+        # Fallback to assigned.json if in-memory empty
+        if not pages_set:
+            rec = self.assigned_pages.get(entry.path.name, {})
+            if isinstance(rec, dict):
+                # multi selections
+                multi = rec.get("multi_selections", {})
+                if isinstance(multi, dict):
+                    for lst in multi.values():
+                        if isinstance(lst, list):
+                            for p in lst:
+                                try:
+                                    pages_set.add(int(p))
+                                except Exception:
+                                    continue
+                # single selections
+                sel = rec.get("selections", {})
+                if isinstance(sel, dict):
+                    for p in sel.values():
+                        try:
+                            pages_set.add(int(p))
+                        except Exception:
+                            continue
+        return sorted(pages_set)
+
+    def _pages_list_string_for_entry(self, entry: PDFEntry) -> str:
+        pages = self._union_pages_for_entry(entry)
+        # Convert to 1-based and join by semicolon
+        return ";".join(str(p + 1) for p in pages)
+
     def refresh_combined_tab(self) -> None:
         # Only refresh if UI exists
         if self.combined_date_tree is None:
@@ -3976,13 +4012,13 @@ class ReportAppV2:
                 name = col.get("default_name") or f"date{int(col.get('index', 0))+1}"
                 self.combined_rename_names.append(name)
 
-        # Configure matrix columns: Type, Category, Item, then dynamic columns
+        # Configure matrix columns: Type then dynamic columns (Category/Item hidden)
         tv = self.combined_date_tree
         # Clear existing rows
         for iid in tv.get_children(""):
             tv.delete(iid)
 
-        base_cols = ["Type", "Category", "Item"]
+        base_cols = ["Type"]
         # Use rename names as headers for dynamic columns (defaulted from Financial)
         dyn_headers = list(self.combined_rename_names)
         all_cols_ids = [f"c{idx}" for idx in range(len(base_cols) + len(dyn_headers))]
@@ -3993,24 +4029,22 @@ class ReportAppV2:
         for idx, cid in enumerate(all_cols_ids):
             if idx == 0:
                 name = "Type"
-            elif idx == 1:
-                name = "Category"
-            elif idx == 2:
-                name = "Item"
             else:
-                name = dyn_headers[idx - 3]
+                name = dyn_headers[idx - 1]
             tv.heading(cid, text=name)
-            anchor = tk.W if idx < 3 else tk.W
-            width = 120 if idx == 0 else (180 if idx in (1, 2) else max(140, min(320, len(name) * 8)))
+            anchor = tk.W
+            width = 140 if idx == 0 else max(140, min(320, len(name) * 8))
             tv.column(cid, width=width, anchor=anchor, stretch=True)
 
-        # Insert top "Source" row showing the source PDF for each dynamic column
-        source_vals = ["Source", "", ""] + [col.get("pdf", "") for col in dyn_columns]
-        tv.insert("", "end", values=source_vals)
+        # Insert top "PDF" and "Pages" rows per dynamic column
+        pdf_vals = ["PDF"] + [col.get("pdf", "") for col in dyn_columns]
+        pages_vals = ["Pages"] + [self._pages_list_string_for_entry(col.get("entry")) if isinstance(col.get("entry"), PDFEntry) else "" for col in dyn_columns]
+        tv.insert("", "end", values=pdf_vals)
+        tv.insert("", "end", values=pages_vals)
 
         # Insert rows for Financial, Income, Shares showing the per-type labels
         def row_values(row_type: str) -> List[str]:
-            return [row_type, "", ""] + rows_by_type.get(row_type, [])
+            return [row_type] + rows_by_type.get(row_type, [])
 
         tv.insert("", "end", values=row_values("Financial"))
         tv.insert("", "end", values=row_values("Income"))
@@ -4130,6 +4164,13 @@ class ReportAppV2:
         # Build header using rename names from the date matrix headers
         columns = ["CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"] + rename_names
 
+        # Build summary rows for PDF and Pages for each dynamic column
+        pdf_summary = ["PDF source", "", "", ""] + [dc.get("pdf", "") for dc in dyn_cols]
+        pages_summary = ["Pages", "", "", ""] + [
+            self._pages_list_string_for_entry(dc.get("entry")) if isinstance(dc.get("entry"), PDFEntry) else ""
+            for dc in dyn_cols
+        ]
+
         # Build rows sorted by key
         def key_sort(k: Tuple[str, str, str]) -> Tuple[str, str, str]:
             return (k[0] or "", k[1] or "", k[2] or "")
@@ -4148,14 +4189,39 @@ class ReportAppV2:
                 values_for_row.append(values_map_dyn.get((pdf, pos), ""))
             rows_out.append([cat, sub, item, note_val] + values_for_row)
 
+        # Prepend summary rows
+        final_rows = [pdf_summary, pages_summary] + rows_out
+
         # Update UI table
-        self._populate_combined_table(columns, rows_out)
+        self._populate_combined_table(columns, final_rows)
         self.combined_columns = columns
-        self.combined_rows = rows_out
+        self.combined_rows = final_rows
         if self.combined_save_button is not None:
             self.combined_save_button.configure(state="normal")
 
-        messagebox.showinfo("Combined", f"Combined dataset created with {len(rows_out)} rows and {len(columns)} columns.")
+        messagebox.showinfo("Combined", f"Combined dataset created with {len(final_rows)} rows and {len(columns)} columns.")
+
+    def _apply_note_color_to_combined_item(self, item_id: str, columns: List[str], tv: ttk.Treeview) -> None:
+        # Find NOTE column index
+        try:
+            note_idx = next(i for i, n in enumerate(columns) if n.strip().lower() == "note")
+        except StopIteration:
+            return
+        values = list(tv.item(item_id, "values"))
+        if note_idx >= len(values):
+            return
+        note_val = str(values[note_idx]).strip()
+        color = self.get_note_color(note_val)
+        existing_tags = list(tv.item(item_id, "tags"))
+        filtered = [t for t in existing_tags if not t.startswith("note-color-")]
+        if color:
+            tag = f"note-color-{color.replace('#','')}"
+            try:
+                tv.tag_configure(tag, background=color)
+            except Exception:
+                pass
+            filtered.append(tag)
+        tv.item(item_id, tags=filtered)
 
     def _populate_combined_table(self, columns: List[str], rows: List[List[str]]) -> None:
         if self.combined_table is None:
@@ -4174,12 +4240,14 @@ class ReportAppV2:
             tv.heading(cid, text=name)
             width = self.get_scrape_column_width(name)
             tv.column(cid, width=width, anchor=anchor, stretch=True)
-        # Insert rows
+        # Insert rows and apply NOTE color coding
         for row in rows:
             values = list(row[:len(col_ids)])
             if len(values) < len(col_ids):
                 values += [""] * (len(col_ids) - len(values))
-            tv.insert("", "end", values=values)
+            iid = tv.insert("", "end", values=values)
+            # Apply color by NOTE
+            self._apply_note_color_to_combined_item(iid, columns, tv)
 
     def save_combined_to_csv(self) -> None:
         if not self.combined_columns or not self.combined_rows:
@@ -4224,10 +4292,10 @@ class ReportAppV2:
 
         # Determine if this is the top "date columns by PDF" matrix or the final combined table
         if tv is self.combined_date_tree:
-            # map to our all_col_ids; dynamic columns start from index 3
-            if idx < 3:
-                return  # don't rename Type/Category/Item
-            dyn_idx = idx - 3
+            # dynamic columns start from index 1 (after Type)
+            if idx < 1:
+                return  # don't rename Type
+            dyn_idx = idx - 1
             if dyn_idx < 0 or dyn_idx >= len(self.combined_rename_names):
                 return
             current = self.combined_rename_names[dyn_idx]
