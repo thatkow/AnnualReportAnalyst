@@ -378,7 +378,7 @@ class ScrapeResultPanel:
 
         multiplier_box = ttk.Frame(header)
         multiplier_box.pack(side=tk.RIGHT)
-        ttk.Label(multiplier_box, text="Multiplier:").pack(side=tk.Left)
+        ttk.Label(multiplier_box, text="Multiplier:").pack(side=tk.LEFT)
         self.multiplier_var = tk.StringVar(master=self.frame)
         self.multiplier_entry = ttk.Entry(multiplier_box, textvariable=self.multiplier_var, width=16)
         self.multiplier_entry.pack(side=tk.LEFT, padx=(4, 0))
