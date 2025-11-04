@@ -3994,6 +3994,39 @@ class ReportAppV2:
         # Convert to 1-based and join by semicolon
         return ";".join(str(p + 1) for p in pages)
 
+    def _pages_list_string_for_entry_and_type(self, entry: PDFEntry, category: str) -> str:
+        # Gather pages only for the specified category from in-memory selections
+        pages_set: set[int] = set()
+        for p in entry.selected_pages.get(category, []):
+            try:
+                pages_set.add(int(p))
+            except Exception:
+                continue
+
+        # Fallback to assigned.json for the specific category if necessary
+        if not pages_set:
+            rec = self.assigned_pages.get(entry.path.name, {})
+            if isinstance(rec, dict):
+                multi = rec.get("multi_selections", {})
+                if isinstance(multi, dict):
+                    lst = multi.get(category, [])
+                    if isinstance(lst, list):
+                        for p in lst:
+                            try:
+                                pages_set.add(int(p))
+                            except Exception:
+                                continue
+                sel = rec.get("selections", {})
+                if isinstance(sel, dict):
+                    p = sel.get(category)
+                    try:
+                        if p is not None:
+                            pages_set.add(int(p))
+                    except Exception:
+                        pass
+        pages = sorted(pages_set)
+        return ";".join(str(p + 1) for p in pages)
+
     def refresh_combined_tab(self) -> None:
         # Only refresh if UI exists
         if self.combined_date_tree is None:
@@ -4034,12 +4067,6 @@ class ReportAppV2:
             width = 140 if idx == 0 else max(140, min(320, len(name) * 8))
             tv.column(cid, width=width, anchor=anchor, stretch=True)
 
-        # Insert top "PDF" and "Pages" rows per dynamic column
-        pdf_vals = ["PDF"] + [col.get("pdf", "") for col in dyn_columns]
-        pages_vals = ["Pages"] + [self._pages_list_string_for_entry(col.get("entry")) if isinstance(col.get("entry"), PDFEntry) else "" for col in dyn_columns]
-        tv.insert("", "end", values=pdf_vals)
-        tv.insert("", "end", values=pages_vals)
-
         # Insert rows for Financial, Income, Shares showing the per-type labels
         def row_values(row_type: str) -> List[str]:
             return [row_type] + rows_by_type.get(row_type, [])
@@ -4047,6 +4074,28 @@ class ReportAppV2:
         tv.insert("", "end", values=row_values("Financial"))
         tv.insert("", "end", values=row_values("Income"))
         tv.insert("", "end", values=row_values("Shares"))
+
+        # Move PDF and Pages rows to bottom; rework Pages into 3 separate rows per type
+        pdf_vals = ["PDF"] + [col.get("pdf", "") for col in dyn_columns]
+        pages_fin = ["Pages - Financial"] + [
+            self._pages_list_string_for_entry_and_type(col.get("entry"), "Financial")
+            if isinstance(col.get("entry"), PDFEntry) else ""
+            for col in dyn_columns
+        ]
+        pages_inc = ["Pages - Income"] + [
+            self._pages_list_string_for_entry_and_type(col.get("entry"), "Income")
+            if isinstance(col.get("entry"), PDFEntry) else ""
+            for col in dyn_columns
+        ]
+        pages_sh = ["Pages - Shares"] + [
+            self._pages_list_string_for_entry_and_type(col.get("entry"), "Shares")
+            if isinstance(col.get("entry"), PDFEntry) else ""
+            for col in dyn_columns
+        ]
+        tv.insert("", "end", values=pdf_vals)
+        tv.insert("", "end", values=pages_fin)
+        tv.insert("", "end", values=pages_inc)
+        tv.insert("", "end", values=pages_sh)
 
         # Throw a warning if not equal number of columns for each pdf across 3 types
         if warnings:
