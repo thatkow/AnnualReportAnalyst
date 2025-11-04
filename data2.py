@@ -378,8 +378,7 @@ class ScrapeResultPanel:
 
         multiplier_box = ttk.Frame(header)
         multiplier_box.pack(side=tk.RIGHT)
-        ttk.Label(multiplier_box, text="Multiplier:").pack(side=tk.L
-eft)
+        ttk.Label(multiplier_box, text="Multiplier:").pack(side=tk.Left)
         self.multiplier_var = tk.StringVar(master=self.frame)
         self.multiplier_entry = ttk.Entry(multiplier_box, textvariable=self.multiplier_var, width=16)
         self.multiplier_entry.pack(side=tk.LEFT, padx=(4, 0))
@@ -424,8 +423,7 @@ eft)
         self._apply_table_columns(self.current_columns)
         self.table.grid(row=0, column=0, sticky="nsew")
 
-        y_scrollbar = ttk.Scrollbar(table_container, orient=tk.VERTICA
-L, command=self.table.yview)
+        y_scrollbar = ttk.Scrollbar(table_container, orient=tk.VERTICAL, command=self.table.yview)
         y_scrollbar.grid(row=0, column=1, sticky="ns")
         x_scrollbar = ttk.Scrollbar(table_container, orient=tk.HORIZONTAL, command=self.table.xview)
         x_scrollbar.grid(row=1, column=0, sticky="ew")
