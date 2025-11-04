@@ -4188,9 +4188,9 @@ class ReportAppV2:
         company = self.company_var.get().strip()
         target_dir: Optional[Path] = None
         if company:
-            target_dir = self.companies_dir / company / "openapiscrape"
+            target_dir = self.companies_dir / company 
         elif self.pdf_entries:
-            target_dir = self.pdf_entries[0].path.parent / "openapiscrape"
+            target_dir = self.pdf_entries[0].path.parent 
         else:
             messagebox.showinfo("Save Combined", "Select a company or load PDFs first.")
             return
