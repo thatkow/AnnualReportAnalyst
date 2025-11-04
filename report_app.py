@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import sys  # Added to ensure sys is available in imported modules
 import tempfile
 import threading
 from dataclasses import dataclass, field

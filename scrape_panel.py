@@ -6,6 +6,7 @@ import csv
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+import sys
 
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
