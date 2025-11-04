@@ -1071,6 +1071,12 @@ class ReportAppV2:
         self.combined_save_button: Optional[ttk.Button] = None
         self.combined_columns: List[str] = []
         self.combined_rows: List[List[str]] = []
+        self.combined_tab: Optional[ttk.Frame] = None
+        self.combined_rename_canvas: Optional[tk.Canvas] = None
+        self.combined_rename_inner: Optional[ttk.Frame] = None
+        self.combined_rename_scroll: Optional[ttk.Scrollbar] = None
+        self.combined_rename_vars: List[tk.StringVar] = []
+        self.combined_dyn_columns: List[Dict[str, Any]] = []
 
         self._suspend_api_key_save = True
         self._load_local_config()
@@ -1123,6 +1129,8 @@ class ReportAppV2:
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True)
+        # Re-parse combined tab on focus
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_main_tab_changed)
 
         review_tab = ttk.Frame(self.notebook)
         self.notebook.add(review_tab, text="Review")
@@ -1341,26 +1349,49 @@ class ReportAppV2:
         # ---------------- Combined Tab ----------------
         combined_tab = ttk.Frame(self.notebook)
         self.notebook.add(combined_tab, text="Combined")
+        self.combined_tab = combined_tab
 
         combined_top = CollapsibleFrame(combined_tab, "Date Columns by PDF", initially_open=True)
         combined_top.pack(fill=tk.BOTH, expand=False, padx=8, pady=(8, 0))
 
-        date_frame = ttk.Frame(combined_top.content, padding=8)
+        # Rename inputs row (scrollable horizontally)
+        rename_wrap = ttk.Frame(combined_top.content)
+        rename_wrap.pack(fill=tk.X, expand=False, padx=8, pady=(8, 0))
+        ttk.Label(rename_wrap, text="Column names (defaults from Financial):").pack(anchor="w")
+        self.combined_rename_canvas = tk.Canvas(rename_wrap, height=48, highlightthickness=0)
+        self.combined_rename_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.combined_rename_scroll = ttk.Scrollbar(rename_wrap, orient=tk.HORIZONTAL, command=self.combined_rename_canvas.xview)
+        self.combined_rename_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self.combined_rename_canvas.configure(xscrollcommand=self.combined_rename_scroll.set)
+        self.combined_rename_inner = ttk.Frame(self.combined_rename_canvas)
+        self._combined_rename_window = self.combined_rename_canvas.create_window((0, 0), window=self.combined_rename_inner, anchor="nw")
+        self.combined_rename_inner.bind(
+            "<Configure>",
+            lambda _e: self.combined_rename_canvas.configure(scrollregion=self.combined_rename_canvas.bbox("all")),
+        )
+        self.combined_rename_canvas.bind(
+            "<Configure>",
+            lambda e: self.combined_rename_canvas.itemconfigure(self._combined_rename_window, width=e.width),
+        )
+
+        date_frame = ttk.Frame(combined_top.content, padding=(8, 0, 8, 8))
         date_frame.pack(fill=tk.BOTH, expand=True)
-        cols = ("pdf", "financial", "income", "shares")
+        cols = ("Type", "Category", "Item")  # dynamic columns will be added later
         self.combined_date_tree = ttk.Treeview(date_frame, columns=cols, show="headings", height=6)
-        self.combined_date_tree.heading("pdf", text="PDF")
-        self.combined_date_tree.heading("financial", text="Financial Dates")
-        self.combined_date_tree.heading("income", text="Income Dates")
-        self.combined_date_tree.heading("shares", text="Shares Dates")
-        self.combined_date_tree.column("pdf", width=240, anchor=tk.W, stretch=True)
-        self.combined_date_tree.column("financial", width=260, anchor=tk.W, stretch=True)
-        self.combined_date_tree.column("income", width=260, anchor=tk.W, stretch=True)
-        self.combined_date_tree.column("shares", width=260, anchor=tk.W, stretch=True)
+        self.combined_date_tree.heading("Type", text="Type")
+        self.combined_date_tree.heading("Category", text="Category")
+        self.combined_date_tree.heading("Item", text="Item")
+        self.combined_date_tree.column("Type", width=120, anchor=tk.W, stretch=False)
+        self.combined_date_tree.column("Category", width=180, anchor=tk.W, stretch=True)
+        self.combined_date_tree.column("Item", width=180, anchor=tk.W, stretch=True)
         ysc = ttk.Scrollbar(date_frame, orient=tk.VERTICAL, command=self.combined_date_tree.yview)
-        self.combined_date_tree.configure(yscrollcommand=ysc.set)
-        self.combined_date_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        ysc.pack(side=tk.RIGHT, fill=tk.Y)
+        xsc = ttk.Scrollbar(date_frame, orient=tk.HORIZONTAL, command=self.combined_date_tree.xview)
+        self.combined_date_tree.configure(yscrollcommand=ysc.set, xscrollcommand=xsc.set)
+        self.combined_date_tree.grid(row=0, column=0, sticky="nsew")
+        ysc.grid(row=0, column=1, sticky="ns")
+        xsc.grid(row=1, column=0, sticky="ew")
+        date_frame.rowconfigure(0, weight=1)
+        date_frame.columnconfigure(0, weight=1)
 
         controls = ttk.Frame(combined_tab, padding=8)
         controls.pack(fill=tk.X)
@@ -1382,6 +1413,18 @@ class ReportAppV2:
         self.combined_table.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
         ysb.grid(row=0, column=1, sticky="ns")
         xsb.grid(row=1, column=0, sticky="ew")
+
+    def _on_main_tab_changed(self, event: tk.Event) -> None:  # type: ignore[override]
+        try:
+            sel = self.notebook.select()
+            if not sel:
+                return
+            widget = self.root.nametowidget(sel)
+        except Exception:
+            return
+        if self.combined_tab is not None and widget is self.combined_tab:
+            # Re-parse dates whenever Combined tab is focused
+            self.refresh_combined_tab()
 
     def _on_toggle_auto_scale_tables(self) -> None:
         enabled = self.auto_scale_tables_var.get()
@@ -1830,7 +1873,7 @@ class ReportAppV2:
         pattern_map: Dict[str, List[re.Pattern[str]]] = {}
         for column, widget in self.pattern_texts.items():
             lines = self._read_text_lines(widget)
-            compiled: List[re.Pattern[str]] = []
+            compiled: List[re.Pattern[str]]] = []
             flags = re.IGNORECASE if self.case_insensitive_vars[column].get() else 0
             whitespace = self.whitespace_as_space_vars[column].get()
             for line in lines:
@@ -2265,7 +2308,7 @@ class ReportAppV2:
                 if len(vals) <= note_idx:
                     vals.extend([""] * (note_idx + 1 - len(vals)))
                 vals[note_idx] = state if state else "asis"
-                panel.table.item(item_id, values=vals)
+                panel.table.item(other_id, values=vals)
 
                 # Use configured note color from "Configure Note Colors..."
                 panel._apply_note_color_to_item(item_id)
@@ -3783,7 +3826,7 @@ class ReportAppV2:
         for key, panel in self.scrape_panels.items():
             panel.load_from_files()
             panel.update_note_coloring()
-            panel.set_active(self.active_scrape_key == (panel.entry.path, panel.category))
+            panel.set_active(self.active_scrape_key == (panel.entry, panel.category) if isinstance(panel.entry, Path) else self.active_scrape_key == (panel.entry.path, panel.category))
         if self.active_scrape_key is not None:
             path, category = self.active_scrape_key
             entry = self._get_entry_by_path(path)
@@ -3872,62 +3915,202 @@ class ReportAppV2:
         # Fallback lexical bucket
         return (0, 0, 0)
 
-    def refresh_combined_tab(self) -> None:
-        # Refresh the date contrast tree
-        if self.combined_date_tree is None:
-            return
-        tree = self.combined_date_tree
-        for iid in tree.get_children(""):
-            tree.delete(iid)
+    def _build_date_matrix_data(self) -> Tuple[List[Dict[str, Any]], Dict[str, List[str]], List[str]]:
+        """
+        Returns:
+          - dyn_columns: list of dicts per dynamic column:
+                { 'pdf': str, 'entry': PDFEntry, 'index': int,
+                  'labels': {'Financial': str, 'Income': str, 'Shares': str},
+                  'display_label': str, 'default_name': str }
+          - rows_by_type: mapping type -> list of values per dyn column
+          - warnings: list of human-readable warnings for mismatched counts
+        """
+        dyn_columns: List[Dict[str, Any]] = []
+        warnings: List[str] = []
+        # Build columns per PDF
         for entry in self.pdf_entries:
             base = self._combined_scrape_dir_for_entry(entry)
-            fin_header, _ = self._read_csv_path(base / "Financial.csv")
-            inc_header, _ = self._read_csv_path(base / "Income.csv")
-            sh_header, _ = self._read_csv_path(base / "Shares.csv")
-            fin_dates = ", ".join(self._date_columns_from_header(fin_header)) if fin_header else ""
-            inc_dates = ", ".join(self._date_columns_from_header(inc_header)) if inc_header else ""
-            sh_dates = ", ".join(self._date_columns_from_header(sh_header)) if sh_header else ""
-            tree.insert("", "end", values=(entry.path.name, fin_dates, inc_dates, sh_dates))
+            per_type_dates: Dict[str, List[str]] = {}
+            for typ in COLUMNS:
+                header, _ = self._read_csv_path(base / f"{typ}.csv")
+                per_type_dates[typ] = self._date_columns_from_header(header) if header else []
+            lengths = {typ: len(per_type_dates.get(typ, [])) for typ in COLUMNS}
+            if len(set(lengths.values())) > 1:
+                warnings.append(f"{entry.path.name}: Financial={lengths['Financial']}, Income={lengths['Income']}, Shares={lengths['Shares']}")
+            max_len = max(lengths.values()) if lengths else 0
+            for idx in range(max_len):
+                fin = per_type_dates["Financial"][idx] if idx < len(per_type_dates["Financial"]) else ""
+                inc = per_type_dates["Income"][idx] if idx < len(per_type_dates["Income"]) else ""
+                sh = per_type_dates["Shares"][idx] if idx < len(per_type_dates["Shares"]) else ""
+                primary = fin or inc or sh or f"date{idx+1}"
+                display = f"{entry.path.name}:{primary}"
+                default_name = fin or primary
+                dyn_columns.append(
+                    {
+                        "pdf": entry.path.name,
+                        "entry": entry,
+                        "index": idx,
+                        "labels": {"Financial": fin, "Income": inc, "Shares": sh},
+                        "display_label": display,
+                        "default_name": default_name,
+                    }
+                )
+        # Rows by type for matrix display
+        rows_by_type: Dict[str, List[str]] = {t: [] for t in COLUMNS}
+        for col in dyn_columns:
+            for t in COLUMNS:
+                rows_by_type[t].append(col["labels"].get(t, ""))
+        return dyn_columns, rows_by_type, warnings
+
+    def _rebuild_rename_inputs(self, dyn_columns: List[Dict[str, Any]]) -> None:
+        if self.combined_rename_inner is None:
+            return
+        # Clear existing
+        for child in self.combined_rename_inner.winfo_children():
+            child.destroy()
+        self.combined_rename_vars = []
+        # Create entries for each dynamic column
+        # Lay them out horizontally
+        for idx, col in enumerate(dyn_columns):
+            var = tk.StringVar(master=self.root, value=col.get("default_name", ""))
+            self.combined_rename_vars.append(var)
+            entry = ttk.Entry(self.combined_rename_inner, textvariable=var, width=18)
+            entry.grid(row=0, column=idx, padx=2, pady=2, sticky="ew")
+        # A small spacer to ensure scrollregion updates
+        self.combined_rename_inner.update_idletasks()
+        if self.combined_rename_canvas is not None:
+            bbox = self.combined_rename_canvas.bbox("all")
+            if bbox:
+                self.combined_rename_canvas.configure(scrollregion=bbox)
+
+    def refresh_combined_tab(self) -> None:
+        # Only refresh if UI exists
+        if self.combined_date_tree is None:
+            return
+
+        # Build matrix information
+        dyn_columns, rows_by_type, warnings = self._build_date_matrix_data()
+        self.combined_dyn_columns = dyn_columns
+
+        # Rebuild rename inputs with defaults from Financial
+        self._rebuild_rename_inputs(dyn_columns)
+
+        # Configure matrix columns: Type, Category, Item, then pdf:date for each dynamic column
+        tv = self.combined_date_tree
+        # Clear existing rows
+        for iid in tv.get_children(""):
+            tv.delete(iid)
+
+        base_cols = ["Type", "Category", "Item"]
+        dyn_headers = [col["display_label"] for col in dyn_columns]
+        all_cols_ids = [f"c{idx}" for idx in range(len(base_cols) + len(dyn_headers))]
+
+        tv.configure(columns=all_cols_ids, displaycolumns=all_cols_ids, show="headings")
+        # Setup headings
+        for idx, cid in enumerate(all_cols_ids):
+            if idx == 0:
+                name = "Type"
+            elif idx == 1:
+                name = "Category"
+            elif idx == 2:
+                name = "Item"
+            else:
+                name = dyn_headers[idx - 3]
+            tv.heading(cid, text=name)
+            anchor = tk.W if idx < 3 else tk.W
+            width = 120 if idx == 0 else (180 if idx in (1, 2) else max(140, min(320, len(name) * 8)))
+            tv.column(cid, width=width, anchor=anchor, stretch=True)
+
+        # Insert rows for Financial, Income, Shares
+        def row_values(row_type: str) -> List[str]:
+            return [row_type, "", ""] + rows_by_type.get(row_type, [])
+
+        tv.insert("", "end", values=row_values("Financial"))
+        tv.insert("", "end", values=row_values("Income"))
+        tv.insert("", "end", values=row_values("Shares"))
+
+        # Throw a warning if not equal number of columns for each pdf across 3 types
+        if warnings:
+            msg = "Date column count mismatch detected:\n\n" + "\n".join(warnings)
+            try:
+                messagebox.showwarning("Combined – Date Column Mismatch", msg)
+            except Exception:
+                pass
 
     def create_combined_dataset(self) -> None:
         if not self.pdf_entries:
             messagebox.showinfo("Combined", "Load PDFs and run AIScrape to produce CSVs first.")
             return
+
+        # Prepare dynamic columns and rename mapping
+        if not self.combined_dyn_columns:
+            # Ensure matrix info is available
+            self.refresh_combined_tab()
+        dyn_cols = list(self.combined_dyn_columns)
+        rename_names: List[str] = []
+        for idx, col in enumerate(dyn_cols):
+            if idx < len(self.combined_rename_vars):
+                name = self.combined_rename_vars[idx].get().strip()
+            else:
+                name = ""
+            if not name:
+                name = col.get("default_name", f"date{col.get('index', 0)+1}")
+            rename_names.append(name)
+
         # Build combined map and check NOTE consistency
         key_data: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         note_sets: Dict[Tuple[str, str, str], set] = {}
-        all_dates: List[str] = []
-        date_seen: set = set()
 
-        def add_row(header: List[str], row: List[str]) -> None:
-            # Map indices
-            hmap = {h.strip().upper(): idx for idx, h in enumerate(header)}
-            cat = row[hmap.get("CATEGORY", -1)].strip() if "CATEGORY" in hmap else ""
-            sub = row[hmap.get("SUBCATEGORY", -1)].strip() if "SUBCATEGORY" in hmap else ""
-            item = row[hmap.get("ITEM", -1)].strip() if "ITEM" in hmap else ""
-            if not (cat or sub or item):
-                return
-            key = (cat, sub, item)
-            note_val = row[hmap.get("NOTE", -1)].strip() if "NOTE" in hmap else ""
-            # Track note set
-            s = note_sets.setdefault(key, set())
-            if note_val:
-                s.add(note_val)
-            rec = key_data.setdefault(key, {"NOTE": note_val, "values": {}})
-            if note_val and not rec["NOTE"]:
-                rec["NOTE"] = note_val
-            # Collect date columns
-            for idx, name in enumerate(header):
-                name_s = name.strip()
-                if name_s.lower() in {"category", "subcategory", "item", "note"}:
+        def ingest_csv(entry: PDFEntry, category: str, header: List[str], rows: List[List[str]]) -> None:
+            # Map header names to indices
+            h_upper = [h.strip().upper() for h in header]
+            idx_cat = h_upper.index("CATEGORY") if "CATEGORY" in h_upper else -1
+            idx_sub = h_upper.index("SUBCATEGORY") if "SUBCATEGORY" in h_upper else -1
+            idx_item = h_upper.index("ITEM") if "ITEM" in h_upper else -1
+            idx_note = h_upper.index("NOTE") if "NOTE" in h_upper else -1
+            # Compute date columns (ordered)
+            date_indices: List[int] = []
+            for i, name in enumerate(header):
+                lo = name.strip().lower()
+                if lo in {"category", "subcategory", "item", "note"}:
                     continue
-                val = row[idx].strip() if idx < len(row) else ""
-                if not val:
+                date_indices.append(i)
+            # Determine which dyn columns correspond to this pdf
+            pdf_name = entry.path.name
+            dyn_for_pdf = [(j, dc) for j, dc in enumerate(dyn_cols) if dc.get("pdf") == pdf_name]
+            # Map local date index -> global dynamic column indices matching the same position
+            # Multiple dynamic columns for same (pdf, position) won't happen, but handle generically
+            position_to_global: Dict[int, List[int]] = {}
+            for j, dc in dyn_for_pdf:
+                pos = int(dc.get("index", 0))
+                position_to_global.setdefault(pos, []).append(j)
+
+            for raw in rows:
+                # Normalize length
+                if len(raw) < len(header):
+                    raw = raw + [""] * (len(header) - len(raw))
+                cat = raw[idx_cat].strip() if 0 <= idx_cat < len(raw) else ""
+                sub = raw[idx_sub].strip() if 0 <= idx_sub < len(raw) else ""
+                item = raw[idx_item].strip() if 0 <= idx_item < len(raw) else ""
+                if not (cat or sub or item):
                     continue
-                rec["values"][name_s] = val
-                if name_s not in date_seen:
-                    date_seen.add(name_s)
-                    all_dates.append(name_s)
+                key = (cat, sub, item)
+                note_val = raw[idx_note].strip() if 0 <= idx_note < len(raw) else ""
+                s = note_sets.setdefault(key, set())
+                if note_val:
+                    s.add(note_val)
+                rec = key_data.setdefault(key, {"NOTE": note_val, "values_by_dyn": {}})
+                if note_val and not rec["NOTE"]:
+                    rec["NOTE"] = note_val
+                # Fill values by dynamic mapping
+                for local_pos, header_idx in enumerate(date_indices):
+                    if local_pos not in position_to_global:
+                        continue
+                    val = raw[header_idx].strip()
+                    if not val:
+                        continue
+                    for global_idx in position_to_global[local_pos]:
+                        rec["values_by_dyn"][(pdf_name, local_pos)] = val
 
         # Iterate all CSVs for each pdf and category
         for entry in self.pdf_entries:
@@ -3937,22 +4120,15 @@ class ReportAppV2:
                 header, rows = self._read_csv_path(path)
                 if not header or not rows:
                     continue
-                # Ensure header normalized for lookup, but keep original strings for date names
-                # Normalize by passing through normalize_header_row
                 cand = normalize_header_row(header)
                 if cand is not None:
                     header = cand
-                for row in rows:
-                    # Pad row
-                    if len(row) < len(header):
-                        row = row + [""] * (len(header) - len(row))
-                    add_row(header, row)
+                ingest_csv(entry, category, header, rows)
 
         # Check note consistency
         conflicts: List[Tuple[Tuple[str, str, str], List[str]]] = []
         for key, s in note_sets.items():
             uniq = sorted({v for v in s if v is not None})
-            # If more than 1 unique non-empty NOTE
             if len(uniq) > 1:
                 conflicts.append((key, uniq))
         if conflicts:
@@ -3965,13 +4141,8 @@ class ReportAppV2:
             messagebox.showerror("Combined – NOTE conflict", "\n".join(msg_lines))
             return
 
-        # Sort date columns by parsed date (desc), fallback by name
-        def date_sort_key(name: str) -> Tuple[int, int, int, str]:
-            y, m, d = self._parse_date_key(name)
-            return (y, m, d, name)
-
-        all_dates_sorted = sorted(all_dates, key=date_sort_key, reverse=True)
-        columns = ["CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"] + all_dates_sorted
+        # Build header using rename textbox values
+        columns = ["CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"] + rename_names
 
         # Build rows sorted by key
         def key_sort(k: Tuple[str, str, str]) -> Tuple[str, str, str]:
@@ -3982,9 +4153,14 @@ class ReportAppV2:
             rec = key_data[key]
             cat, sub, item = key
             note_val = rec.get("NOTE", "")
-            values_map: Dict[str, str] = rec.get("values", {})
-            row = [cat, sub, item, note_val] + [values_map.get(d, "") for d in all_dates_sorted]
-            rows_out.append(row)
+            values_map_dyn: Dict[Tuple[str, int], str] = rec.get("values_by_dyn", {})
+            # Resolve per dynamic column
+            values_for_row: List[str] = []
+            for dc in dyn_cols:
+                pdf = str(dc.get("pdf", ""))
+                pos = int(dc.get("index", 0))
+                values_for_row.append(values_map_dyn.get((pdf, pos), ""))
+            rows_out.append([cat, sub, item, note_val] + values_for_row)
 
         # Update UI table
         self._populate_combined_table(columns, rows_out)
