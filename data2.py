@@ -1072,11 +1072,15 @@ class ReportAppV2:
         self.combined_columns: List[str] = []
         self.combined_rows: List[List[str]] = []
         self.combined_tab: Optional[ttk.Frame] = None
+        # Removed rename text boxes; keep placeholders for compatibility
         self.combined_rename_canvas: Optional[tk.Canvas] = None
         self.combined_rename_inner: Optional[ttk.Frame] = None
         self.combined_rename_scroll: Optional[ttk.Scrollbar] = None
         self.combined_rename_vars: List[tk.StringVar] = []
         self.combined_dyn_columns: List[Dict[str, Any]] = []
+        self.combined_rename_names: List[str] = []  # dynamic column names used as headers
+        self.combined_date_all_col_ids: List[str] = []
+        self.combined_table_col_ids: List[str] = []
 
         self._suspend_api_key_save = True
         self._load_local_config()
@@ -1354,25 +1358,7 @@ class ReportAppV2:
         combined_top = CollapsibleFrame(combined_tab, "Date Columns by PDF", initially_open=True)
         combined_top.pack(fill=tk.BOTH, expand=False, padx=8, pady=(8, 0))
 
-        # Rename inputs row (scrollable horizontally)
-        rename_wrap = ttk.Frame(combined_top.content)
-        rename_wrap.pack(fill=tk.X, expand=False, padx=8, pady=(8, 0))
-        ttk.Label(rename_wrap, text="Column names (defaults from Financial):").pack(anchor="w")
-        self.combined_rename_canvas = tk.Canvas(rename_wrap, height=48, highlightthickness=0)
-        self.combined_rename_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.combined_rename_scroll = ttk.Scrollbar(rename_wrap, orient=tk.HORIZONTAL, command=self.combined_rename_canvas.xview)
-        self.combined_rename_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-        self.combined_rename_canvas.configure(xscrollcommand=self.combined_rename_scroll.set)
-        self.combined_rename_inner = ttk.Frame(self.combined_rename_canvas)
-        self._combined_rename_window = self.combined_rename_canvas.create_window((0, 0), window=self.combined_rename_inner, anchor="nw")
-        self.combined_rename_inner.bind(
-            "<Configure>",
-            lambda _e: self.combined_rename_canvas.configure(scrollregion=self.combined_rename_canvas.bbox("all")),
-        )
-        self.combined_rename_canvas.bind(
-            "<Configure>",
-            lambda e: self.combined_rename_canvas.itemconfigure(self._combined_rename_window, width=e.width),
-        )
+        # Removed rename text boxes; dynamic column names will be shown as headers and editable via right-click.
 
         date_frame = ttk.Frame(combined_top.content, padding=(8, 0, 8, 8))
         date_frame.pack(fill=tk.BOTH, expand=True)
@@ -1392,6 +1378,10 @@ class ReportAppV2:
         xsc.grid(row=1, column=0, sticky="ew")
         date_frame.rowconfigure(0, weight=1)
         date_frame.columnconfigure(0, weight=1)
+        # Right-click on header to rename dynamic column headers
+        self.combined_date_tree.bind("<Button-3>", self._on_combined_header_right_click)
+        if sys.platform == "darwin":
+            self.combined_date_tree.bind("<Control-Button-1>", self._on_combined_header_right_click)
 
         controls = ttk.Frame(combined_tab, padding=8)
         controls.pack(fill=tk.X)
@@ -1413,6 +1403,10 @@ class ReportAppV2:
         self.combined_table.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
         ysb.grid(row=0, column=1, sticky="ns")
         xsb.grid(row=1, column=0, sticky="ew")
+        # Allow renaming headers in the final combined table as well
+        self.combined_table.bind("<Button-3>", self._on_combined_header_right_click)
+        if sys.platform == "darwin":
+            self.combined_table.bind("<Control-Button-1>", self._on_combined_header_right_click)
 
     def _on_main_tab_changed(self, event: tk.Event) -> None:  # type: ignore[override]
         try:
@@ -1873,7 +1867,7 @@ class ReportAppV2:
         pattern_map: Dict[str, List[re.Pattern[str]]] = {}
         for column, widget in self.pattern_texts.items():
             lines = self._read_text_lines(widget)
-            compiled: List[re.Pattern[str]]] = []
+            compiled: List[re.Pattern[str]] = []
             flags = re.IGNORECASE if self.case_insensitive_vars[column].get() else 0
             whitespace = self.whitespace_as_space_vars[column].get()
             for line in lines:
@@ -2723,7 +2717,7 @@ class ReportAppV2:
         self.fullscreen_preview_window = None
         self.fullscreen_preview_image = None
         self.fullscreen_preview_entry = None
-               self.fullscreen_preview_page = None
+        self.fullscreen_preview_page = None
 
     def render_page(
         self,
@@ -3963,25 +3957,8 @@ class ReportAppV2:
         return dyn_columns, rows_by_type, warnings
 
     def _rebuild_rename_inputs(self, dyn_columns: List[Dict[str, Any]]) -> None:
-        if self.combined_rename_inner is None:
-            return
-        # Clear existing
-        for child in self.combined_rename_inner.winfo_children():
-            child.destroy()
-        self.combined_rename_vars = []
-        # Create entries for each dynamic column
-        # Lay them out horizontally
-        for idx, col in enumerate(dyn_columns):
-            var = tk.StringVar(master=self.root, value=col.get("default_name", ""))
-            self.combined_rename_vars.append(var)
-            entry = ttk.Entry(self.combined_rename_inner, textvariable=var, width=18)
-            entry.grid(row=0, column=idx, padx=2, pady=2, sticky="ew")
-        # A small spacer to ensure scrollregion updates
-        self.combined_rename_inner.update_idletasks()
-        if self.combined_rename_canvas is not None:
-            bbox = self.combined_rename_canvas.bbox("all")
-            if bbox:
-                self.combined_rename_canvas.configure(scrollregion=bbox)
+        # Removed UI text boxes; no-op retained for compatibility.
+        return
 
     def refresh_combined_tab(self) -> None:
         # Only refresh if UI exists
@@ -3992,18 +3969,24 @@ class ReportAppV2:
         dyn_columns, rows_by_type, warnings = self._build_date_matrix_data()
         self.combined_dyn_columns = dyn_columns
 
-        # Rebuild rename inputs with defaults from Financial
-        self._rebuild_rename_inputs(dyn_columns)
+        # Initialize dynamic column names (defaults from Financial/primary)
+        if len(self.combined_rename_names) != len(dyn_columns):
+            self.combined_rename_names = []
+            for idx, col in enumerate(dyn_columns):
+                name = col.get("default_name") or f"date{int(col.get('index', 0))+1}"
+                self.combined_rename_names.append(name)
 
-        # Configure matrix columns: Type, Category, Item, then pdf:date for each dynamic column
+        # Configure matrix columns: Type, Category, Item, then dynamic columns
         tv = self.combined_date_tree
         # Clear existing rows
         for iid in tv.get_children(""):
             tv.delete(iid)
 
         base_cols = ["Type", "Category", "Item"]
-        dyn_headers = [col["display_label"] for col in dyn_columns]
+        # Use rename names as headers for dynamic columns (defaulted from Financial)
+        dyn_headers = list(self.combined_rename_names)
         all_cols_ids = [f"c{idx}" for idx in range(len(base_cols) + len(dyn_headers))]
+        self.combined_date_all_col_ids = all_cols_ids
 
         tv.configure(columns=all_cols_ids, displaycolumns=all_cols_ids, show="headings")
         # Setup headings
@@ -4021,7 +4004,11 @@ class ReportAppV2:
             width = 120 if idx == 0 else (180 if idx in (1, 2) else max(140, min(320, len(name) * 8)))
             tv.column(cid, width=width, anchor=anchor, stretch=True)
 
-        # Insert rows for Financial, Income, Shares
+        # Insert top "Source" row showing the source PDF for each dynamic column
+        source_vals = ["Source", "", ""] + [col.get("pdf", "") for col in dyn_columns]
+        tv.insert("", "end", values=source_vals)
+
+        # Insert rows for Financial, Income, Shares showing the per-type labels
         def row_values(row_type: str) -> List[str]:
             return [row_type, "", ""] + rows_by_type.get(row_type, [])
 
@@ -4042,20 +4029,20 @@ class ReportAppV2:
             messagebox.showinfo("Combined", "Load PDFs and run AIScrape to produce CSVs first.")
             return
 
-        # Prepare dynamic columns and rename mapping
+        # Prepare dynamic columns and rename mapping (now from headers / defaults)
         if not self.combined_dyn_columns:
             # Ensure matrix info is available
             self.refresh_combined_tab()
         dyn_cols = list(self.combined_dyn_columns)
+
+        # Column names come from current rename names (possibly edited via header right-click)
         rename_names: List[str] = []
-        for idx, col in enumerate(dyn_cols):
-            if idx < len(self.combined_rename_vars):
-                name = self.combined_rename_vars[idx].get().strip()
-            else:
-                name = ""
-            if not name:
-                name = col.get("default_name", f"date{col.get('index', 0)+1}")
-            rename_names.append(name)
+        if len(self.combined_rename_names) == len(dyn_cols):
+            rename_names = [n.strip() or (c.get("default_name") or f"date{int(c.get('index',0))+1}") for n, c in zip(self.combined_rename_names, dyn_cols)]
+        else:
+            # fallback
+            for c in dyn_cols:
+                rename_names.append(c.get("default_name") or f"date{int(c.get('index',0))+1}")
 
         # Build combined map and check NOTE consistency
         key_data: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
@@ -4079,7 +4066,6 @@ class ReportAppV2:
             pdf_name = entry.path.name
             dyn_for_pdf = [(j, dc) for j, dc in enumerate(dyn_cols) if dc.get("pdf") == pdf_name]
             # Map local date index -> global dynamic column indices matching the same position
-            # Multiple dynamic columns for same (pdf, position) won't happen, but handle generically
             position_to_global: Dict[int, List[int]] = {}
             for j, dc in dyn_for_pdf:
                 pos = int(dc.get("index", 0))
@@ -4141,7 +4127,7 @@ class ReportAppV2:
             messagebox.showerror("Combined – NOTE conflict", "\n".join(msg_lines))
             return
 
-        # Build header using rename textbox values
+        # Build header using rename names from the date matrix headers
         columns = ["CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"] + rename_names
 
         # Build rows sorted by key
@@ -4180,6 +4166,7 @@ class ReportAppV2:
             tv.delete(iid)
         # Configure columns
         col_ids = [f"c{idx}" for idx in range(len(columns))]
+        self.combined_table_col_ids = col_ids
         tv.configure(columns=col_ids, displaycolumns=col_ids, show="headings")
         for idx, cid in enumerate(col_ids):
             name = columns[idx]
@@ -4217,6 +4204,79 @@ class ReportAppV2:
             messagebox.showinfo("Save Combined", f"Saved combined CSV to:\n{out_path}")
         except Exception as exc:
             messagebox.showerror("Save Combined", f"Failed to save combined CSV: {exc}")
+
+    # ------------------------------------------------------------------ Combined header right-click rename
+    def _on_combined_header_right_click(self, event: tk.Event) -> None:  # type: ignore[override]
+        try:
+            tv: ttk.Treeview = event.widget  # type: ignore[assignment]
+        except Exception:
+            return
+        region = tv.identify_region(event.x, event.y)
+        if region != "heading":
+            return
+        col = tv.identify_column(event.x)  # '#1' based
+        if not col or not col.startswith("#"):
+            return
+        try:
+            idx = int(col[1:]) - 1
+        except Exception:
+            return
+
+        # Determine if this is the top "date columns by PDF" matrix or the final combined table
+        if tv is self.combined_date_tree:
+            # map to our all_col_ids; dynamic columns start from index 3
+            if idx < 3:
+                return  # don't rename Type/Category/Item
+            dyn_idx = idx - 3
+            if dyn_idx < 0 or dyn_idx >= len(self.combined_rename_names):
+                return
+            current = self.combined_rename_names[dyn_idx]
+            new_name = simpledialog.askstring("Rename Column", "Enter new column name:", initialvalue=current, parent=self.root)
+            if new_name is None:
+                return
+            new_name = new_name.strip()
+            if not new_name:
+                return
+            self.combined_rename_names[dyn_idx] = new_name
+            # Update this header
+            all_cols_ids = self.combined_date_all_col_ids or []
+            if idx < len(all_cols_ids):
+                tv.heading(all_cols_ids[idx], text=new_name)
+            # If combined dataset already created, update its header too
+            if self.combined_table is not None and self.combined_columns:
+                # combined_columns structure: ["CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"] + rename_names
+                c_idx = 4 + dyn_idx
+                if 0 <= c_idx < len(self.combined_columns):
+                    self.combined_columns[c_idx] = new_name
+                    if self.combined_table_col_ids and c_idx < len(self.combined_table_col_ids):
+                        try:
+                            self.combined_table.heading(self.combined_table_col_ids[c_idx], text=new_name)
+                        except Exception:
+                            pass
+        elif tv is self.combined_table:
+            # Allow renaming any column header in final table
+            if not self.combined_columns or idx < 0 or idx >= len(self.combined_columns):
+                return
+            current = self.combined_columns[idx]
+            new_name = simpledialog.askstring("Rename Column", "Enter new column name:", initialvalue=current, parent=self.root)
+            if new_name is None:
+                return
+            new_name = new_name.strip()
+            if not new_name:
+                return
+            self.combined_columns[idx] = new_name
+            if self.combined_table_col_ids and idx < len(self.combined_table_col_ids):
+                try:
+                    tv.heading(self.combined_table_col_ids[idx], text=new_name)
+                except Exception:
+                    pass
+            # If this corresponds to a dynamic column, also sync rename_names to keep consistency
+            # dynamic columns start at index 4
+            dyn_idx = idx - 4
+            if 0 <= dyn_idx < len(self.combined_rename_names):
+                self.combined_rename_names[dyn_idx] = new_name
+
+        return
 
 
 def main() -> None:
