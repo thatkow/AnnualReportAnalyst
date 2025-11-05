@@ -467,10 +467,34 @@ class CombinedUIMixin:
 
         columns = ["CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"] + self.combined_rename_names
         pdf_summary = ["PDF source", "", "", ""] + [dc.get("pdf", "") for dc in dyn_cols]
-        pages_summary = ["Pages", "", "", ""] + [
-            self._pages_list_string_for_entry(dc.get("entry")) if isinstance(dc.get("entry"), PDFEntry) else ""
-            for dc in dyn_cols
-        ]
+
+        # === Collect multiplier values for each type (Financial, Income, Shares) ===
+        multipliers: Dict[str, Dict[str, str]] = {}
+        for entry in self.pdf_entries:
+            base = self._combined_scrape_dir_for_entry(entry)
+            pdf_name = entry.path.name
+            mults = {}
+            for typ in ("Financial", "Income", "Shares"):
+                mult_path = base / f"{typ}_multiplier.txt"
+                if mult_path.exists():
+                    try:
+                        with mult_path.open("r", encoding="utf-8") as fh:
+                            mults[typ] = fh.read().strip()
+                    except Exception:
+                        mults[typ] = ""
+                else:
+                    mults[typ] = ""
+            multipliers[pdf_name] = mults
+
+        # Create a summary line for multipliers for each type
+        multiplier_rows = []
+        for typ in ("Financial", "Income", "Shares"):
+            row = [f"{typ} Multiplier", "", "", ""]
+            for dc in dyn_cols:
+                pdf = dc.get("pdf", "")
+                val = multipliers.get(pdf, {}).get(typ, "")
+                row.append(val)
+            multiplier_rows.append(row)
 
         def key_sort(k: Tuple[str, str, str]) -> Tuple[str, str, str]:
             return (k[0] or "", k[1] or "", k[2] or "")
@@ -488,7 +512,7 @@ class CombinedUIMixin:
                 values_for_row.append(values_map_dyn.get((pdf, pos), ""))
             rows_out.append([cat, sub, item, note_val] + values_for_row)
 
-        final_rows = [pdf_summary, pages_summary] + rows_out
+        final_rows = [pdf_summary] + multiplier_rows + rows_out
         self._populate_combined_table(columns, final_rows)
         self.combined_columns = columns
         self.combined_rows = final_rows
