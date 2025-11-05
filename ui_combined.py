@@ -437,7 +437,8 @@ class CombinedUIMixin:
                     subcategory = mapping.get("SUBCATEGORY", "")
                     item = mapping.get("ITEM", "")
                     note_val = mapping.get("NOTE", "")
-                    key = (category, subcategory, item)
+                    # Include typ in key for downstream TYPE assignment
+                    key = (category, subcategory, item, typ)
                     record = key_data.setdefault(key, {"NOTE": "", "values_by_dyn": {}})
                     if note_val:
                         existing_note = record.get("NOTE")
@@ -465,7 +466,10 @@ class CombinedUIMixin:
             messagebox.showerror("Combined – NOTE conflict", "\n".join(msg_lines))
             return
 
-        columns = ["CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"] + self.combined_rename_names
+        # Add TYPE as first column
+        columns = ["TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"] + self.combined_rename_names
+
+        # PDF source and multiplier rows are considered Meta
         pdf_summary = ["PDF source", "", "", ""] + [dc.get("pdf", "") for dc in dyn_cols]
 
         # === Collect multiplier values for each type (Financial, Income, Shares) ===
@@ -490,15 +494,15 @@ class CombinedUIMixin:
         multiplier_rows = []
         for typ in ("Financial", "Income", "Shares"):
             # Mark NOTE column as 'meta' for metadata rows
-            row = [f"{typ} Multiplier", "", "", "meta"]
+            row = [f"{typ}", f"{typ} Multiplier", "", "", "excluded"]
             for dc in dyn_cols:
                 pdf = dc.get("pdf", "")
                 val = multipliers.get(pdf, {}).get(typ, "")
                 row.append(val)
             multiplier_rows.append(row)
 
-        # Mark PDF source row as meta
-        pdf_summary[3] = "meta"
+        # Mark PDF source row as meta and add TYPE column = Meta
+        pdf_summary = ["Meta", "PDF source", "", "", "excluded"] + pdf_summary[4:]
 
         def key_sort(k: Tuple[str, str, str]) -> Tuple[str, str, str]:
             return (k[0] or "", k[1] or "", k[2] or "")
@@ -506,7 +510,8 @@ class CombinedUIMixin:
         rows_out: List[List[str]] = []
         for key in sorted(key_data.keys(), key=key_sort):
             rec = key_data[key]
-            cat, sub, item = key
+            # Unpack typ as well
+            cat, sub, item, typ = key
             note_val = rec.get("NOTE", "")
             values_map_dyn: Dict[Tuple[str, int], str] = rec.get("values_by_dyn", {})
             values_for_row: List[str] = []
@@ -514,7 +519,19 @@ class CombinedUIMixin:
                 pdf = str(dc.get("pdf", ""))
                 pos = int(dc.get("index", 0))
                 values_for_row.append(values_map_dyn.get((pdf, pos), ""))
-            rows_out.append([cat, sub, item, note_val] + values_for_row)
+
+            # Determine TYPE by current CSV being processed (for typ in COLUMNS)
+            assigned_type = None
+            for csv_type in COLUMNS:
+                if csv_type.lower() in cat.lower():
+                    assigned_type = csv_type
+                    break
+            if assigned_type is None:
+                assigned_type = "Meta"
+
+            # Use the typ from the key directly as TYPE
+            assigned_type = typ if typ in COLUMNS else "Meta"
+            rows_out.append([assigned_type, cat, sub, item, note_val] + values_for_row)
 
         final_rows = [pdf_summary] + multiplier_rows + rows_out
         self._populate_combined_table(columns, final_rows)
