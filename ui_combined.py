@@ -256,9 +256,22 @@ class CombinedUIMixin:
                 self.combined_rename_names.append(name)
 
         tv = self.combined_date_tree
-        tv.configure(columns=())
-        for iid in tv.get_children(""):
-            tv.delete(iid)
+        # Safely clear Treeview without removing all columns
+        try:
+            # Clear all items (rows) first
+            for iid in tv.get_children(""):
+                tv.delete(iid)
+
+            # If columns exist, keep a placeholder until reconfigured
+            if not tv["columns"]:
+                tv["columns"] = ("placeholder",)
+                tv.heading("placeholder", text="")
+                tv.column("placeholder", width=1)
+        except tk.TclError:
+            # Fallback safety reset
+            tv["columns"] = ("placeholder",)
+
+        # Now reconfigure columns properly below
 
         columns = ["Type"] + [col.get("display_label", "") for col in dyn_columns]
         col_ids = [f"c{idx}" for idx in range(len(columns))]
