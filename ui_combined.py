@@ -489,12 +489,16 @@ class CombinedUIMixin:
         # Create a summary line for multipliers for each type
         multiplier_rows = []
         for typ in ("Financial", "Income", "Shares"):
-            row = [f"{typ} Multiplier", "", "", ""]
+            # Mark NOTE column as 'meta' for metadata rows
+            row = [f"{typ} Multiplier", "", "", "meta"]
             for dc in dyn_cols:
                 pdf = dc.get("pdf", "")
                 val = multipliers.get(pdf, {}).get(typ, "")
                 row.append(val)
             multiplier_rows.append(row)
+
+        # Mark PDF source row as meta
+        pdf_summary[3] = "meta"
 
         def key_sort(k: Tuple[str, str, str]) -> Tuple[str, str, str]:
             return (k[0] or "", k[1] or "", k[2] or "")
