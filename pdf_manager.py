@@ -6,7 +6,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
+import os
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -156,36 +156,30 @@ class PDFManagerMixin:
         total = len(pdf_paths)
         current = 0
 
-        for pdf_path in pdf_paths:
-            current += 1
-            update_progress(current, total, str(pdf_path))
+        import concurrent.futures
+
+        def process_pdf(pdf_path: Path) -> Optional[PDFEntry]:
             try:
                 doc = fitz.open(pdf_path)  # type: ignore[arg-type]
             except Exception as exc:
                 messagebox.showwarning("PDF Error", f"Could not open '{pdf_path}': {exc}")
-                continue
+                return None
 
             matches: Dict[str, List[Match]] = {column: [] for column in COLUMNS}
             year_value = ""
-
             for page_index in range(len(doc)):
                 page = doc.load_page(page_index)
                 page_text = page.get_text("text")
-
                 for column, patterns in pattern_map.items():
                     for pattern in patterns:
                         match_obj = pattern.search(page_text)
                         if match_obj:
                             matches[column].append(
-                                Match(
-                                    page_index=page_index,
-                                    source="regex",
-                                    pattern=pattern.pattern,
-                                    matched_text=match_obj.group(0).strip(),
-                                )
+                                Match(page_index=page_index, source="regex",
+                                      pattern=pattern.pattern,
+                                      matched_text=match_obj.group(0).strip())
                             )
                             break
-
                 if not year_value:
                     for pattern in year_patterns:
                         year_match = pattern.search(page_text)
@@ -195,7 +189,19 @@ class PDFManagerMixin:
 
             entry = PDFEntry(path=pdf_path, doc=doc, matches=matches, year=year_value)
             self._apply_existing_assignments(entry)
-            self.pdf_entries.append(entry)
+            return entry
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        self.pdf_entries.clear()
+        with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 4)) as executor:
+            futures = {executor.submit(process_pdf, p): p for p in pdf_paths}
+            for i, future in enumerate(as_completed(futures), start=1):
+                entry = future.result()
+                if entry is not None:
+                    self.pdf_entries.append(entry)
+                self.root.after(0, lambda n=i, t=len(pdf_paths): self.root.title(f"Loading PDFs {n}/{t}"))
+
+        self.root.title("Loading complete")
 
         self._rebuild_review_grid()
         self._save_config()
