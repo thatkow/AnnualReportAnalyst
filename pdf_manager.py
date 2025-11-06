@@ -107,6 +107,35 @@ class PDFManagerMixin:
             messagebox.showinfo("Select Folder", "Choose a company before loading PDFs.")
             return
 
+        # --- Create progress window ---
+        progress_win = tk.Toplevel(self.root)
+        progress_win.title("Loading PDFs")
+        progress_win.geometry("320x100")
+        progress_win.transient(self.root)
+        progress_win.grab_set()
+
+        ttk.Label(progress_win, text="Loading PDF files…").pack(pady=(15, 5))
+        progress_var = tk.DoubleVar(value=0)
+        progress = ttk.Progressbar(progress_win, variable=progress_var, maximum=100)
+        progress.pack(fill=tk.X, padx=20, pady=(0, 10))
+
+        status_label = ttk.Label(progress_win, text="")
+        status_label.pack()
+
+        self.root.update_idletasks()
+
+        def update_progress(current: int, total: int, name: str) -> None:
+            percent = (current / total) * 100 if total else 0
+            progress_var.set(percent)
+            status_label.config(text=f"{current}/{total}: {Path(name).name}")
+            self.root.update_idletasks()
+
+        def close_progress() -> None:
+            try:
+                progress_win.destroy()
+            except Exception:
+                pass
+
         folder_path = Path(folder)
         if not folder_path.exists():
             messagebox.showerror("Folder Not Found", f"The folder '{folder}' does not exist.")
@@ -121,9 +150,15 @@ class PDFManagerMixin:
         pdf_paths = sorted(folder_path.rglob("*.pdf"))
         if not pdf_paths:
             messagebox.showinfo("No PDFs", "No PDF files were found in the selected folder.")
+            close_progress()
             return
 
+        total = len(pdf_paths)
+        current = 0
+
         for pdf_path in pdf_paths:
+            current += 1
+            update_progress(current, total, str(pdf_path))
             try:
                 doc = fitz.open(pdf_path)  # type: ignore[arg-type]
             except Exception as exc:
@@ -165,6 +200,9 @@ class PDFManagerMixin:
         self._rebuild_review_grid()
         self._save_config()
         self.refresh_combined_tab()
+
+        # --- Close progress window after done ---
+        close_progress()
 
     def _apply_existing_assignments(self, entry: PDFEntry) -> None:
         record = self.assigned_pages.get(entry.path.name)
