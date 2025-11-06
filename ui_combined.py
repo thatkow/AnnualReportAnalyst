@@ -148,11 +148,6 @@ class CombinedUIMixin:
                 header, _ = self._read_csv_path(base / f"{typ}.csv")
                 per_type_dates[typ] = self._date_columns_from_header(header) if header else []
             lengths = {typ: len(per_type_dates.get(typ, [])) for typ in COLUMNS}
-            if len(set(lengths.values())) > 1:
-                warnings.append(
-                    f"{entry.path.name}: Financial={lengths['Financial']}, "
-                    f"Income={lengths['Income']}, Shares={lengths['Shares']}"
-                )
             max_len = max(lengths.values()) if lengths else 0
             for idx in range(max_len):
                 fin = per_type_dates["Financial"][idx] if idx < len(per_type_dates["Financial"]) else ""

@@ -31,8 +31,11 @@ class MainUIMixin:
         menu_bar.add_cascade(label="File", menu=file_menu)
 
         company_menu = tk.Menu(menu_bar, tearoff=False)
-        company_menu.add_command(label="Select Company…", command=self._open_company_selector)
-        company_menu.add_command(label="Load PDFs", command=self.load_pdfs)
+        def _select_and_load():
+            self._open_company_selector()
+            self.load_pdfs()
+
+        company_menu.add_command(label="Select Company & Load PDFs…", command=_select_and_load)
         company_menu.add_checkbutton(
             label="Auto Load Last Company on Startup",
             variable=self.auto_load_last_company_var,
