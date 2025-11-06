@@ -114,15 +114,14 @@ class PDFManagerMixin:
         progress_win.transient(self.root)
         progress_win.grab_set()
 
-        ttk.Label(progress_win, text="Loading PDF files…").pack(pady=(15, 5))
-        progress_var = tk.DoubleVar(value=0)
-        progress = ttk.Progressbar(progress_win, variable=progress_var, maximum=100)
-        progress.pack(fill=tk.X, padx=20, pady=(0, 10))
+        # Simplified loading indicator (no progress bar)
+        ttk.Label(progress_win, text="Loading PDF files…", font=("Arial", 11)).pack(pady=(25, 10))
+        status_label = ttk.Label(progress_win, text="Please wait…")
+        status_label.pack(pady=(5, 10))
 
-        status_label = ttk.Label(progress_win, text="")
-        status_label.pack()
-
-        self.root.update_idletasks()
+        # Force the window to appear before heavy work starts
+        progress_win.update_idletasks()
+        progress_win.update()
 
         def update_progress(current: int, total: int, name: str) -> None:
             percent = (current / total) * 100 if total else 0
@@ -206,6 +205,9 @@ class PDFManagerMixin:
         self._rebuild_review_grid()
         self._save_config()
         self.refresh_combined_tab()
+
+        status_label.config(text="✅ All PDFs loaded")
+        self.root.update_idletasks()
 
         # --- Close progress window after done ---
         close_progress()
