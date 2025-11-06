@@ -53,8 +53,63 @@ class CompanyManagerMixin:
         window.title("Select Company")
         window.transient(self.root)
         window.resizable(False, False)
-        window.grab_set()
         self.company_selector_window = window
+
+        # Build UI elements before making modal
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="Company:").pack(anchor="w")
+        initial = self.company_var.get().strip()
+        if initial not in self.company_options and self.company_options:
+            initial = self.company_options[0]
+        combo_var = tk.StringVar(value=initial)
+        combo = ttk.Combobox(frame, state="readonly", values=self.company_options, textvariable=combo_var)
+        combo.pack(fill=tk.X, pady=(4, 12))
+
+        button_row = ttk.Frame(frame)
+        button_row.pack(fill=tk.X)
+
+        def close_dialog() -> None:
+            if self.company_selector_window is None:
+                return
+            try:
+                window.grab_release()
+            except tk.TclError:
+                pass
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+            self.company_selector_window = None
+
+        def on_confirm() -> None:
+            selection = combo.get().strip()
+            if selection:
+                self._set_active_company(selection)
+                window.result = True
+            else:
+                window.result = False
+            close_dialog()
+
+        def on_cancel() -> None:
+            window.result = False
+            close_dialog()
+
+        ttk.Button(button_row, text="Cancel", command=on_cancel).pack(side=tk.RIGHT)
+        ttk.Button(button_row, text="Select", command=on_confirm).pack(side=tk.RIGHT, padx=(0, 8))
+
+        window.bind("<Return>", lambda _e: on_confirm())
+        window.bind("<Escape>", lambda _e: on_cancel())
+        window.protocol("WM_DELETE_WINDOW", on_cancel)
+        combo.focus_set()
+
+        # Now make the dialog modal (after UI exists)
+        window.grab_set()
+        self.root.wait_window(window)
+
+        # Return result to caller
+        return getattr(window, "result", False)
 
         frame = ttk.Frame(window, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)

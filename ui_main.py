@@ -32,10 +32,37 @@ class MainUIMixin:
 
         company_menu = tk.Menu(menu_bar, tearoff=False)
         def _select_and_load():
-            self._open_company_selector()
-            self.load_pdfs()
+            """
+            Open the company selector dialog and only trigger load_pdfs()
+            after it closes and a valid company/folder is confirmed.
+            """
+            try:
+                before_company = self.company_var.get().strip()
+                before_folder = self.folder_path.get().strip()
 
-        company_menu.add_command(label="Select Company & Load PDFs…", command=_select_and_load)
+                # Open the selector window (blocking until closed)
+                result = self._open_company_selector()
+
+                # Detect if user pressed OK or company changed
+                after_company = self.company_var.get().strip()
+                after_folder = self.folder_path.get().strip()
+
+                company_changed = (after_company != before_company) or (after_folder != before_folder)
+                folder_valid = bool(after_folder) and Path(after_folder).exists()
+
+                if isinstance(result, bool) and result and folder_valid:
+                    self.load_pdfs()
+                elif company_changed and folder_valid:
+                    # Some selectors don't return a bool but still update vars
+                    self.load_pdfs()
+
+            except Exception as e:
+                messagebox.showerror("Error", f"Error during company selection:\n{e}")
+
+        company_menu.add_command(
+            label="Select Company & Load PDFs…",
+            command=_select_and_load
+        )
         company_menu.add_checkbutton(
             label="Auto Load Last Company on Startup",
             variable=self.auto_load_last_company_var,
