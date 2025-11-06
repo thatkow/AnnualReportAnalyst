@@ -273,6 +273,18 @@ class MainUIMixin:
     def _maybe_auto_load_last_company(self) -> None:
         try:
             if not self.auto_load_last_company_var.get():
+                # Auto-load disabled — open the selector instead
+                try:
+                    result = self._open_company_selector()
+                    # If user confirms and folder valid, load PDFs
+                    folder_str = self.folder_path.get().strip()
+                    if isinstance(result, bool) and result and folder_str and Path(folder_str).exists():
+                        self.load_pdfs()
+                except Exception as e:
+                    messagebox.showerror(
+                        "Select Company",
+                        f"Error opening company selector:\n{e}"
+                    )
                 return
         except Exception:
             return
