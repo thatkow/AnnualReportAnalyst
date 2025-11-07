@@ -210,6 +210,19 @@ class ScrapeUIMixin:
 
         self.scrape_type_notebook.bind("<<NotebookTabChanged>>", self._on_scrape_type_tab_changed)
 
+        # --- Prevent any Entry or focusable input from grabbing focus when app regains focus ---
+        def _on_app_focus_in(event: tk.Event) -> None:
+            try:
+                # Ensure main root window regains focus instead of last active Entry widget
+                self.root.after_idle(lambda: self.root.focus_set())
+            except Exception as e:
+                print(f"Warning: failed to reset focus on app regain: {e}")
+
+        try:
+            self.root.bind("<FocusIn>", _on_app_focus_in, add="+")
+        except Exception as e:
+            print(f"Warning: unable to bind focus reset: {e}")
+
         for category in COLUMNS:
             inner_nb = self.scrape_type_pdf_notebooks.get(category)
             if inner_nb is None:
@@ -450,6 +463,13 @@ class ScrapeUIMixin:
         if entry is None:
             return
         self.set_active_scrape_panel(entry, selected_category)
+
+        # --- Prevent input widgets (e.g. Entry) from grabbing focus ---
+        try:
+            self.root.after_idle(lambda: self.root.focus_set())
+        except Exception:
+            pass
+
 
     def _on_scrape_inner_pdf_tab_changed(self, category: str) -> None:
         inner_nb = self.scrape_type_pdf_notebooks.get(category)
