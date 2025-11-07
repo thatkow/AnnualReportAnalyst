@@ -462,6 +462,42 @@ class ReviewUIMixin:
         if state & CONTROL_MASK:
             self._cycle_scrape_preview()
 
+
+    def _bind_number_keys_to_scrape_preview(self) -> None:
+        """Bind numeric keys 1–9 to directly select a page index in the Scrape preview."""
+        for i in range(1, 10):
+            self.root.bind(str(i), self._on_scrape_number_key)
+
+
+    def _on_scrape_number_key(self, event: tk.Event) -> None:
+        """Jump directly to the selected Scrape preview cycle index based on numeric key."""
+        try:
+            idx = int(event.char) - 1
+        except (ValueError, TypeError):
+            return
+
+        if not hasattr(self, "scrape_preview_pages"):
+            return
+
+        pages = self.scrape_preview_pages
+        if not pages:
+            return
+
+        if idx < 0 or idx >= len(pages):
+            return
+
+        # Set index directly and refresh preview
+        self.scrape_preview_cycle_index = idx
+        try:
+            self._display_scrape_preview_page(force=True)
+        except Exception as e:
+            print(f"Error jumping to preview page {idx + 1}: {e}")
+
+    # Ensure bindings are initialized when Scrape tab is built
+    def build_scrape_tab(self, notebook):
+        super().build_scrape_tab(notebook)
+        self._bind_number_keys_to_scrape_preview()
+
     def _cycle_scrape_preview(self) -> None:
         if len(self.scrape_preview_pages) < 2:
             return
