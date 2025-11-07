@@ -535,3 +535,44 @@ class CombinedUIMixin:
         if self.combined_save_button is not None:
             self.combined_save_button.configure(state="normal")
         messagebox.showinfo("Combined", f"Combined dataset created with {len(final_rows)} rows and {len(columns)} columns.")
+
+
+    # === New: Load Combined.csv for a specific company ===
+    def load_company_combined_csv(self, company_name: str) -> None:
+        import pandas as pd, os
+        try:
+            company_name = company_name.strip()
+            if not company_name:
+                print("⚠️ No company name provided to load Combined.csv.")
+                return
+
+            company_folder = os.path.join(os.getcwd(), "companies", company_name)
+            csv_path = os.path.join(company_folder, "Combined.csv")
+
+            if not os.path.exists(csv_path):
+                print(f"ℹ️ No Combined.csv found for {company_name}")
+                return
+
+            df = pd.read_csv(csv_path)
+            # Replace NaN with empty string before populating
+            df = df.fillna("")
+
+            columns = list(df.columns)
+            rows = df.values.tolist()
+
+            # Sanitize to ensure all None or nan-like values are blank
+            rows = [[("" if str(v).lower() in ("nan", "none", "null") else v) for v in row] for row in rows]
+
+            self.combined_columns = columns
+            self.combined_rows = rows
+
+            if hasattr(self, "_populate_combined_table"):
+                self._populate_combined_table(columns, rows)
+
+            if self.combined_save_button is not None:
+                self.combined_save_button.configure(state="normal")
+
+            print(f"✅ Loaded Combined.csv for {company_name} ({len(rows)} rows, {len(columns)} columns)")
+
+        except Exception as e:
+            print(f"❌ Error loading Combined.csv for {company_name}: {e}")

@@ -52,9 +52,16 @@ class MainUIMixin:
 
                 if isinstance(result, bool) and result and folder_valid:
                     self.load_pdfs()
+                    # Update Combined tab when company is set manually
+                    if hasattr(self, "load_company_combined_csv"):
+                        self.load_company_combined_csv(after_company)
+                        print(f"📂 Loaded Combined.csv for company: {after_company}")
                 elif company_changed and folder_valid:
                     # Some selectors don't return a bool but still update vars
                     self.load_pdfs()
+                    if hasattr(self, "load_company_combined_csv"):
+                        self.load_company_combined_csv(after_company)
+                        print(f"📂 Loaded Combined.csv for company: {after_company}")
 
             except Exception as e:
                 messagebox.showerror("Error", f"Error during company selection:\n{e}")
@@ -301,3 +308,12 @@ class MainUIMixin:
         if not has_pdf:
             return
         self.root.after(0, self.load_pdfs)
+
+        # After auto-load, update Combined tab
+        try:
+            company_name = self.company_var.get().strip()
+            if hasattr(self, "load_company_combined_csv") and company_name:
+                print(f"🔄 Auto-loading Combined.csv for last company: {company_name}")
+                self.load_company_combined_csv(company_name)
+        except Exception as e:
+            print(f"⚠️ Failed to auto-load Combined.csv: {e}")
