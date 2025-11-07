@@ -71,16 +71,22 @@ def render_stacked_annual_report(df, title="Stacked Annual Report", share_count_
     # --- Build traces ---
     def build_main(norm=False):
         traces, xpos, sums = [], [], {}
+
+        # Exclude share_count rows from visual data
+        plot_df = df
+        if "NOTE" in df.columns:
+            plot_df = df[df["NOTE"].str.lower() != share_count_note_name.lower()]
+
         barw, tgap, ygap = 0.25, 0.05, 0.8
         for i, y in enumerate(years):
-            base = i * (len(tickers)*len(types)*(barw+tgap) + ygap)
+            base = i * (len(tickers) * len(types) * (barw + tgap) + ygap)
             for ti, tic in enumerate(tickers):
                 for ty_i, ty in enumerate(types):
-                    off = base + (ti*len(types)+ty_i)*(barw+tgap)
+                    off = base + (ti * len(types) + ty_i) * (barw + tgap)
                     xpos.append((y, tic, ty, off))
 
         for y, tic, ty, x in xpos:
-            sub = df[(df.TYPE == ty) & (df.get("Ticker", tic) == tic)]
+            sub = plot_df[(plot_df.TYPE == ty) & (plot_df.get("Ticker", tic) == tic)]
             total = sum(get_value(r, y, norm) for _, r in sub.iterrows())
             pos = sub[sub[y] > 0].sort_values(by=y, key=lambda s: -s.abs())
             neg = sub[sub[y] < 0].sort_values(by=y, key=lambda s: -s.abs())

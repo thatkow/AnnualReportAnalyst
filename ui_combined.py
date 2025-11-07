@@ -67,6 +67,44 @@ class CombinedUIMixin:
         self.combined_save_button = ttk.Button(controls, text="Save CSV", command=self.save_combined_to_csv, state="disabled")
         self.combined_save_button.pack(side=tk.LEFT, padx=(6, 0))
 
+        # === New button: Plot Stacked Visuals ===
+        from analyst_stackedvisuals import render_stacked_annual_report
+        import pandas as pd
+
+        def _on_plot_stacked_visuals():
+            try:
+                if not hasattr(self, "combined_rows") or not self.combined_rows:
+                    messagebox.showwarning("No Data", "No combined data loaded or generated.")
+                    return
+
+                # Construct DataFrame from current table
+                df = pd.DataFrame(self.combined_rows, columns=self.combined_columns).fillna("")
+
+                # Determine company/ticker name
+                company_name = self.company_var.get().strip() if hasattr(self, "company_var") else "UNKNOWN"
+                df["Ticker"] = company_name
+
+                # Remove NOTE=exclude
+                df = df[df["NOTE"].str.lower() != "excluded"].copy()
+
+                # Negate NOTE=negated
+                num_cols = [c for c in df.columns if c not in ["TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "Ticker"]]
+                for c in num_cols:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+                neg_idx = df["NOTE"].str.lower() == "negated"
+                df.loc[neg_idx, num_cols] = df.loc[neg_idx, num_cols].applymap(
+                    lambda x: -1.0 * x if pd.notna(x) else x
+                )
+
+                # Call the stacked visuals plotter
+                render_stacked_annual_report(df, title=f"{company_name} – Stacked Annual Report")
+
+            except Exception as e:
+                messagebox.showerror("Plot Error", f"Failed to plot stacked visuals:\n{e}")
+
+        self.plot_visuals_button = ttk.Button(controls, text="Plot Stacked Visuals", command=_on_plot_stacked_visuals)
+        self.plot_visuals_button.pack(side=tk.LEFT, padx=(6, 0))
+
         table_container = ttk.Frame(combined_tab, padding=(8, 0, 8, 8))
         table_container.pack(fill=tk.BOTH, expand=True)
         table_container.rowconfigure(0, weight=1)
