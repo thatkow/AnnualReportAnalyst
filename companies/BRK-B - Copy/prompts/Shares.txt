@@ -23,7 +23,7 @@ If the document does not mention multiple classes, use the total or common share
 | “in millions”, “(millions)” | 1,000,000 |
 | “in billions”, “(billions)” | 1,000,000,000 |
 
-Rules:
+Rules:  
 1. Choose the scale indicator closest to the numeric table or column headers.  
 2. If none is found, use **factor = 1**.  
 3. Remove commas, spaces, and symbols before applying scaling.  
@@ -38,13 +38,22 @@ Locate:
 - **Class B shares outstanding**
 - **Conversion factor**
 
-Apply the following rule:
+Determine the Class A → Class B conversion factor using **any** of the following phrasings:
 
-> If the filing states that *Class B has 1/x the economic rights of Class A*, then  
-> **1 Class A = x Class B**.  
-> Use this ratio to convert Class A shares into Class B equivalents.
+• If the filing says **“Class B has 1/x the economic (or voting) rights of Class A”**,  
+  then **1 Class A = x Class B** → `conversion_factor = x`.
 
-If only one class or total is shown, use that number directly.
+• If it says **“Each Class A share is convertible into x Class B shares”** or **“Class A shares convert to x Class B shares”**,  
+  then **`conversion_factor = x`**.
+
+• If it says **“Each Class B share is convertible into 1/x of a Class A share”** or **“Class B = 1/x of Class A”**,  
+  then **`conversion_factor = x`** as well.
+
+Always multiply **Class A shares × conversion_factor** to obtain their **Class B-equivalent** amount.
+
+Total (Class B-equivalent) shares = `(Class A × conversion_factor) + (Class B)`.
+
+If the document mentions only one class or a total, use that figure directly.
 
 ---
 
@@ -62,7 +71,7 @@ Use only those two.
 
 **Formula:**
 
-TOTAL_SHARES_B_EQUIV = (Scaled_Class_A_shares × conversion_factor_A_to_B) + (Scaled_Class_B_shares)
+`TOTAL_SHARES_B_EQUIV = (Scaled_Class_A_shares × conversion_factor_A_to_B) + (Scaled_Class_B_shares)`
 
 Always convert **Class A** shares into **Class B equivalents** — never the other way around.
 
@@ -71,12 +80,12 @@ Always convert **Class A** shares into **Class B equivalents** — never the oth
 ### 5. OUTPUT FORMAT
 
 Output **exactly one line** in the following format:
-
-CATEGORY,SUBCATEGORY,ITEM,NOTE,<latest_year>,<previous_year>  
-SHARES,"","NUMBER OF SHARES","share_count",<value_latest>,<value_previous>
+Date format in format DD.MM.YYYY
+`CATEGORY,SUBCATEGORY,ITEM,NOTE,<latest_date>,<previous_date>`  
+`SHARES,"","NUMBER OF SHARES","share_count",<value_latest>,<value_previous>`
 
 Rules:
-- One semicolon per separator.  
+- One comma per separator.  
 - No commentary, notes, or units.  
 - Use fully scaled integer values.  
 - Leave blank if missing.
@@ -93,9 +102,10 @@ Rules:
 
 ### 7. EXAMPLE OUTPUT
 
-Example:
-CATEGORY,SUBCATEGORY,ITEM,NOTE,31.03.2015,31.03.2014
-"SHARES","","NUMBER OF SHARES","share_count",135273000,126601000
+Example:  
+`CATEGORY,SUBCATEGORY,ITEM,NOTE,<date>,<date>`  
+`SHARES,"","NUMBER OF SHARES","share_count",2471180468,2327622800`
+
 
 ====parsed text====
 
