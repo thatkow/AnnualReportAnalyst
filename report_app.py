@@ -155,36 +155,6 @@ class ReportAppV2(
 
         self.logger.info("✅ Logger initialized for ReportAppV2")
 
-        # ---------------------- Ensure thread_count preserved ----------------------
-        try:
-            self.thread_count = self.get_thread_count()
-        except Exception:
-            self.thread_count = 3
-
-        # If thread_count missing in config, save it immediately
-        try:
-            cfg = self._load_config()
-            if not isinstance(cfg, dict):
-                cfg = {}
-
-            if "thread_count" not in cfg:
-                # Use public API to persist instead of private _save_config
-                self.set_thread_count(self.thread_count)
-                self.logger.info(
-                    "🧩 Added missing thread_count=%d to config (via set_thread_count)",
-                    self.thread_count,
-                )
-            else:
-                self.logger.info(
-                    "🔁 Restored thread_count=%d from existing config", self.thread_count
-                )
-
-        except Exception as e:
-            self.logger.warning("⚠️ Could not patch config with thread_count safely: %s", e)
-
-        self._refresh_company_options()
-        self._maybe_auto_load_last_company()
-
         # ---------------------- AIScrape thread count setup ----------------------
         try:
             self.thread_count = self.get_thread_count()
@@ -196,6 +166,8 @@ class ReportAppV2(
             self.set_thread_count(self.thread_count)
             self.logger.info("🆕 Initialized AIScrape thread count = %d (default)", self.thread_count)
 
+        self._refresh_company_options()
+        self._maybe_auto_load_last_company()
 
         try:
             # Find correct MRO base with a defined __init__ before calling

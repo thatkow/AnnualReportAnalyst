@@ -508,10 +508,30 @@ class ScrapeManagerMixin:
                 elapsed,
             )
             return job, success, multiplier
-            return job, success, multiplier
+        # Use the thread_count from ReportAppV2 if available
+        try:
+            max_workers = getattr(self, "thread_count", None)
+            if not isinstance(max_workers, int) or max_workers <= 0:
+                self.logger.warning("⚠️ Invalid thread_count on self, defaulting to 3")
+                max_workers = 3
+            else:
+                self.logger.info(
+                    "Using configured thread_count from ReportAppV2: %d", max_workers
+                )
 
-        max_workers = min(3, total) if total > 1 else 1
-        self.logger.info("Starting parallel AIScrape: %d jobs with %d workers", total, max_workers)
+            if total < max_workers:
+                max_workers = total
+        except Exception as e:
+            self.logger.warning("⚠️ Could not get thread_count from ReportAppV2: %s", e)
+            max_workers = 3
+
+        self.logger.info(
+            "Starting parallel AIScrape: %d jobs with %d workers (configured=%d)",
+            total,
+            max_workers,
+            getattr(self, "thread_count", 3),
+        )
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(process_job, idx, jb): jb for idx, jb in enumerate(jobs, start=1)}
             for future in as_completed(futures):
