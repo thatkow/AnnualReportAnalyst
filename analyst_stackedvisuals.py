@@ -111,7 +111,17 @@ def render_stacked_annual_report(df, title="Stacked Annual Report", share_count_
 
         for y, tic, ty, x in xpos:
             sub = plot_df[(plot_df.TYPE == ty) & (plot_df.get("Ticker", tic) == tic)]
-            total = sum(get_value(r, y, norm) for _, r in sub.iterrows())
+
+            # Use NaN-safe summation to prevent invalid totals
+            vals = [get_value(r, y, norm) for _, r in sub.iterrows()]
+            if len(vals) == 0:
+                total = 0.0
+            else:
+                total = np.nansum(vals)
+
+            if np.isnan(total):
+                print(f"⚠️ Total still NaN for TYPE={ty}, Ticker={tic}, Year={y} (subset={len(sub)})")
+
             pos = sub[sub[y] > 0].sort_values(by=y, key=lambda s: -s.abs())
             neg = sub[sub[y] < 0].sort_values(by=y, key=lambda s: -s.abs())
             pb, nb = 0, 0
