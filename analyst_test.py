@@ -26,7 +26,7 @@ def generate_test_data():
     df = pd.DataFrame(records)
 
     # Generate date-formatted year columns (DD.MM.YYYY)
-    years = [f"31.12.{year}" for year in range(2021, 2025)]
+    years = [f"31.12.{year}" for year in [2020, 2021, 2018, 2019, 2022, 2023]]
     for y in years:
         df[y] = np.random.randint(-8, 12, len(df))
 

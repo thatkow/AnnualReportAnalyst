@@ -13,7 +13,17 @@ def render_stacked_annual_report(df, title="Stacked Annual Report", share_count_
     years = [c for c in df.columns if re.match(r"\d{2}\.\d{2}\.\d{4}", str(c))]
     if not years:
         raise ValueError("❌ No year-like columns found (expected format DD.MM.YYYY).")
-    print(f"📅 Years: {years}")
+    # Sort years chronologically (DD.MM.YYYY)
+    from datetime import datetime
+    try:
+        years = sorted(
+            years,
+            key=lambda y: datetime.strptime(y, "%d.%m.%Y")
+        )
+    except Exception:
+        years = sorted(years)
+
+    print(f"📅 Years (sorted): {years}")
 
     # Infer tickers if present, otherwise default to single
     tickers = sorted(df["Ticker"].dropna().unique().tolist()) if "Ticker" in df.columns else ["Default"]
@@ -199,7 +209,13 @@ def render_stacked_annual_report(df, title="Stacked Annual Report", share_count_
         ],
         yaxis=dict(title="Share Count"),
         yaxis2=dict(title="Value"),
-        xaxis2=dict(title="Year"),
+        xaxis2=dict(
+            title="Year",
+            tickmode="array",
+            tickvals=list(range(len(years))),
+            ticktext=years,
+            tickangle=45
+        ),
         showlegend=False
     )
 
