@@ -167,11 +167,22 @@ def render_stacked_annual_report(df, title="Stacked Annual Report", share_count_
                 hovertext=[f"<span style='font-family:Courier New;'>TICKER:{ticker}<br>YEAR:{y}<br>COUNT:{share_count[ticker][y]:,.0f}</span>" for y in years]
             ))
         return traces
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        # Slightly shrink top graph and expand bottom one
+        row_heights=[0.22, 0.78],
+        # Increase gap to prevent title/xlabel overlap
+        vertical_spacing=0.08,
+        subplot_titles=("Share Count", title)
+    )
 
-    # --- Plot assembly ---
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        row_heights=[0.25, 0.75], vertical_spacing=0.03,
-                        subplot_titles=("Share Count", title))
+    # Adjust title and label positioning for clarity
+    fig.update_layout(
+        margin=dict(t=120, b=80),
+        title_y=0.97
+    )
 
     main_raw, main_norm, share = build_main(False), build_main(True), build_share()
     for t in share: fig.add_trace(t, row=1, col=1)
