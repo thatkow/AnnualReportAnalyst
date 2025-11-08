@@ -420,7 +420,100 @@ class ScrapeManagerMixin:
     ) -> None:
         errors: List[str] = list(prep_errors)
         total = len(jobs)
-        for index, job in enumerate(jobs, start=1):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+
+        def process_job(index: int, job: ScrapeJob) -> tuple[ScrapeJob, bool, Optional[str]]:
+            """Execute a single AIScrape job and return results."""
+            thread_name = threading.current_thread().name
+            logger.info(
+                "[THREAD-START] %s → %s | category=%s | pages=%s | model=%s",
+                thread_name,
+                job.entry.path.name,
+                job.category,
+                job.pages,
+                job.model_name,
+            )
+
+            multiplier: Optional[str] = None
+            success = False
+            try:
+                job.target_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    pdf_folder = job.target_dir / "PDF_FOLDER"
+                    pdf_folder.mkdir(parents=True, exist_ok=True)
+                    out_pdf = pdf_folder / f"{job.category}.pdf"
+                    if job.temp_pdf is not None and job.temp_pdf.exists():
+                        shutil.copyfile(job.temp_pdf, out_pdf)
+                    else:
+                        tmp_cut = self.export_pages_to_pdf(job.entry.doc, job.pages)
+                        if tmp_cut is not None and tmp_cut.exists():
+                            try:
+                                shutil.copyfile(tmp_cut, out_pdf)
+                            finally:
+                                try:
+                                    tmp_cut.unlink()
+                                except Exception:
+                                    pass
+                except Exception:
+                    logger.exception("Failed to save cut PDF for %s | %s", job.entry.path.name, job.category)
+
+                response_text = self._call_openai_for_job(job, api_key)
+                multiplier, header, rows = self._parse_multiplier_response(response_text)
+                logger.info(
+                    "[THREAD] %s finished OpenAI call for %s | %s | multiplier=%s | rows=%s",
+                    thread_name,
+                    job.entry.path.name,
+                    job.category,
+                    multiplier,
+                    len(rows),
+                )
+
+                job.target_dir.mkdir(parents=True, exist_ok=True)
+                raw_path = job.target_dir / f"{job.category}_raw.txt"
+                raw_path.write_text(response_text, encoding="utf-8")
+                if multiplier is not None:
+                    multiplier_path = job.target_dir / f"{job.category}_multiplier.txt"
+                    multiplier_path.write_text(str(multiplier).strip(), encoding="utf-8")
+
+                csv_path = job.target_dir / f"{job.category}.csv"
+                header_row = header or SCRAPE_EXPECTED_COLUMNS
+                with csv_path.open("w", encoding="utf-8", newline="") as fh:
+                    writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
+                    writer.writerow(header_row)
+                    if rows:
+                        writer.writerows(rows)
+                success = True
+            except Exception as exc:
+                logger.exception("AIScrape failed for %s | %s", job.entry.path.name, job.category)
+                errors.append(f"{job.entry.path.name} - {job.category}: {exc}")
+            finally:
+                try:
+                    if job.temp_pdf is not None and job.temp_pdf.exists():
+                        job.temp_pdf.unlink()
+                except Exception:
+                    pass
+
+            logger.info("[THREAD-END] %s completed → %s | category=%s | success=%s", thread_name, job.entry.path.name, job.category, success)
+            return job, success, multiplier
+
+        max_workers = min(3, total) if total > 1 else 1
+        logger.info("Running %d AIScrape jobs in parallel with %d workers", total, max_workers)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(process_job, idx, jb): jb for idx, jb in enumerate(jobs, start=1)}
+            for future in as_completed(futures):
+                job, success, multiplier = future.result()
+                self.root.after(0, self._on_scrape_job_progress, job, 1, success, multiplier)
+
+        logger.info("✅ All threads finished for %d AIScrape jobs", total)
+        self.root.after(0, self._on_scrape_jobs_finished, total, errors)
+        errors: List[str] = list(prep_errors)
+        total = len(jobs)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def process_job(index: int, job: ScrapeJob) -> tuple[ScrapeJob, bool, Optional[str]]:
+            """Execute a single AIScrape job and return results."""
             multiplier: Optional[str] = None
             success = False
             try:
@@ -451,9 +544,7 @@ class ScrapeManagerMixin:
                                 except Exception:
                                     pass
                 except Exception:
-                    logger.exception(
-                        "Failed to save cut PDF for %s | %s", job.entry.path.name, job.category
-                    )
+                    logger.exception("Failed to save cut PDF for %s | %s", job.entry.path.name, job.category)
 
                 response_text = self._call_openai_for_job(job, api_key)
                 multiplier, header, rows = self._parse_multiplier_response(response_text)
@@ -481,9 +572,7 @@ class ScrapeManagerMixin:
                         writer.writerows(rows)
                 success = True
             except Exception as exc:
-                logger.exception(
-                    "AIScrape failed for %s | %s", job.entry.path.name, job.category
-                )
+                logger.exception("AIScrape failed for %s | %s", job.entry.path.name, job.category)
                 errors.append(f"{job.entry.path.name} - {job.category}: {exc}")
             finally:
                 try:
@@ -491,18 +580,18 @@ class ScrapeManagerMixin:
                         job.temp_pdf.unlink()
                 except Exception:
                     pass
-                self.root.after(
-                    0,
-                    self._on_scrape_job_progress,
-                    job,
-                    index,
-                    success,
-                    multiplier,
-                )
-        self.root.after(0, self._on_scrape_jobs_finished, total, errors)
+            return job, success, multiplier
 
-    def _on_scrape_job_progress(
-        self,
+        max_workers = min(3, total) if total > 1 else 1
+        logger.info("Running %d AIScrape jobs in parallel with %d workers", total, max_workers)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(process_job, idx, jb): jb for idx, jb in enumerate(jobs, start=1)}
+            for future in as_completed(futures):
+                job, success, multiplier = future.result()
+                self.root.after(0, self._on_scrape_job_progress, job, 1, success, multiplier)
+
+        self.root.after(0, self._on_scrape_jobs_finished, total, errors)
         job: ScrapeJob,
         completed: int,
         _success: bool,
