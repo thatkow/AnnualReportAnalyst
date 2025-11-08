@@ -72,6 +72,10 @@ def render_stacked_annual_report(df, title="Stacked Annual Report", share_count_
     ]
     ticker_colors = {tic: base_colors[i % len(base_colors)] for i, tic in enumerate(tickers)}
     style_patterns = ["solid", "dot", "dash", "longdash", "dashdot"]
+
+    # Filter out special placeholder types like 'Shares' before plotting
+    types = [ty for ty in types if str(ty).lower() not in ("shares", "share")]
+
     type_styles = {ty: style_patterns[i % len(style_patterns)] for i, ty in enumerate(types)}
 
     print(f"🎨 Colors: {ticker_colors}")
