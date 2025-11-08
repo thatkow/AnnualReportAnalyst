@@ -20,7 +20,11 @@ from models import ScrapeJob
 from pdf_utils import normalize_header_row
 
 
-logger = logging.getLogger(__name__)
+
+class ScrapeManagerMixin:
+    def __init__(self, logger=None):
+        # Use shared logger from ReportAppV2 if provided
+        self.logger = logger or logging.getLogger("annualreport")
 
 
 class ScrapeManagerMixin:
@@ -149,14 +153,14 @@ class ScrapeManagerMixin:
         client = OpenAI(api_key=sanitized_key)
         file_ids: List[str] = []
         for pdf_path in pdf_paths:
-            logger.info("AIScrape uploading %s", pdf_path)
+            self.logger.info("AIScrape uploading %s", pdf_path)
             with pdf_path.open("rb") as pdf_file:
                 uploaded = client.files.create(file=pdf_file, purpose="assistants")
                 file_id = getattr(uploaded, "id", None)
                 if not file_id:
                     raise ValueError(f"Failed to upload {pdf_path.name} to OpenAI")
                 file_ids.append(str(file_id))
-                logger.info("AIScrape uploaded %s as file id %s", pdf_path.name, file_id)
+                self.logger.info("AIScrape uploaded %s as file id %s", pdf_path.name, file_id)
 
         user_entries: List[Dict[str, Any]] = [
             {"type": "input_text", "text": prompt},
@@ -167,7 +171,7 @@ class ScrapeManagerMixin:
         ]
         user_entries.extend({"type": "input_file", "file_id": fid} for fid in file_ids)
 
-        logger.info(
+        self.logger.info(
             "AIScrape submitting request (model=%s, files=%s)",
             selected_model,
             file_ids,
@@ -183,7 +187,7 @@ class ScrapeManagerMixin:
                 {"role": "user", "content": user_entries},
             ],
         )
-        logger.info("AIScrape response received (model=%s)", selected_model)
+        self.logger.info("AIScrape response received (model=%s)", selected_model)
         return self._extract_openai_response_text(response)
 
     def _call_openai_with_text(
@@ -212,7 +216,7 @@ class ScrapeManagerMixin:
             {"type": "input_text", "text": cleaned_text},
         ]
 
-        logger.info(
+        self.logger.info(
             "AIScrape submitting text request (model=%s, characters=%s)",
             selected_model,
             len(cleaned_text),
@@ -227,7 +231,7 @@ class ScrapeManagerMixin:
                 {"role": "user", "content": user_entries},
             ],
         )
-        logger.info("AIScrape text response received (model=%s)", selected_model)
+        self.logger.info("AIScrape text response received (model=%s)", selected_model)
         return self._extract_openai_response_text(response)
 
     def _call_openai_for_job(self, job: ScrapeJob, api_key: str) -> str:
@@ -355,7 +359,7 @@ class ScrapeManagerMixin:
                         already_processed = True
 
                 if already_processed:
-                    logger.info(
+                    self.logger.info(
                         "AIScrape skipping %s | %s (existing CSV)",
                         entry.path.name,
                         category,
@@ -428,7 +432,7 @@ class ScrapeManagerMixin:
         def process_job(index: int, job: ScrapeJob) -> tuple[ScrapeJob, bool, Optional[str]]:
             thread_name = threading.current_thread().name
             start_time = time.time()
-            logger.info(
+            self.logger.info(
                 "[THREAD-START] %s → %s | category=%s | pages=%s | model=%s | start=%.2fs",
                 thread_name,
                 job.entry.path.name,
@@ -460,7 +464,7 @@ class ScrapeManagerMixin:
 
                 response_text = self._call_openai_for_job(job, api_key)
                 multiplier, header, rows = self._parse_multiplier_response(response_text)
-                logger.info(
+                self.logger.info(
                     "[THREAD] %s finished OpenAI call for %s | %s | rows=%d",
                     thread_name,
                     job.entry.path.name,
@@ -484,7 +488,7 @@ class ScrapeManagerMixin:
                         writer.writerows(rows)
                 success = True
             except Exception as exc:
-                logger.exception("[THREAD-ERROR] %s failed for %s | %s", thread_name, job.entry.path.name, job.category)
+                self.logger.exception("[THREAD-ERROR] %s failed for %s | %s", thread_name, job.entry.path.name, job.category)
                 errors.append(f"{job.entry.path.name} - {job.category}: {exc}")
             finally:
                 try:
@@ -495,7 +499,7 @@ class ScrapeManagerMixin:
 
             end_time = time.time()
             elapsed = end_time - start_time
-            logger.info(
+            self.logger.info(
                 "[THREAD-END] %s completed → %s | category=%s | success=%s | elapsed=%.2fs",
                 thread_name,
                 job.entry.path.name,
@@ -504,10 +508,10 @@ class ScrapeManagerMixin:
                 elapsed,
             )
             return job, success, multiplier
+            return job, success, multiplier
 
         max_workers = min(3, total) if total > 1 else 1
-        logger.info("Starting parallel AIScrape: %d jobs with %d workers", total, max_workers)
-
+        self.logger.info("Starting parallel AIScrape: %d jobs with %d workers", total, max_workers)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(process_job, idx, jb): jb for idx, jb in enumerate(jobs, start=1)}
             for future in as_completed(futures):
@@ -515,7 +519,7 @@ class ScrapeManagerMixin:
                 self.root.after(0, self._on_scrape_job_progress, job, 1, success, multiplier)
 
         total_time = time.time() - start_all
-        logger.info("✅ All threads finished for %d AIScrape jobs | total elapsed = %.2fs", total, total_time)
+        self.logger.info("✅ All threads finished for %d AIScrape jobs | total elapsed = %.2fs", total, total_time)
         self.root.after(0, self._on_scrape_jobs_finished, total, errors)
 
     def _on_scrape_job_progress(

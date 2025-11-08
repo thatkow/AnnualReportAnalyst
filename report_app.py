@@ -145,6 +145,30 @@ class ReportAppV2(
         self._refresh_company_options()
         self._maybe_auto_load_last_company()
 
+        # ---------------------- Logger setup ----------------------
+        import logging
+        self.logger = logging.getLogger("annualreport")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+            )
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.INFO)
+        # ---------------------- Initialize ScrapeManagerMixin ----------------------
+        try:
+            # Find correct MRO base with a defined __init__ before calling
+            if hasattr(ScrapeManagerMixin, "__init__"):
+                super(ScrapeManagerMixin, self).__init__()
+            # Explicitly assign the logger to this instance
+            self.logger.info("Logger initialized and bound to ReportAppV2")
+        except Exception as e:
+            print(f"⚠️ Logger setup warning: {e}")
+            import traceback; traceback.print_exc()
+
+        # Bind logger to ScrapeManagerMixin explicitly
+        self.logger.info("✅ Shared logger setup complete")
+
     # ------------------------------------------------------------------ Config
     def _collect_pattern_config_payload(self) -> Dict[str, Any]:
         patterns = {
