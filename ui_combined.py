@@ -107,6 +107,25 @@ class CombinedUIMixin:
                 # Construct DataFrame from current table
                 df = pd.DataFrame(self.combined_rows, columns=self.combined_columns).fillna("")
 
+                # Extract rows containing multipliers
+                share_mult_row = df[df["CATEGORY"].str.lower() == "shares multiplier"]
+                stock_mult_row = df[df["CATEGORY"].str.lower() == "stock multiplier"]
+                fin_mult_row = df[(df["CATEGORY"].str.lower() == "financial multiplier")]
+                inc_mult_row = df[(df["CATEGORY"].str.lower() == "income multiplier")]
+               
+                num_cols = [c for c in df.columns if c not in ["TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "Ticker"]]
+
+                def extract_mult(row_df):
+                    if row_df.empty:
+                        return {}
+                    row = row_df.iloc[0]
+                    return {col: float(row[col]) if pd.notna(row[col]) and str(row[col]).strip() != "" else 1.0 for col in num_cols}
+
+                share_mult = extract_mult(share_mult_row)
+                stock_mult = extract_mult(stock_mult_row)
+                fin_mult = extract_mult(fin_mult_row)
+                inc_mult = extract_mult(inc_mult_row)
+
                 # Determine company/ticker name
                 company_name = self.company_var.get().strip() if hasattr(self, "company_var") else "UNKNOWN"
                 df["Ticker"] = company_name
@@ -114,14 +133,32 @@ class CombinedUIMixin:
                 # Remove NOTE=exclude
                 df = df[df["NOTE"].str.lower() != "excluded"].copy()
 
-                # Negate NOTE=negated
-                num_cols = [c for c in df.columns if c not in ["TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "Ticker"]]
+                # Negate NOTE=negated                
                 for c in num_cols:
                     df[c] = pd.to_numeric(df[c], errors="coerce")
                 neg_idx = df["NOTE"].str.lower() == "negated"
                 df.loc[neg_idx, num_cols] = df.loc[neg_idx, num_cols].applymap(
                     lambda x: -1.0 * x if pd.notna(x) else x
                 )
+
+                # === Load multipliers ===
+                from pathlib import Path
+                import csv
+
+                company_dir = self.companies_dir / company_name       
+
+                # Apply Stock Multiplier and Share Multiplier to all "Number of shares" rows
+                share_rows = df[df["ITEM"].str.lower() == "number of shares"]
+                for c in num_cols:
+                    df.loc[share_rows.index, c] = df.loc[share_rows.index, c] * share_mult.get(c, 1.0) * stock_mult.get(c, 1.0)
+
+                # Apply Financial / Income multipliers to corresponding TYPE rows (excluding the multiplier rows)
+                for c in num_cols:
+                    df.loc[(df["TYPE"].str.lower() == "financial") & (df["ITEM"].str.lower() != "financial multiplier"), c] *= fin_mult.get(c, 1.0)
+                    df.loc[(df["TYPE"].str.lower() == "income") & (df["ITEM"].str.lower() != "income multiplier"), c] *= inc_mult.get(c, 1.0)
+
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.info("✅ Applied share, stock, and type multipliers before plotting.")
 
                 # Call the stacked visuals plotter
                 render_stacked_annual_report(df, title=f"{company_name} – Stacked Annual Report")
