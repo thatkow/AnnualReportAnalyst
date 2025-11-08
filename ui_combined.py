@@ -62,6 +62,33 @@ class CombinedUIMixin:
 
         controls = ttk.Frame(combined_tab, padding=8)
         controls.pack(fill=tk.X)
+
+        # === New stock multiplier control buttons ===
+        from combined_utils import open_stock_multipliers_file, reload_stock_multipliers, generate_and_open_stock_multipliers
+
+        self.stock_multiplier_button = ttk.Button(
+            controls, text="Stock Multiplier",
+            command=lambda: open_stock_multipliers_file(logger=getattr(self, "logger", None),
+                                                       company_dir=self.companies_dir,
+                                                       current_company_name=self.company_var.get())
+        )
+        self.stock_multiplier_button.pack(side=tk.LEFT)
+
+        self.reload_multipliers_button = ttk.Button(
+            controls,
+            text="Reload Multipliers",
+            command=lambda: reload_stock_multipliers(self),
+        )
+        self.reload_multipliers_button.pack(side=tk.LEFT, padx=(6, 0))
+
+        self.generate_multipliers_button = ttk.Button(
+            controls, text="Generate Multipliers",
+            command=lambda: generate_and_open_stock_multipliers(logger=getattr(self, "logger", None),
+                                                                company_dir=self.companies_dir,
+                                                                date_columns=self.combined_rename_names,
+                                                                current_company_name=self.company_var.get())
+        )
+        self.generate_multipliers_button.pack(side=tk.LEFT, padx=(6, 0))
         self.combined_create_button = ttk.Button(controls, text="Create", command=self.create_combined_dataset)
         self.combined_create_button.pack(side=tk.LEFT)
         self.combined_save_button = ttk.Button(controls, text="Save CSV", command=self.save_combined_to_csv, state="disabled")
@@ -537,6 +564,54 @@ class CombinedUIMixin:
         # Mark PDF source row as meta and add TYPE column = Meta
         pdf_summary = ["Meta", "PDF source", "", "", "excluded"] + pdf_summary[4:]
 
+        # Append Share Multiplier row to pdf_summary
+        try:
+            import csv
+            from pathlib import Path
+
+            company_name = self.company_var.get().strip() if hasattr(self, "company_var") else ""
+            stock_path = self.companies_dir / company_name / "stock_multipliers.csv"
+
+            # Ensure stock_multipliers.csv exists
+            if not stock_path.exists():
+                msg = f"The required file 'stock_multipliers.csv' is missing for {company_name}.\n\nExpected at:\n{stock_path}"
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.error(f"❌ {msg}")
+                try:
+                    messagebox.showerror(
+                        "Missing Stock Multipliers",
+                        f"{msg}\n\nPlease generate the file first using the 'Generate Multipliers' button."
+                    )
+                except Exception:
+                    print(f"❌ {msg}")
+                return
+
+            # Load multipliers
+            stock_data = {}
+            with stock_path.open("r", encoding="utf-8") as fh:
+                reader = csv.reader(fh)
+                header = next(reader, [])
+                for row in reader:
+                    if len(row) >= 2:
+                        stock_data[row[0].strip()] = row[1].strip()
+
+            # Build Stock Multiplier row aligned by date columns
+            share_row = ["Meta", "Stock Multiplier", "", "", "excluded"]
+            for dc in dyn_cols:
+                date_label = dc.get("default_name", "").strip()
+                val = stock_data.get(date_label, "1")
+                share_row.append(val)
+
+            if hasattr(self, "logger") and self.logger:
+                self.logger.info(f"🧮 Added 'Stock Multiplier' row from {stock_path} ({len(stock_data)} entries)")
+
+        except FileNotFoundError:
+            raise
+        except Exception as e:
+            if hasattr(self, "logger") and self.logger:
+                self.logger.error(f"❌ Failed to append 'Stock Multiplier' row to PDF summary: {e}")
+            raise
+
         def key_sort(k: Tuple[str, str, str]) -> Tuple[str, str, str]:
             return (k[0] or "", k[1] or "", k[2] or "")
 
@@ -566,7 +641,7 @@ class CombinedUIMixin:
             assigned_type = typ if typ in COLUMNS else "Meta"
             rows_out.append([assigned_type, cat, sub, item, note_val] + values_for_row)
 
-        final_rows = [pdf_summary] + multiplier_rows + rows_out
+        final_rows = [pdf_summary] + multiplier_rows + [share_row] + rows_out
         self._populate_combined_table(columns, final_rows)
         self.combined_columns = columns
         self.combined_rows = final_rows
