@@ -119,18 +119,34 @@ def render_stacked_annual_report(df, title="Stacked Annual Report", share_count_
                 v = get_value(r, y, norm)
                 traces.append(go.Bar(
                     x=[x], y=[v], base=[pb], width=barw,
-                    name=f"{ty}-{tic}", meta={"TYPE": ty},
-                    hoverinfo="text",
-                    hovertext=f"<span style='font-family:Courier New;'>YEAR:{y}<br>TICKER:{tic}<br>TYPE:{ty}<br>ITEM:{r.ITEM}<br>VALUE:{v:,.2f}</span>"
+                    name=f"{ty}-{tic}", meta={"TYPE":ty}, hoverinfo="text",
+                    hovertext=(
+                        f"<span style='font-family:Courier New;'>"
+                        f"YEAR:{y}<br>"
+                        f"TICKER:{tic}<br>"
+                        f"TYPE:{ty}<br>"
+                        f"CATEGORY:{r.CATEGORY}<br>"
+                        f"SUBCATEGORY:{r.SUBCATEGORY}<br>"
+                        f"ITEM:{r.ITEM}<br>"
+                        f"VALUE:{v:,.2f}</span>"
+                    )
                 ))
                 pb += v
             for _, r in neg.iterrows():
                 v = get_value(r, y, norm)
                 traces.append(go.Bar(
                     x=[x], y=[v], base=[nb], width=barw,
-                    name=f"{ty}-{tic}", meta={"TYPE": ty},
-                    hoverinfo="text",
-                    hovertext=f"<span style='font-family:Courier New;'>YEAR:{y}<br>TICKER:{tic}<br>TYPE:{ty}<br>ITEM:{r.ITEM}<br>VALUE:{v:,.2f}</span>"
+                    name=f"{ty}-{tic}", meta={"TYPE":ty}, hoverinfo="text",
+                    hovertext=(
+                        f"<span style='font-family:Courier New;'>"
+                        f"YEAR:{y}<br>"
+                        f"TICKER:{tic}<br>"
+                        f"TYPE:{ty}<br>"
+                        f"CATEGORY:{r.CATEGORY}<br>"
+                        f"SUBCATEGORY:{r.SUBCATEGORY}<br>"
+                        f"ITEM:{r.ITEM}<br>"
+                        f"VALUE:{v:,.2f}</span>"
+                    )
                 ))
                 nb += v
             sums.setdefault((ty, tic), []).append((x, total))
@@ -143,13 +159,42 @@ def render_stacked_annual_report(df, title="Stacked Annual Report", share_count_
             traces.append(go.Scatter(
                 x=xs, y=ys, mode="lines",
                 line=dict(width=1.8, dash=dash, color=color),
-                name=f"{ty}-{tic} line", meta={"TYPE": ty}))
+                name=f"{ty}-{tic} line", meta={"TYPE":ty}))
+            # Format readable numeric labels and tooltips for dots
+            def format_val(v):
+                if pd.isna(v) or abs(v) < 1e-8:
+                    return ""
+                av = abs(v)
+                if av >= 1_000_000_000:
+                    return f"{v/1_000_000_000:.2f}B"
+                elif av >= 1_000_000:
+                    return f"{v/1_000_000:.2f}M"
+                elif av >= 1_000:
+                    return f"{v/1_000:.2f}k"
+                else:
+                    return f"{v:.2f}"
+
+            hover_texts = [
+                f"<span style='font-family:Courier New;'>"
+                f"YEAR:{years[i]}<br>"
+                f"TICKER:{tic}<br>"
+                f"TYPE:{ty}<br>"
+                f"VALUE:{ys[i]:,.2f}</span>"
+                for i in range(len(ys))
+            ]
+
             traces.append(go.Scatter(
-                x=xs, y=ys, mode="markers+text",
+                x=xs,
+                y=ys,
+                mode="markers+text",
                 marker=dict(size=8, color=color),
-                text=[f"{y/1000:.1f}k" for y in ys],
-                textposition="top center", hoverinfo="skip",
-                name=f"{ty}-{tic} dots", meta={"TYPE": ty}))
+                text=[format_val(y) for y in ys],
+                textposition="top center",
+                hoverinfo="text",
+                hovertext=hover_texts,
+                name=f"{ty}-{tic} dots",
+                meta={"TYPE": ty}
+            ))
         return traces
 
     def build_share():
