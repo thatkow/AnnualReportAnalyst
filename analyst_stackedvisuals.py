@@ -8,11 +8,21 @@ import re
 def render_stacked_annual_report(df, title="Stacked Annual Report", share_count_note_name="share_count"):
     # --- Infer key dimensions ---
     print("🔍 Inferring configuration from DataFrame...")
-
     # Detect year-like columns (e.g. "30.06.2024")
     years = [c for c in df.columns if re.match(r"\d{2}\.\d{2}\.\d{4}", str(c))]
     if not years:
         raise ValueError("❌ No year-like columns found (expected format DD.MM.YYYY).")
+    # Sort years chronologically (DD.MM.YYYY)
+    from datetime import datetime
+    try:
+        years = sorted(
+            years,
+            key=lambda y: datetime.strptime(y, "%d.%m.%Y")
+        )
+    except Exception:
+        years = sorted(years)
+
+    print(f"📅 Years (sorted): {years}")
     # Sort years chronologically (DD.MM.YYYY)
     from datetime import datetime
     try:
@@ -209,14 +219,25 @@ def render_stacked_annual_report(df, title="Stacked Annual Report", share_count_
         ],
         yaxis=dict(title="Share Count"),
         yaxis2=dict(title="Value"),
-        xaxis2=dict(
-            title="Year",
-            tickmode="array",
-            tickvals=list(range(len(years))),
-            ticktext=years,
-            tickangle=45
-        ),
         showlegend=False
+    )
+
+    # Compute approximate x positions for tick labels (midpoints of each year group)
+    # These positions are already determined by build_main() ordering logic.
+    # We'll re-create those bases consistently.
+    barw, tgap, ygap = 0.25, 0.05, 0.8
+    per_year_width = len(tickers) * len(types) * (barw + tgap) + ygap
+    tick_positions = [
+        (i * per_year_width) + (per_year_width / 2) - (ygap / 2)
+        for i in range(len(years))
+    ]
+
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=tick_positions,
+        ticktext=years,
+        tickangle=45,
+        title="Date (Financial Year End)"
     )
 
     for i, v in enumerate(combos[current]):
