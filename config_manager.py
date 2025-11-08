@@ -232,6 +232,43 @@ class ConfigManagerMixin:
         self._api_key_save_after = None
         self._persist_api_key(self.api_key_var.get())
 
+    # ---------------------- Thread Count Persistence ----------------------
+    def get_thread_count(self, default: int = 3) -> int:
+        """Retrieve stored thread count from config, or use default."""
+        try:
+            if not self.config_path.exists():
+                return default
+            import json
+            with self.config_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            value = data.get("thread_count", default)
+            if isinstance(value, int) and value > 0:
+                if hasattr(self, "logger"):
+                    self.logger.info("🔁 Restored thread count = %d from config", value)
+                return value
+            return default
+        except Exception as e:
+            if hasattr(self, "logger"):
+                self.logger.warning("⚠️ Failed to read thread count: %s", e)
+            return default
+
+    def set_thread_count(self, value: int) -> None:
+        """Save new thread count to config file."""
+        try:
+            import json
+            data = {}
+            if self.config_path.exists():
+                with self.config_path.open("r", encoding="utf-8") as fh:
+                    data = json.load(fh) or {}
+            data["thread_count"] = int(value)
+            with self.config_path.open("w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+            if hasattr(self, "logger"):
+                self.logger.info("💾 Saved thread count = %d to config", value)
+        except Exception as e:
+            if hasattr(self, "logger"):
+                self.logger.warning("⚠️ Could not save thread count: %s", e)
+
     def _load_config(self) -> None:
         if not self.config_path.exists():
             return

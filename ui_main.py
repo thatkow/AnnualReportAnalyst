@@ -93,9 +93,59 @@ class MainUIMixin:
         )
         menu_bar.add_cascade(label="View", menu=view_menu)
 
+        # ---------------------- Configuration → AIScrape Threads ----------------------
+        config_menu = tk.Menu(menu_bar, tearoff=False)
+
+        def _configure_aiscrape_threads() -> None:
+            """Open small dialog to set AIScrape thread count."""
+            from tkinter import messagebox
+
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Configure AIScrape Threads")
+            dialog.geometry("280x130")
+            dialog.resizable(False, False)
+            dialog.grab_set()
+
+            tk.Label(
+                dialog,
+                text="Enter number of AIScrape threads:",
+                font=("Segoe UI", 10)
+            ).pack(pady=(15, 5))
+
+            current_val = 3
+            if hasattr(self, "get_thread_count"):
+                try:
+                    current_val = self.get_thread_count()
+                except Exception:
+                    pass
+
+            var = tk.StringVar(value=str(current_val))
+            entry = tk.Entry(dialog, textvariable=var, justify="center", font=("Consolas", 11))
+            entry.pack(pady=5)
+
+            def save_and_close():
+                try:
+                    val = int(var.get())
+                    if val <= 0:
+                        raise ValueError
+                    if hasattr(self, "set_thread_count"):
+                        self.set_thread_count(val)
+                    messagebox.showinfo("AIScrape Threads", f"Saved thread count = {val}")
+                    dialog.destroy()
+                except ValueError:
+                    messagebox.showerror("Invalid Input", "Please enter a positive integer.")
+
+            tk.Button(dialog, text="Save", command=save_and_close, width=8).pack(pady=(8, 4))
+
+        config_menu.add_command(label="AIScrape Threads…", command=_configure_aiscrape_threads)
+        menu_bar.add_cascade(label="Configuration", menu=config_menu)
+
+        # ---------------------------------------------------------------
+        # Finalize menubar assignment
         try:
             self.root.config(menu=menu_bar)
         except tk.TclError:
+            pass
             pass
 
         self.notebook = ttk.Notebook(self.root)
