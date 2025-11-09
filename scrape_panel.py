@@ -349,12 +349,14 @@ class ScrapeResultPanel:
         options = "\n".join(
             f"{idx + 1}. {name}" for idx, name in enumerate(self.current_columns)
         )
+        default_index = column_count  # default to last column
         selection = simpledialog.askinteger(
             "Delete Column",
             f"Select the column number to delete:\n{options}",
             parent=self.frame,
             minvalue=1,
             maxvalue=column_count,
+            initialvalue=default_index,
         )
         if selection is None:
             return
