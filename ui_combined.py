@@ -556,8 +556,12 @@ class CombinedUIMixin:
         if conflicts:
             msg_lines = ["Conflicting NOTE values detected:"]
             for key, vals in conflicts[:20]:
-                cat, sub, item = key
-                msg_lines.append(f"- {cat} | {sub} | {item}: {', '.join(vals)}")
+                if len(key) != 4:
+                    raise ValueError(f"Expected 4-element key (category, subcategory, item, type), got {len(key)}: {key}")
+
+                cat, sub, item, typ = key
+                msg_lines.append(f"- {cat} | {sub} | {item} | {typ}: {', '.join(vals)}")
+
             if len(conflicts) > 20:
                 msg_lines.append(f"... and {len(conflicts) - 20} more")
             messagebox.showerror("Combined – NOTE conflict", "\n".join(msg_lines))
