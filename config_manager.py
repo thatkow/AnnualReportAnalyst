@@ -150,6 +150,28 @@ class ConfigManagerMixin:
             if scheme:
                 self.note_color_scheme = scheme
 
+        # --- Scrape row height ---
+        val = data.get("scrape_row_height")
+        try:
+            self._scrape_row_height = int(val) if val is not None else 22
+        except Exception:
+            self._scrape_row_height = 22
+
+    # ---------------------- Scrape Row Height ----------------------
+    def get_scrape_row_height(self) -> int:
+        """Return the configured scrape table row height."""
+        return getattr(self, "_scrape_row_height", 22)
+
+    def set_scrape_row_height(self, value: int) -> None:
+        """Update and persist the scrape table row height."""
+        self._scrape_row_height = max(10, min(int(value), 60))
+        self._save_pattern_config()
+
+    def _collect_pattern_config_payload(self) -> dict:
+        payload = super()._collect_pattern_config_payload() if hasattr(super(), "_collect_pattern_config_payload") else {}
+        payload["scrape_row_height"] = getattr(self, "_scrape_row_height", 22)
+        return payload
+
     def _load_local_config(self) -> None:
         self.local_config_data = {}
         if not self.local_config_path.exists():

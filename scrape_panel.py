@@ -92,7 +92,7 @@ class ScrapeResultPanel:
         self.delete_csv_button.pack(side=tk.LEFT, padx=(6, 0))
 
         table_container = ttk.Frame(self.frame)
-        table_container.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        
         table_container.columnconfigure(0, weight=1)
         table_container.rowconfigure(0, weight=1)
 
@@ -100,12 +100,32 @@ class ScrapeResultPanel:
         self._current_row_count = SCRAPE_PLACEHOLDER_ROWS
         self.current_columns: List[str] = list(SCRAPE_EXPECTED_COLUMNS)
         self._column_ids: List[str] = [f"col{idx}" for idx in range(len(self.current_columns))]
+        table_container.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        # Apply configured row height using a dedicated style
+        style = ttk.Style()
+        style_name = "Scrape.Treeview"
+        row_h = self.app.get_scrape_row_height()
+        style.configure(style_name, rowheight=row_h)
+
         self.table = ttk.Treeview(
             table_container,
             columns=self._column_ids,
             show="headings",
             height=SCRAPE_PLACEHOLDER_ROWS,
+            style=style_name,
         )
+
+        # Method to update height dynamically when changed in the menu
+        def set_row_height(val: int) -> None:
+            r = int(val)
+            if r < 10 or r > 60:
+                raise ValueError(f"Invalid row height {r}")
+            style.configure(style_name, rowheight=r)
+            self.table.update_idletasks()
+
+        # Expose so UI can call self.scrape_panels[key].set_row_height()
+        self.set_row_height = set_row_height
+
         self._apply_table_columns(self.current_columns)
         self.table.grid(row=0, column=0, sticky="nsew")
 

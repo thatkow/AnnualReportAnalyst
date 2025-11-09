@@ -91,6 +91,45 @@ class MainUIMixin:
             label="Configure Note Colors…",
             command=self._configure_note_colors,
         )
+
+        def _configure_scrape_row_height() -> None:
+            """Dialog to set and persist Scrape row height."""
+            window = tk.Toplevel(self.root)
+            window.title("Configure Scrape Row Height")
+            window.transient(self.root)
+            window.resizable(False, False)
+
+            frame = ttk.Frame(window, padding=12)
+            frame.pack(fill=tk.BOTH, expand=True)
+
+            ttk.Label(frame, text="Row Height (pixels):").pack(pady=(0, 6))
+
+            current = self.get_scrape_row_height()
+            var = tk.StringVar(value=str(current))
+            entry = ttk.Entry(frame, textvariable=var, width=10, justify="center")
+            entry.pack()
+
+            def save_height() -> None:
+                try:
+                    val = int(var.get())
+                    self.set_scrape_row_height(val)
+                    for panel in self.scrape_panels.values():
+                        if hasattr(panel, "set_row_height"):
+                            panel.set_row_height(val)
+                    messagebox.showinfo(
+                        "Row Height Updated",
+                        f"Scrape row height set to {val}px and applied to all tables.",
+                    )
+                    window.destroy()
+                except Exception:
+                    messagebox.showerror("Invalid Value", "Row height must be an integer.")
+
+            ttk.Button(frame, text="Save", command=save_height).pack(pady=(10, 0))
+
+            window.grab_set()
+            window.focus_force()
+
+        view_menu.add_command(label="Configure Scrape Row Height…", command=_configure_scrape_row_height)
         menu_bar.add_cascade(label="View", menu=view_menu)
 
         # ---------------------- Configuration → AIScrape Threads ----------------------
