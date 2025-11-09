@@ -16,7 +16,7 @@ from PIL import ImageTk
 
 
 from company_manager import CompanyManagerMixin
-from config_manager import ConfigManagerMixin
+from config_manager import ConfigManager
 from constants import COLUMNS, DEFAULT_OPENAI_MODEL, DEFAULT_NOTE_COLOR_SCHEME, FALLBACK_NOTE_PALETTE
 from pdf_manager import PDFManagerMixin
 from pdf_utils import PDFEntry
@@ -37,7 +37,6 @@ class ReportAppV2(
     ScrapeManagerMixin,
     CompanyManagerMixin,
     MainUIMixin,
-    ConfigManagerMixin,
 ):
     def __init__(self, root: tk.Misc) -> None:
         if fitz is None:
@@ -54,9 +53,6 @@ class ReportAppV2(
 
         self.app_root = Path(__file__).resolve().parent
         self.companies_dir = self.app_root / "companies"
-        self.config_path = self.app_root / "data2_config.json"
-        self.pattern_config_path = self.app_root / "pattern_config.json"
-        self.local_config_path = self.app_root / "local_config.json"
         self.prompts_dir = self.app_root / "prompts"
 
         self.company_var = tk.StringVar(master=self.root)
@@ -65,7 +61,6 @@ class ReportAppV2(
         self.folder_path = tk.StringVar(master=self.root)
         self.thumbnail_width_var = tk.IntVar(master=self.root, value=220)
         self.api_key_var = tk.StringVar(master=self.root)
-        self.local_config_data: Dict[str, Any] = {}
         self._api_key_save_after: Optional[str] = None
         self._suspend_api_key_save = False
         self.api_key_var.trace_add("write", self._on_api_key_var_changed)
@@ -137,7 +132,8 @@ class ReportAppV2(
         self.combined_table_col_ids: List[str] = []
 
         self._suspend_api_key_save = True
-        self._load_local_config()
+        self.config = ConfigManager.load()
+        self._apply_config_state()
         self._suspend_api_key_save = False
         self._build_ui()
         self._load_pattern_config()
@@ -182,6 +178,46 @@ class ReportAppV2(
         # Bind logger to ScrapeManagerMixin explicitly
         self.logger.info("✅ Shared logger setup complete")
 
+    def _apply_config_state(self) -> None:
+        """Populate runtime state from the shared configuration object."""
+
+        if not hasattr(self, "config"):
+            return
+
+        self.scrape_row_height = int(getattr(self.config, "scrape_row_height", 22))
+        self.scrape_column_widths = dict(getattr(self.config, "scrape_column_widths", {})) or {
+            "category": 140,
+            "subcategory": 140,
+            "item": 140,
+            "note": 140,
+            "dates": 140,
+        }
+        note_colors = dict(getattr(self.config, "note_colors", {})) or dict(DEFAULT_NOTE_COLOR_SCHEME)
+        if note_colors:
+            self.note_color_scheme = note_colors
+
+        downloads_dir = getattr(self.config, "downloads_dir", "") or ""
+        if downloads_dir:
+            self.downloads_dir.set(downloads_dir)
+        else:
+            self.downloads_dir.set("")
+
+        minutes = getattr(self.config, "downloads_minutes", 5)
+        try:
+            self.recent_download_minutes.set(int(minutes))
+        except Exception:
+            self.recent_download_minutes.set(5)
+
+        last_company = getattr(self.config, "last_company", "") or ""
+        if last_company:
+            self.company_var.set(last_company)
+
+        auto_load = bool(getattr(self.config, "auto_load_last_company", False))
+        self.auto_load_last_company_var.set(auto_load)
+
+        api_key = getattr(self.config, "api_key", "") or ""
+        self.api_key_var.set(api_key)
+
     # ------------------------------------------------------------------ Pattern helpers
     def _read_text_lines(self, widget: tk.Text) -> List[str]:
         text = widget.get("1.0", tk.END)
@@ -191,3 +227,195 @@ class ReportAppV2(
             if cleaned:
                 lines.append(cleaned)
         return lines
+
+    def _collect_pattern_config_payload(self) -> Dict[str, Any]:
+        patterns = {
+            column: [line for line in self._read_text_lines(widget)]
+            for column, widget in self.pattern_texts.items()
+        }
+        case_flags = {column: bool(var.get()) for column, var in self.case_insensitive_vars.items()}
+        whitespace_flags = {
+            column: bool(var.get()) for column, var in self.whitespace_as_space_vars.items()
+        }
+        year_patterns = []
+        if self.year_pattern_text is not None:
+            year_patterns = [line for line in self._read_text_lines(self.year_pattern_text)]
+        openai_models: Dict[str, str] = {}
+        for column in COLUMNS:
+            var = self.openai_model_vars.get(column)
+            value = var.get().strip() if var is not None else ""
+            openai_models[column] = value or DEFAULT_OPENAI_MODEL
+        upload_modes: Dict[str, str] = {}
+        for column in COLUMNS:
+            mode_var = self.scrape_upload_mode_vars.get(column)
+            upload_modes[column] = (mode_var.get() if mode_var is not None else "pdf") or "pdf"
+        payload = {
+            "patterns": patterns,
+            "case_insensitive": case_flags,
+            "space_as_whitespace": whitespace_flags,
+            "year_patterns": year_patterns,
+            "year_case_insensitive": bool(self.year_case_insensitive_var.get()),
+            "year_space_as_whitespace": bool(self.year_whitespace_as_space_var.get()),
+            "downloads_minutes": int(self.recent_download_minutes.get()),
+            "openai_models": openai_models,
+            "upload_modes": upload_modes,
+            "scrape_column_widths": dict(self.scrape_column_widths),
+            "note_colors": dict(self.note_color_scheme),
+            "scrape_row_height": int(getattr(self, "scrape_row_height", 22)),
+        }
+        return payload
+
+    def _save_pattern_config(self) -> None:
+        payload = self._collect_pattern_config_payload()
+        self.config.patterns = payload["patterns"]
+        self.config.case_insensitive = payload["case_insensitive"]
+        self.config.space_as_whitespace = payload["space_as_whitespace"]
+        self.config.year_patterns = payload["year_patterns"]
+        self.config.year_case_insensitive = payload["year_case_insensitive"]
+        self.config.year_space_as_whitespace = payload["year_space_as_whitespace"]
+        self.config.downloads_minutes = payload["downloads_minutes"]
+        self.config.openai_models = payload["openai_models"]
+        self.config.upload_modes = payload["upload_modes"]
+        self.config.scrape_column_widths = payload["scrape_column_widths"]
+        self.config.note_colors = payload["note_colors"]
+        self.config.scrape_row_height = payload["scrape_row_height"]
+        self.scrape_row_height = self.config.scrape_row_height
+        self.note_color_scheme = dict(self.config.note_colors)
+        try:
+            self.config.save()
+        except OSError:
+            messagebox.showwarning(
+                "Save Patterns", "Unable to save pattern configuration to disk."
+            )
+
+    def _load_pattern_config(self) -> None:
+        config = getattr(self, "config", None)
+        if config is None:
+            return
+
+        for column, widget in self.pattern_texts.items():
+            values = config.patterns.get(column, [])
+            widget.delete("1.0", tk.END)
+            widget.insert("1.0", "\n".join(values))
+
+        for column, var in self.case_insensitive_vars.items():
+            var.set(config.case_insensitive.get(column, True))
+
+        for column, var in self.whitespace_as_space_vars.items():
+            var.set(config.space_as_whitespace.get(column, True))
+
+        if self.year_pattern_text is not None:
+            self.year_pattern_text.delete("1.0", tk.END)
+            self.year_pattern_text.insert("1.0", "\n".join(config.year_patterns))
+
+        self.year_case_insensitive_var.set(config.year_case_insensitive)
+        self.year_whitespace_as_space_var.set(config.year_space_as_whitespace)
+
+        try:
+            self.recent_download_minutes.set(int(config.downloads_minutes))
+        except Exception:
+            self.recent_download_minutes.set(5)
+
+        for column, var in self.openai_model_vars.items():
+            var.set(config.openai_models.get(column, DEFAULT_OPENAI_MODEL))
+
+        for column, var in self.scrape_upload_mode_vars.items():
+            var.set(config.upload_modes.get(column, "pdf"))
+
+        self.scrape_column_widths = dict(config.scrape_column_widths)
+        self.note_color_scheme = dict(config.note_colors)
+        self.scrape_row_height = int(config.scrape_row_height)
+
+    def get_scrape_row_height(self) -> int:
+        """Return the configured scrape table row height."""
+
+        return int(getattr(self.config, "scrape_row_height", getattr(self, "scrape_row_height", 22)))
+
+    def set_scrape_row_height(self, value: int) -> None:
+        """Update and persist the scrape table row height."""
+
+        try:
+            height = int(value)
+        except (TypeError, ValueError):
+            height = 22
+        height = max(10, min(height, 60))
+        self.scrape_row_height = height
+        self.config.scrape_row_height = height
+        try:
+            self.config.save()
+        except OSError:
+            messagebox.showwarning(
+                "Save Patterns", "Unable to save pattern configuration to disk."
+            )
+
+    def _load_config(self) -> None:
+        self._suspend_api_key_save = True
+        try:
+            self._apply_config_state()
+        finally:
+            self._suspend_api_key_save = False
+
+    def _save_config(self) -> None:
+        self.config.downloads_dir = self.downloads_dir.get().strip()
+        self.config.last_company = self.company_var.get().strip()
+        self.config.auto_load_last_company = bool(self.auto_load_last_company_var.get())
+        try:
+            self.config.save()
+        except OSError:
+            messagebox.showwarning(
+                "Save Config", "Unable to save configuration to disk."
+            )
+
+    def get_thread_count(self, default: int = 3) -> int:
+        """Retrieve stored thread count from config, or use default."""
+
+        value = getattr(self.config, "thread_count", default)
+        if isinstance(value, int) and value > 0:
+            if hasattr(self, "logger"):
+                self.logger.info("🔁 Restored thread count = %d from config", value)
+            return value
+        return default
+
+    def set_thread_count(self, value: int) -> None:
+        """Save new thread count to config file."""
+
+        try:
+            count = int(value)
+            if count <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            count = max(1, int(getattr(self.config, "thread_count", 3)))
+        self.config.thread_count = count
+        try:
+            self.config.save()
+            if hasattr(self, "logger"):
+                self.logger.info("💾 Saved thread count = %d to config", count)
+        except OSError as exc:
+            if hasattr(self, "logger"):
+                self.logger.warning("⚠️ Could not save thread count: %s", exc)
+
+    def _persist_api_key(self, value: str) -> None:
+        trimmed = value.strip()
+        if trimmed == getattr(self.config, "api_key", ""):
+            return
+        self.config.api_key = trimmed
+        try:
+            self.config.save()
+        except OSError:
+            messagebox.showwarning(
+                "Local Config", "Unable to save API key to configuration file."
+            )
+
+    def _on_api_key_var_changed(self, *_: Any) -> None:
+        if self._suspend_api_key_save:
+            return
+        if self._api_key_save_after is not None:
+            try:
+                self.root.after_cancel(self._api_key_save_after)
+            except Exception:
+                pass
+        self._api_key_save_after = self.root.after(600, self._flush_api_key_save)
+
+    def _flush_api_key_save(self) -> None:
+        self._api_key_save_after = None
+        self._persist_api_key(self.api_key_var.get())

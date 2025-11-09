@@ -1,368 +1,311 @@
-"""Configuration management helpers for ReportAppV2."""
+"""Unified configuration management for AnnualReportAnalyst."""
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Mapping
 
-import tkinter as tk
-from tkinter import messagebox
+from platformdirs import user_config_path
 
-from constants import COLUMNS, DEFAULT_OPENAI_MODEL
+from constants import (
+    COLUMNS,
+    DEFAULT_NOTE_COLOR_SCHEME,
+    DEFAULT_OPENAI_MODEL,
+    DEFAULT_PATTERNS,
+    YEAR_DEFAULT_PATTERNS,
+)
 
 
-class ConfigManagerMixin:
-    pattern_config_path: Path
-    local_config_path: Path
-    config_path: Path
-    pattern_texts: Dict[str, tk.Text]
-    case_insensitive_vars: Dict[str, tk.BooleanVar]
-    whitespace_as_space_vars: Dict[str, tk.BooleanVar]
-    year_pattern_text: Optional[tk.Text]
-    year_case_insensitive_var: tk.BooleanVar
-    year_whitespace_as_space_var: tk.BooleanVar
-    recent_download_minutes: tk.StringVar
-    openai_model_vars: Dict[str, tk.StringVar]
-    scrape_upload_mode_vars: Dict[str, tk.StringVar]
-    scrape_column_widths: Dict[str, int]
-    note_color_scheme: Dict[str, str]
-    local_config_data: Dict[str, Any]
-    api_key_var: tk.StringVar
-    downloads_dir: tk.StringVar
-    company_var: tk.StringVar
-    auto_load_last_company_var: tk.BooleanVar
-    _api_key_save_after: Optional[str]
-    _suspend_api_key_save: bool
-    scrape_row_height: int
-    root: tk.Misc
+CONFIG_FILENAME = "AnnualReportAnalyst.config"
 
- # ------------------------------------------------------------------ Config
-    def _collect_pattern_config_payload(self) -> Dict[str, Any]:
-        patterns = {
-            column: [line for line in self._read_text_lines(widget)]
-            for column, widget in self.pattern_texts.items()
-        }
-        case_flags = {column: bool(var.get()) for column, var in self.case_insensitive_vars.items()}
-        whitespace_flags = {
-            column: bool(var.get()) for column, var in self.whitespace_as_space_vars.items()
-        }
-        year_patterns = []
-        if self.year_pattern_text is not None:
-            year_patterns = [line for line in self._read_text_lines(self.year_pattern_text)]
+
+def _default_patterns() -> Dict[str, List[str]]:
+    return {column: list(DEFAULT_PATTERNS.get(column, [])) for column in COLUMNS}
+
+
+def _default_case_flags(value: bool) -> Dict[str, bool]:
+    return {column: value for column in COLUMNS}
+
+
+def _default_openai_models() -> Dict[str, str]:
+    return {column: DEFAULT_OPENAI_MODEL for column in COLUMNS}
+
+
+def _default_upload_modes() -> Dict[str, str]:
+    return {column: "pdf" for column in COLUMNS}
+
+
+def _default_scrape_column_widths() -> Dict[str, int]:
+    return {
+        "category": 140,
+        "subcategory": 140,
+        "item": 140,
+        "note": 140,
+        "dates": 140,
+    }
+
+
+@dataclass
+class ConfigManager:
+    """Dataclass-backed configuration container."""
+
+    api_key: str = ""
+    downloads_dir: str = ""
+    thread_count: int = 3
+    auto_load_last_company: bool = False
+    last_company: str = ""
+    downloads_minutes: int = 5
+    note_colors: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_NOTE_COLOR_SCHEME))
+    scrape_column_widths: Dict[str, int] = field(default_factory=_default_scrape_column_widths)
+    scrape_row_height: int = 22
+    patterns: Dict[str, List[str]] = field(default_factory=_default_patterns)
+    case_insensitive: Dict[str, bool] = field(default_factory=lambda: _default_case_flags(True))
+    space_as_whitespace: Dict[str, bool] = field(default_factory=lambda: _default_case_flags(True))
+    year_patterns: List[str] = field(default_factory=lambda: list(YEAR_DEFAULT_PATTERNS))
+    year_case_insensitive: bool = True
+    year_space_as_whitespace: bool = True
+    openai_models: Dict[str, str] = field(default_factory=_default_openai_models)
+    upload_modes: Dict[str, str] = field(default_factory=_default_upload_modes)
+
+    @classmethod
+    def config_path(cls) -> Path:
+        """Return the path to the unified configuration file."""
+
+        base = Path(user_config_path("AnnualReportAnalyst"))
+        base.mkdir(parents=True, exist_ok=True)
+        return base / CONFIG_FILENAME
+
+    @classmethod
+    def load(cls) -> "ConfigManager":
+        """Load configuration from disk, falling back to defaults."""
+
+        path = cls.config_path()
+        data: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+                if isinstance(loaded, Mapping):
+                    data = dict(loaded)
+            except (OSError, json.JSONDecodeError):
+                data = {}
+        else:
+            data = cls._load_legacy_configs()
+
+        instance = cls()
+        if data:
+            instance.update_from_dict(data)
+
+        if not path.exists():
+            # Persist defaults (and legacy migration results) for future runs.
+            instance.save()
+
+        return instance
+
+    @classmethod
+    def _load_legacy_configs(cls) -> Dict[str, Any]:
+        """Attempt to merge legacy configuration files into the new format."""
+
+        legacy_root = Path(__file__).resolve().parent
+        merged: Dict[str, Any] = {}
+
+        # Legacy general config
+        general_path = legacy_root / "data2_config.json"
+        merged.update(cls._safe_read_json(general_path))
+
+        # Legacy patterns config
+        patterns_path = legacy_root / "pattern_config.json"
+        patterns_data = cls._safe_read_json(patterns_path)
+        if patterns_data:
+            merged.setdefault("patterns", patterns_data.get("patterns", {}))
+            merged.setdefault("case_insensitive", patterns_data.get("case_insensitive", {}))
+            merged.setdefault("space_as_whitespace", patterns_data.get("space_as_whitespace", {}))
+            merged.setdefault("year_patterns", patterns_data.get("year_patterns", []))
+            merged.setdefault("year_case_insensitive", patterns_data.get("year_case_insensitive"))
+            merged.setdefault("year_space_as_whitespace", patterns_data.get("year_space_as_whitespace"))
+            merged.setdefault("downloads_minutes", patterns_data.get("downloads_minutes"))
+            merged.setdefault("openai_models", patterns_data.get("openai_models", {}))
+            merged.setdefault("upload_modes", patterns_data.get("upload_modes", {}))
+            merged.setdefault("scrape_column_widths", patterns_data.get("scrape_column_widths", {}))
+            merged.setdefault("note_colors", patterns_data.get("note_colors", {}))
+            merged.setdefault("scrape_row_height", patterns_data.get("scrape_row_height"))
+
+        # Legacy local config (API key, downloads dir overrides)
+        local_path = legacy_root / "local_config.json"
+        local_data = cls._safe_read_json(local_path)
+        if isinstance(local_data.get("api_key"), str):
+            merged["api_key"] = local_data["api_key"]
+        if isinstance(local_data.get("downloads_dir"), str):
+            merged.setdefault("downloads_dir", local_data["downloads_dir"])
+
+        return {k: v for k, v in merged.items() if v not in (None, {})}
+
+    @staticmethod
+    def _safe_read_json(path: Path) -> Dict[str, Any]:
+        if not path.exists():
+            return {}
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def update_from_dict(self, data: Mapping[str, Any]) -> None:
+        """Merge external data into this instance, preserving defaults."""
+
+        for field_info in fields(self):
+            name = field_info.name
+            if name not in data:
+                continue
+            value = data[name]
+            if name in {"api_key", "downloads_dir", "last_company"}:
+                if isinstance(value, str):
+                    setattr(self, name, value.strip())
+            elif name in {"thread_count", "downloads_minutes", "scrape_row_height"}:
+                coerced = self._coerce_int(value, getattr(self, name))
+                setattr(self, name, coerced)
+            elif name == "auto_load_last_company":
+                setattr(self, name, bool(value))
+            elif name in {"note_colors", "scrape_column_widths", "openai_models", "upload_modes"}:
+                self._merge_dict_field(name, value)
+            elif name == "patterns":
+                self._merge_patterns(value)
+            elif name in {"case_insensitive", "space_as_whitespace"}:
+                self._merge_bool_dict(name, value)
+            elif name == "year_patterns":
+                self.year_patterns = self._coerce_str_list(value, fallback=self.year_patterns)
+            elif name in {"year_case_insensitive", "year_space_as_whitespace"}:
+                setattr(self, name, bool(value))
+
+        # Ensure scrape widths stay within reasonable bounds.
+        widths: Dict[str, int] = {}
+        for key, default_value in _default_scrape_column_widths().items():
+            raw = self.scrape_column_widths.get(key, default_value)
+            widths[key] = self._coerce_int(raw, default_value)
+        self.scrape_column_widths = widths
+
+        # Guarantee note colors retain defaults when absent.
+        merged_colors = dict(DEFAULT_NOTE_COLOR_SCHEME)
+        merged_colors.update({
+            k: str(v).strip()
+            for k, v in self.note_colors.items()
+            if isinstance(k, str) and isinstance(v, str) and v.strip()
+        })
+        self.note_colors = merged_colors
+
+        # Normalize dictionaries keyed by columns.
+        patterns: Dict[str, List[str]] = {}
+        for column in COLUMNS:
+            values = self.patterns.get(column, [])
+            if isinstance(values, Iterable) and not isinstance(values, (str, bytes)):
+                cleaned = [str(item).strip() for item in values if str(item).strip()]
+            else:
+                cleaned = []
+            patterns[column] = cleaned
+        self.patterns = patterns
+
+        case_flags: Dict[str, bool] = {}
+        for column in COLUMNS:
+            case_flags[column] = bool(self.case_insensitive.get(column, True))
+        self.case_insensitive = case_flags
+
+        whitespace_flags: Dict[str, bool] = {}
+        for column in COLUMNS:
+            whitespace_flags[column] = bool(self.space_as_whitespace.get(column, True))
+        self.space_as_whitespace = whitespace_flags
+
         openai_models: Dict[str, str] = {}
         for column in COLUMNS:
-            var = self.openai_model_vars.get(column)
-            if var is not None:
-                value = var.get().strip()
-            else:
-                value = ""
-            openai_models[column] = value or DEFAULT_OPENAI_MODEL
+            value = str(self.openai_models.get(column, DEFAULT_OPENAI_MODEL)).strip() or DEFAULT_OPENAI_MODEL
+            openai_models[column] = value
+        self.openai_models = openai_models
+
         upload_modes: Dict[str, str] = {}
         for column in COLUMNS:
-            mode_var = self.scrape_upload_mode_vars.get(column)
-            if mode_var is not None:
-                upload_modes[column] = mode_var.get() or "pdf"
-            else:
-                upload_modes[column] = "pdf"
-        payload = {
-            "patterns": patterns,
-            "case_insensitive": case_flags,
-            "space_as_whitespace": whitespace_flags,
-            "year_patterns": year_patterns,
-            "year_case_insensitive": bool(self.year_case_insensitive_var.get()),
-            "year_space_as_whitespace": bool(self.year_whitespace_as_space_var.get()),
-            "downloads_minutes": int(self.recent_download_minutes.get()),
-            "openai_models": openai_models,
-            "upload_modes": upload_modes,
+            value = str(self.upload_modes.get(column, "pdf")).strip() or "pdf"
+            upload_modes[column] = value
+        self.upload_modes = upload_modes
+
+    def _merge_dict_field(self, name: str, value: Any) -> None:
+        if not isinstance(value, Mapping):
+            return
+        current = dict(getattr(self, name))
+        for key, entry in value.items():
+            if not isinstance(key, str):
+                continue
+            current[key] = entry
+        setattr(self, name, current)
+
+    def _merge_patterns(self, value: Any) -> None:
+        if not isinstance(value, Mapping):
+            return
+        current = dict(self.patterns)
+        for key, entry in value.items():
+            if not isinstance(key, str):
+                continue
+            if isinstance(entry, Iterable) and not isinstance(entry, (str, bytes)):
+                cleaned = [str(item) for item in entry if isinstance(item, (str, int, float))]
+                current[key] = cleaned
+        self.patterns = current
+
+    def _merge_bool_dict(self, name: str, value: Any) -> None:
+        if not isinstance(value, Mapping):
+            return
+        current = dict(getattr(self, name))
+        for key, entry in value.items():
+            if isinstance(key, str):
+                current[key] = bool(entry)
+        setattr(self, name, current)
+
+    def _coerce_str_list(self, value: Any, *, fallback: List[str]) -> List[str]:
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+            coerced = [str(item).strip() for item in value if isinstance(item, (str, int, float))]
+            coerced = [item for item in coerced if item]
+            if coerced:
+                return coerced
+        return list(fallback)
+
+    def _coerce_int(self, value: Any, default: int) -> int:
+        try:
+            coerced = int(value)
+            if coerced > 0:
+                return coerced
+        except (TypeError, ValueError):
+            pass
+        return default
+
+    def as_dict(self) -> Dict[str, Any]:
+        """Return a JSON-serialisable view of the configuration."""
+
+        return {
+            "api_key": self.api_key,
+            "downloads_dir": self.downloads_dir,
+            "thread_count": int(self.thread_count),
+            "auto_load_last_company": bool(self.auto_load_last_company),
+            "last_company": self.last_company,
+            "downloads_minutes": int(self.downloads_minutes),
+            "note_colors": dict(self.note_colors),
             "scrape_column_widths": dict(self.scrape_column_widths),
-            "note_colors": dict(self.note_color_scheme),
-            "scrape_row_height": self.scrape_row_height,
+            "scrape_row_height": int(self.scrape_row_height),
+            "patterns": {k: list(v) for k, v in self.patterns.items()},
+            "case_insensitive": dict(self.case_insensitive),
+            "space_as_whitespace": dict(self.space_as_whitespace),
+            "year_patterns": list(self.year_patterns),
+            "year_case_insensitive": bool(self.year_case_insensitive),
+            "year_space_as_whitespace": bool(self.year_space_as_whitespace),
+            "openai_models": dict(self.openai_models),
+            "upload_modes": dict(self.upload_modes),
         }
-        return payload
 
-    def _save_pattern_config(self) -> None:
-        payload = self._collect_pattern_config_payload()
-        try:
-            with self.pattern_config_path.open("w", encoding="utf-8") as fh:
-                json.dump(payload, fh, indent=2)
-        except OSError:
-            messagebox.showwarning(
-                "Save Patterns", "Unable to save pattern configuration to disk."
-            )
+    def save(self) -> None:
+        """Persist the configuration to disk atomically."""
 
-    def _load_pattern_config(self) -> None:
-        if not self.pattern_config_path.exists():
-            return
-        try:
-            with self.pattern_config_path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, json.JSONDecodeError):
-            messagebox.showwarning(
-                "Load Patterns",
-                "Unable to read pattern configuration; using defaults.",
-            )
-            return
-
-        if not isinstance(data, dict):
-            messagebox.showwarning(
-                "Load Patterns", "Pattern configuration format is invalid; using defaults."
-            )
-            return
-
-        patterns = data.get("patterns", {})
-        if isinstance(patterns, dict):
-            for column, widget in self.pattern_texts.items():
-                values = patterns.get(column)
-                if isinstance(values, list):
-                    widget.delete("1.0", tk.END)
-                    widget.insert(
-                        "1.0",
-                        "\n".join(str(item) for item in values if isinstance(item, str)),
-                    )
-
-        case_flags = data.get("case_insensitive", {})
-        if isinstance(case_flags, dict):
-            for column, var in self.case_insensitive_vars.items():
-                if column in case_flags:
-                    var.set(bool(case_flags[column]))
-
-        whitespace_flags = data.get("space_as_whitespace", {})
-        if isinstance(whitespace_flags, dict):
-            for column, var in self.whitespace_as_space_vars.items():
-                if column in whitespace_flags:
-                    var.set(bool(whitespace_flags[column]))
-
-        if self.year_pattern_text is not None:
-            year_patterns = data.get("year_patterns")
-            if isinstance(year_patterns, list):
-                self.year_pattern_text.delete("1.0", tk.END)
-                self.year_pattern_text.insert(
-                    "1.0",
-                    "\n".join(
-                        str(item)
-                        for item in year_patterns
-                        if isinstance(item, str)
-                    ),
-                )
-
-        year_case = data.get("year_case_insensitive")
-        if isinstance(year_case, bool):
-            self.year_case_insensitive_var.set(year_case)
-
-        year_whitespace = data.get("year_space_as_whitespace")
-        if isinstance(year_whitespace, bool):
-            self.year_whitespace_as_space_var.set(year_whitespace)
-
-        downloads_minutes = data.get("downloads_minutes")
-        if isinstance(downloads_minutes, int):
-            self.recent_download_minutes.set(str(downloads_minutes))
-
-        openai_models = data.get("openai_models")
-        if isinstance(openai_models, dict):
-            for column in COLUMNS:
-                if column in openai_models:
-                    value = str(openai_models[column]).strip()
-                    var = self.openai_model_vars.get(column)
-                    if var is not None:
-                        var.set(value or DEFAULT_OPENAI_MODEL)
-
-        upload_modes = data.get("upload_modes")
-        if isinstance(upload_modes, dict):
-            for column in COLUMNS:
-                if column in upload_modes:
-                    value = str(upload_modes[column]).strip() or "pdf"
-                    mode_var = self.scrape_upload_mode_vars.get(column)
-                    if mode_var is not None:
-                        mode_var.set(value)
-
-        widths = data.get("scrape_column_widths")
-        if isinstance(widths, dict):
-            for key in ("category", "subcategory", "item", "note", "dates"):
-                value = widths.get(key)
-                try:
-                    if value is not None:
-                        self.scrape_column_widths[key] = max(40, int(value))
-                except (TypeError, ValueError):
-                    continue
-
-        note_colors = data.get("note_colors")
-        if isinstance(note_colors, dict):
-            scheme: Dict[str, str] = {}
-            for k, v in note_colors.items():
-                if isinstance(k, str) and isinstance(v, str) and v.strip():
-                    scheme[k.strip()] = v.strip()
-            if scheme:
-                self.note_color_scheme = scheme
-
-        # --- Scrape row height ---
-        val = data.get("scrape_row_height")
-        try:
-            self.scrape_row_height = int(val) if val is not None else 22
-        except Exception:
-            self.scrape_row_height = 22
-
-    # ---------------------- Scrape Row Height ----------------------
-    def get_scrape_row_height(self) -> int:
-        """Return the configured scrape table row height."""
-        self._load_pattern_config();
-        return getattr(self, "scrape_row_height", 22)
-
-    def set_scrape_row_height(self, value: int) -> None:
-        """Update and persist the scrape table row height."""
-        self.scrape_row_height = max(10, min(int(value), 60))
-        self._save_pattern_config()
-  
-    def _load_local_config(self) -> None:
-        self.local_config_data = {}
-        if not self.local_config_path.exists():
-            return
-        try:
-            with self.local_config_path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, json.JSONDecodeError):
-            return
-
-        if not isinstance(data, dict):
-            return
-
-        self.local_config_data = data
-
-        api_key_value = data.get("api_key")
-        if isinstance(api_key_value, str):
-            trimmed = api_key_value.strip()
-            if trimmed:
-                self.api_key_var.set(trimmed)
-
-        downloads_dir_value = data.get("downloads_dir")
-        if isinstance(downloads_dir_value, str) and not self.downloads_dir.get().strip():
-            trimmed_downloads = downloads_dir_value.strip()
-            if trimmed_downloads:
-                self.downloads_dir.set(trimmed_downloads)
-
-    def _write_local_config(self) -> None:
-        data = dict(self.local_config_data)
-        api_key_value = self.api_key_var.get().strip()
-        if api_key_value:
-            data["api_key"] = api_key_value
-        else:
-            data.pop("api_key", None)
-
-        if not data:
-            if self.local_config_path.exists():
-                try:
-                    self.local_config_path.unlink()
-                except OSError:
-                    messagebox.showwarning(
-                        "Local Config", "Unable to remove local configuration file."
-                    )
-                    return
-        else:
-            try:
-                with self.local_config_path.open("w", encoding="utf-8") as fh:
-                    json.dump(data, fh, indent=2)
-            except OSError:
-                messagebox.showwarning(
-                    "Local Config", "Unable to save local configuration file."
-                )
-                return
-
-        self.local_config_data = data
-
-    def _persist_api_key(self, value: str) -> None:
-        trimmed = value.strip()
-        if trimmed:
-            if self.local_config_data.get("api_key") == trimmed:
-                return
-            self.local_config_data["api_key"] = trimmed
-        elif "api_key" in self.local_config_data:
-            self.local_config_data.pop("api_key", None)
-        else:
-            return
-        self._write_local_config()
-
-    def _on_api_key_var_changed(self, *_: Any) -> None:
-        if self._suspend_api_key_save:
-            return
-        if self._api_key_save_after is not None:
-            try:
-                self.root.after_cancel(self._api_key_save_after)
-            except Exception:
-                pass
-        self._api_key_save_after = self.root.after(600, self._flush_api_key_save)
-
-    def _flush_api_key_save(self) -> None:
-        self._api_key_save_after = None
-        self._persist_api_key(self.api_key_var.get())
-
-    # ---------------------- Thread Count Persistence ----------------------
-    def get_thread_count(self, default: int = 3) -> int:
-        """Retrieve stored thread count from config, or use default."""
-        try:
-            if not self.config_path.exists():
-                return default
-            import json
-            with self.config_path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            value = data.get("thread_count", default)
-            if isinstance(value, int) and value > 0:
-                if hasattr(self, "logger"):
-                    self.logger.info("🔁 Restored thread count = %d from config", value)
-                return value
-            return default
-        except Exception as e:
-            if hasattr(self, "logger"):
-                self.logger.warning("⚠️ Failed to read thread count: %s", e)
-            return default
-
-    def set_thread_count(self, value: int) -> None:
-        """Save new thread count to config file."""
-        try:
-            import json
-            data = {}
-            if self.config_path.exists():
-                with self.config_path.open("r", encoding="utf-8") as fh:
-                    data = json.load(fh) or {}
-            data["thread_count"] = int(value)
-            with self.config_path.open("w", encoding="utf-8") as fh:
-                json.dump(data, fh, indent=2)
-            if hasattr(self, "logger"):
-                self.logger.info("💾 Saved thread count = %d to config", value)
-        except Exception as e:
-            if hasattr(self, "logger"):
-                self.logger.warning("⚠️ Could not save thread count: %s", e)
-
-    def _load_config(self) -> None:
-        if not self.config_path.exists():
-            return
-        try:
-            with self.config_path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, json.JSONDecodeError):
-            return
-
-        downloads = data.get("downloads_dir")
-        if isinstance(downloads, str):
-            self.downloads_dir.set(downloads)
-
-        last_company = data.get("last_company")
-        if isinstance(last_company, str):
-            self.company_var.set(last_company)
-
-        auto_load = data.get("auto_load_last_company")
-        if isinstance(auto_load, bool):
-            self.auto_load_last_company_var.set(auto_load)
-
-    def _save_config(self) -> None:
-        data = {
-            "downloads_dir": self.downloads_dir.get().strip(),
-            "last_company": self.company_var.get().strip(),
-            "auto_load_last_company": bool(self.auto_load_last_company_var.get()),
-        }
-        try:
-            with self.config_path.open("w", encoding="utf-8") as fh:
-                json.dump(data, fh, indent=2)
-        except OSError:
-            messagebox.showwarning(
-                "Save Config", "Unable to save configuration to disk."
-            )
+        path = self.config_path()
+        payload = json.dumps(self.as_dict(), indent=2)
+        tmp_path = path.with_suffix(".tmp")
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            fh.write(payload)
+        tmp_path.replace(path)
