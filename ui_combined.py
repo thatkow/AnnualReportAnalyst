@@ -763,6 +763,42 @@ class CombinedUIMixin:
             self.combined_save_button.configure(state="normal")
         messagebox.showinfo("Combined", f"Combined dataset created with {len(final_rows)} rows and {len(columns)} columns.")
 
+        # === Sort date columns (and reorder rows accordingly) ===
+        import re
+        from datetime import datetime
+
+        def _is_date_column(col: str) -> bool:
+            return bool(
+                re.match(r"\d{2}\.\d{2}\.\d{4}", str(col))
+                or re.match(r"\d{4}-\d{2}-\d{2}", str(col))
+                or re.match(r"\d{2}/\d{2}/\d{4}", str(col))
+            )
+
+        def _parse_date_str(s: str):
+            for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y", "%d.%m.%y"):
+                try:
+                    return datetime.strptime(s, fmt)
+                except Exception:
+                    continue
+            return datetime.min
+
+        # Identify and sort date columns ascending
+        date_cols = [c for c in columns if _is_date_column(c)]
+        non_date_cols = [c for c in columns if c not in date_cols]
+        sorted_dates = sorted(date_cols, key=_parse_date_str)
+        sorted_columns = non_date_cols + sorted_dates
+
+        # Rebuild rows to match sorted columns
+        reordered_rows = []
+        for row in self.combined_rows:
+            mapping = {columns[i]: row[i] for i in range(min(len(columns), len(row)))}
+            reordered_rows.append([mapping.get(c, "") for c in sorted_columns])
+
+        # Update table and memory
+        self.combined_columns = sorted_columns
+        self.combined_rows = reordered_rows
+        self._populate_combined_table(sorted_columns, reordered_rows)
+
 
     # === New: Load Combined.csv for a specific company ===
     def load_company_combined_csv(self, company_name: str) -> None:
