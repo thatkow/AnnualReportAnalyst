@@ -72,6 +72,53 @@ class ScrapeResultPanel:
         self.multiplier_entry.bind("<Return>", self._on_multiplier_submit)
         self.multiplier_entry.bind("<KP_Enter>", self._on_multiplier_submit)
 
+        # === Reload multiplier.txt when input box clicked ===
+        def _reload_multiplier_from_file(event=None):
+            try:
+                if not hasattr(self, "csv_path") or not self.csv_path.exists():
+                    messagebox.showwarning("Reload Multiplier", "No base CSV file found.")
+                    return
+
+                multiplier_txt = self.csv_path.with_name(self.csv_path.stem + "_multiplier.txt")
+                if not multiplier_txt.exists():
+                    messagebox.showwarning("Reload Multiplier", f"{multiplier_txt.name} does not exist.")
+                    return
+
+                content = multiplier_txt.read_text(encoding="utf-8").strip()
+                if content:
+                    self._updating_multiplier = True
+                    self.multiplier_var.set(content)
+                    self._updating_multiplier = False
+                    messagebox.showinfo("Reload Multiplier", f"Reloaded from {multiplier_txt.name}")
+                else:
+                    messagebox.showinfo("Reload Multiplier", f"{multiplier_txt.name} is empty.")
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                messagebox.showerror("Reload Multiplier", f"Failed to reload multiplier:\n{e}")
+
+        self.multiplier_entry.bind("<Button-1>", _reload_multiplier_from_file, add="+")
+
+        # === Button to open the related _multiplier.txt file ===
+        def _open_multiplier_txt():
+            try:
+                base_csv = self.csv_path
+                if not base_csv.exists():
+                    messagebox.showwarning("Open Multiplier", "No base CSV file found.")
+                    return
+
+                multiplier_txt = base_csv.with_name(base_csv.stem + "_multiplier.txt")
+                if not multiplier_txt.exists():
+                    messagebox.showwarning("Open Multiplier", f"{multiplier_txt.name} does not exist.")
+                    return
+
+                self.app.open_file_path(multiplier_txt)
+            except Exception as e:
+                messagebox.showerror("Open Multiplier", f"Failed to open multiplier.txt:\n{e}")
+
+        open_multiplier_btn = ttk.Button(multiplier_box, text="Open _multiplier.txt", command=_open_multiplier_txt)
+        open_multiplier_btn.pack(side=tk.LEFT, padx=(8, 0))
+
         actions_row = ttk.Frame(self.frame)
         actions_row.pack(fill=tk.X, pady=(6, 0))
         self.open_csv_button = ttk.Button(actions_row, text="Open CSV", command=self.open_csv)
