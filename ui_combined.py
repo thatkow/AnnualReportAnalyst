@@ -554,17 +554,90 @@ class CombinedUIMixin:
                         if label:
                             col_list[(pdf_name, idx)] = value
         if conflicts:
-            msg_lines = ["Conflicting NOTE values detected:"]
-            for key, vals in conflicts[:20]:
+            # === Build interactive NOTE Conflict Viewer ===
+            viewer = tk.Toplevel(self.root)
+            viewer.title("NOTE Conflict Viewer")
+            viewer.geometry("950x550")
+
+            ttk.Label(
+                viewer,
+                text="Conflicting NOTE values detected while combining datasets.",
+                font=("Segoe UI", 11, "bold")
+            ).pack(pady=6)
+
+            nb = ttk.Notebook(viewer)
+            nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+            for key, vals in conflicts:
                 if len(key) != 4:
-                    raise ValueError(f"Expected 4-element key (category, subcategory, item, type), got {len(key)}: {key}")
+                    continue
 
                 cat, sub, item, typ = key
-                msg_lines.append(f"- {cat} | {sub} | {item} | {typ}: {', '.join(vals)}")
+                tab = ttk.Frame(nb)
+                nb.add(tab, text=f"{cat[:12]} | {sub[:12]} | {typ}")
 
-            if len(conflicts) > 20:
-                msg_lines.append(f"... and {len(conflicts) - 20} more")
-            messagebox.showerror("Combined – NOTE conflict", "\n".join(msg_lines))
+                tree = ttk.Treeview(
+                    tab,
+                    columns=("Category", "Subcategory", "Item", "Type", "Note", "PDF File"),
+                    show="headings",
+                    height=10
+                )
+
+                for col in ("Category", "Subcategory", "Item", "Type", "Note", "PDF File"):
+                    tree.heading(col, text=col)
+                    tree.column(col, width=140, anchor="center")
+
+                # Collect matching rows directly from source CSVs
+                for entry in self.pdf_entries:
+                    base = self._combined_scrape_dir_for_entry(entry)
+                    csv_path = base / f"{typ}.csv"
+                    if not csv_path.exists():
+                        continue
+
+                    try:
+                        import csv as csvmod
+                        with csv_path.open("r", encoding="utf-8") as fh:
+                            reader = csvmod.DictReader(fh)
+                            for row in reader:
+                                if (
+                                    row.get("CATEGORY", "") == cat
+                                    and row.get("SUBCATEGORY", "") == sub
+                                    and row.get("ITEM", "") == item
+                                    and row.get("TYPE", typ) == typ
+                                ):
+                                    tree.insert(
+                                        "",
+                                        tk.END,
+                                        values=(
+                                            row.get("CATEGORY", ""),
+                                            row.get("SUBCATEGORY", ""),
+                                            row.get("ITEM", ""),
+                                            row.get("TYPE", ""),
+                                            row.get("NOTE", ""),
+                                            entry.path.name,
+                                        ),
+                                    )
+                    except Exception as e:
+                        print(f"⚠️ Failed to read {csv_path}: {e}")
+
+                # Add scroll bar
+                vsb = ttk.Scrollbar(tab, orient="vertical", command=tree.yview)
+                tree.configure(yscroll=vsb.set)
+                vsb.pack(side=tk.RIGHT, fill=tk.Y)
+                tree.pack(fill=tk.BOTH, expand=True)
+
+            ttk.Button(viewer, text="Close", command=viewer.destroy).pack(pady=8)
+
+            # === Non-blocking configuration ===
+            try:
+                viewer.transient(self.root)
+                viewer.focus_set()
+                viewer.lift()
+                viewer.grab_release()
+            except Exception:
+                pass
+
+            viewer.protocol("WM_DELETE_WINDOW", viewer.destroy)
             return
 
         # Add TYPE as first column
