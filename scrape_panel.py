@@ -446,11 +446,34 @@ class ScrapeResultPanel:
         if not confirm:
             return
         try:
-            if self.csv_path.exists():
-                self.csv_path.unlink()
-        except OSError as exc:
-            messagebox.showwarning("Delete CSV", f"Failed to delete CSV: {exc}")
-            return
+            base = self.csv_path
+            prefix = base.stem
+            parent = base.parent
+
+            # Delete all related files for this category
+            related_files = [
+                parent / f"{prefix}.csv",
+                parent / f"{prefix}_raw.csv",
+                parent / f"{prefix}_multiplier.txt",
+            ]
+
+            deleted = []
+            for f in related_files:
+                if f.exists():
+                    try:
+                        f.unlink()
+                        deleted.append(f.name)
+                    except Exception as e:
+                        messagebox.showwarning("Delete CSV", f"Failed to delete {f.name}: {e}")
+
+            if deleted:
+                messagebox.showinfo("Delete CSV", "Deleted files:\n" + "\n".join(deleted))
+            else:
+                messagebox.showinfo("Delete CSV", "No related files found to delete.")
+
+        except Exception as e:
+            messagebox.showerror("Delete CSV", f"Unexpected error while deleting CSV files:\n{e}")
+
         # Reset table to empty/missing status
         self.set_placeholder("-")
         self.has_csv_data = False
