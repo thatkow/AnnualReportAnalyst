@@ -108,10 +108,20 @@ class ScrapeResultPanel:
                     return
 
                 multiplier_txt = base_csv.with_name(base_csv.stem + "_multiplier.txt")
-                if not multiplier_txt.exists():
-                    messagebox.showwarning("Open Multiplier", f"{multiplier_txt.name} does not exist.")
-                    return
 
+                # ✅ Create file with default value 1 if missing
+                if not multiplier_txt.exists():
+                    try:
+                        multiplier_txt.write_text("1", encoding="utf-8")
+                        messagebox.showinfo(
+                            "Open Multiplier",
+                            f"{multiplier_txt.name} did not exist and was created with default value 1."
+                        )
+                    except Exception as e:
+                        messagebox.showerror("Open Multiplier", f"Failed to create {multiplier_txt.name}:\n{e}")
+                        return
+
+                # Open the file (existing or newly created)
                 self.app.open_file_path(multiplier_txt)
             except Exception as e:
                 messagebox.showerror("Open Multiplier", f"Failed to open multiplier.txt:\n{e}")
