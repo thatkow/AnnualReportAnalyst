@@ -344,23 +344,21 @@ class ScrapeManagerMixin:
                 mode_var = self.scrape_upload_mode_vars.get(category)
                 upload_mode = mode_var.get() if mode_var is not None else "pdf"
                 target_dir = scrape_root / entry.path.stem
-                panel = self.scrape_panels.get((entry.path, category))
-
+                csv_path = target_dir / f"{category}.csv"
                 already_processed = False
-                if panel is not None:
-                    if panel.has_csv_data:
-                        already_processed = True
-                    elif panel.csv_path.exists() and self._csv_has_data(panel.csv_path):
-                        panel.load_from_files()
-                        already_processed = True
+
+                # New logic: check existence of the file on disk instead of panel presence
+                if csv_path.exists() and self._csv_has_data(csv_path):
+                    already_processed = True
                 else:
-                    csv_path = target_dir / f"{category}.csv"
-                    if csv_path.exists() and self._csv_has_data(csv_path):
+                    # Fallback: load via panel if panel exists but file not yet checked
+                    panel = self.scrape_panels.get((entry.path, category))
+                    if panel is not None and panel.csv_path.exists() and self._csv_has_data(panel.csv_path):
                         already_processed = True
 
                 if already_processed:
                     self.logger.info(
-                        "AIScrape skipping %s | %s (existing CSV)",
+                        "AIScrape skipping %s | %s (existing file on disk)",
                         entry.path.name,
                         category,
                     )
