@@ -140,9 +140,15 @@ class ScrapeUIMixin:
         self.scrape_preview_label.bind("<Configure>", self._on_scrape_preview_label_configure)
         self.scrape_preview_canvas.bind("<MouseWheel>", self._on_scrape_preview_mousewheel)
         self.scrape_preview_canvas.bind("<Button-4>", self._on_scrape_preview_mousewheel)
-        self.scrape_preview_canvas.bind("<Button-5>", self._on_scrape_preview_mousewheel)
+        self.scrape_preview_label.bind("<Button-5>", self._on_scrape_preview_mousewheel)
         self.scrape_preview_label.bind("<Button-1>", self._on_scrape_preview_click)
         self.scrape_preview_label.bind("<MouseWheel>", self._on_scrape_preview_mousewheel)
+
+        # === Keyboard navigation for Scrape tab ===
+        self.root.bind("a", lambda e: self._navigate_scrape_pdf_tab(-1))
+        self.root.bind("d", lambda e: self._navigate_scrape_pdf_tab(1))
+        self.root.bind("q", lambda e: self._navigate_scrape_type_tab(-1))
+        self.root.bind("e", lambda e: self._navigate_scrape_type_tab(1))
         self.scrape_preview_label.bind("<Button-4>", self._on_scrape_preview_mousewheel)
         self.scrape_preview_label.bind("<Button-5>", self._on_scrape_preview_mousewheel)
 
@@ -159,6 +165,43 @@ class ScrapeUIMixin:
         self.scrape_category_inners = {}
         self.scrape_category_windows = {}
         self.scrape_category_placeholders = {}
+
+    def _navigate_scrape_pdf_tab(self, delta: int) -> None:
+        """Switch to previous/next PDF filename tab within the active TYPE tab."""
+        if not hasattr(self, "scrape_type_notebook"):
+            raise RuntimeError("scrape_type_notebook not initialized.")
+
+        type_nb = self.scrape_type_notebook
+        type_tab = type_nb.select()
+        if not type_tab:
+            raise RuntimeError("No active TYPE tab in scrape_type_notebook.")
+
+        active_category = type_nb.tab(type_tab, "text")
+        inner_nb = self.scrape_type_pdf_notebooks.get(active_category)
+        if inner_nb is None:
+            raise RuntimeError("Active TYPE tab missing inner notebook of PDF filenames.")
+
+        total_tabs = inner_nb.index("end")
+        if total_tabs <= 0:
+            raise RuntimeError("No PDF tabs available.")
+
+        current_idx = inner_nb.index(inner_nb.select())
+        new_idx = (current_idx + delta) % total_tabs
+        inner_nb.select(new_idx)
+
+    def _navigate_scrape_type_tab(self, delta: int) -> None:
+        """Switch to previous/next TYPE tab (Financial, Income, Shares) in Scrape view."""
+        if not hasattr(self, "scrape_type_notebook"):
+            raise RuntimeError("scrape_type_notebook not initialized.")
+
+        notebook = self.scrape_type_notebook
+        total_tabs = notebook.index("end")
+        if total_tabs <= 0:
+            raise RuntimeError("No TYPE tabs found in Scrape view.")
+
+        current_idx = notebook.index(notebook.select())
+        new_idx = (current_idx + delta) % total_tabs
+        notebook.select(new_idx)
 
     def _refresh_scrape_results(self) -> None:
         if not hasattr(self, "scrape_type_notebook"):
