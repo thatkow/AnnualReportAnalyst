@@ -13,6 +13,11 @@ from constants import COLUMNS, SCRAPE_EXPECTED_COLUMNS
 from ui_widgets import CollapsibleFrame
 from pdf_utils import PDFEntry, normalize_header_row
 
+try:  # pragma: no cover - optional dependency for rendering Plotly in Tk
+    from tkinterweb import HtmlFrame  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - gracefully handle missing dependency
+    HtmlFrame = None  # type: ignore[assignment]
+
 
 class CombinedUIMixin:
     root: tk.Misc
@@ -33,6 +38,10 @@ class CombinedUIMixin:
     companies_dir: Path
     assigned_pages: Dict[str, Dict[str, Any]]
     canvas_window: int
+    plot_tab: Optional[ttk.Frame]
+    plot_container: Optional[ttk.Frame]
+    plot_html_widget: Optional[Any]
+    plot_message_var: Optional[tk.StringVar]
 
     def build_combined_tab(self, notebook: ttk.Notebook) -> None:
         combined_tab = ttk.Frame(notebook)
@@ -98,7 +107,7 @@ class CombinedUIMixin:
         from analyst_stackedvisuals import render_stacked_annual_report
         import pandas as pd
 
-        def _on_plot_stacked_visuals():
+        def _on_plot_stacked_visuals() -> None:
             try:
                 if not hasattr(self, "combined_rows") or not self.combined_rows:
                     messagebox.showwarning("No Data", "No combined data loaded or generated.")
@@ -161,7 +170,8 @@ class CombinedUIMixin:
                     self.logger.info("✅ Applied share, stock, and type multipliers before plotting.")
 
                 # Call the stacked visuals plotter
-                render_stacked_annual_report(df, title=f"{company_name} – Stacked Annual Report")
+                fig = render_stacked_annual_report(df, title=f"{company_name} – Stacked Annual Report")
+                self._display_plot_figure(fig)
 
             except Exception as e:
                 messagebox.showerror("Plot Error", f"Failed to plot stacked visuals:\n{e}")
@@ -185,6 +195,75 @@ class CombinedUIMixin:
         self.combined_table.bind("<Button-3>", self._on_combined_header_right_click)
         if sys.platform == "darwin":
             self.combined_table.bind("<Control-Button-1>", self._on_combined_header_right_click)
+
+    def build_plot_tab(self, notebook: ttk.Notebook) -> None:
+        plot_tab = ttk.Frame(notebook)
+        notebook.add(plot_tab, text="Plot")
+        self.plot_tab = plot_tab
+
+        container = ttk.Frame(plot_tab, padding=8)
+        container.pack(fill=tk.BOTH, expand=True)
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+        self.plot_container = container
+
+        if HtmlFrame is not None:
+            html_frame = HtmlFrame(container, horizontal_scrollbar="auto")
+            html_frame.grid(row=0, column=0, sticky="nsew")
+            self.plot_html_widget = html_frame
+            self.plot_message_var = None
+        else:
+            self.plot_message_var = tk.StringVar(value=(
+                "Plot rendering requires the optional 'tkinterweb' package.\n"
+                "Install it with 'pip install tkinterweb' to view interactive visuals within the app."
+            ))
+            placeholder = ttk.Label(
+                container,
+                textvariable=self.plot_message_var,
+                justify=tk.CENTER,
+                anchor=tk.CENTER,
+                wraplength=480,
+            )
+            placeholder.grid(row=0, column=0, sticky="nsew")
+            self.plot_html_widget = placeholder
+
+    def _ensure_plot_tab(self) -> None:
+        if getattr(self, "plot_tab", None) is None:
+            notebook = getattr(self, "notebook", None)
+            if notebook is not None:
+                self.build_plot_tab(notebook)
+
+    def _display_plot_figure(self, fig: Any) -> None:
+        from plotly.graph_objs import Figure
+
+        if not isinstance(fig, Figure):  # pragma: no cover - safety guard
+            raise TypeError("render_stacked_annual_report must return a Plotly Figure")
+
+        self._ensure_plot_tab()
+        if getattr(self, "plot_tab", None) is None:
+            raise RuntimeError("Plot tab could not be initialized")
+
+        html = fig.to_html(include_plotlyjs="cdn", full_html=True)
+
+        if HtmlFrame is not None and isinstance(self.plot_html_widget, HtmlFrame):
+            self.plot_html_widget.load_html(html)
+        else:
+            if self.plot_message_var is not None:
+                self.plot_message_var.set(
+                    "Interactive plot rendered to temporary HTML.\n"
+                    "Install 'tkinterweb' for in-app viewing."
+                )
+            import tempfile
+            import webbrowser
+
+            tmp_dir = Path(tempfile.gettempdir())
+            tmp_file = tmp_dir / "annual_report_plot.html"
+            tmp_file.write_text(html, encoding="utf-8")
+            webbrowser.open_new_tab(tmp_file.as_uri())
+
+        notebook = getattr(self, "notebook", None)
+        if notebook is not None:
+            notebook.select(self.plot_tab)
 
     def _combined_scrape_dir_for_entry(self, entry: PDFEntry) -> Path:
         company = self.company_var.get().strip()

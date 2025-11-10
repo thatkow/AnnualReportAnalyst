@@ -130,6 +130,10 @@ class ReportAppV2(
         self.combined_rename_names: List[str] = []  # dynamic column names used as headers
         self.combined_date_all_col_ids: List[str] = []
         self.combined_table_col_ids: List[str] = []
+        self.plot_tab: Optional[ttk.Frame] = None
+        self.plot_container: Optional[ttk.Frame] = None
+        self.plot_html_widget: Optional[Any] = None
+        self.plot_message_var: Optional[tk.StringVar] = None
 
         self._suspend_api_key_save = True
         self.config = ConfigManager.load()
