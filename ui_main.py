@@ -197,6 +197,8 @@ class MainUIMixin:
             self.build_scrape_tab(self.notebook)
         if hasattr(self, "build_combined_tab"):
             self.build_combined_tab(self.notebook)
+        if hasattr(self, "build_plot_tab"):
+            self.build_plot_tab(self.notebook)
 
     def _on_main_tab_changed(self, event: tk.Event) -> None:  # type: ignore[override]
         try:
