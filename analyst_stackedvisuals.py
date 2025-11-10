@@ -313,5 +313,6 @@ def render_stacked_annual_report(df, title="Stacked Annual Report", share_count_
     for i, v in enumerate(combos[current]):
         fig.data[i].visible = v
 
-    fig.show()
+    # Return the Plotly figure object instead of displaying it directly.
+    # This allows embedding in Tkinter (e.g., via tkinterweb.HtmlFrame).
     return fig
