@@ -50,21 +50,4 @@ def generate_test_data():
 
 if __name__ == "__main__":
     df = generate_test_data()
-    fig = render_stacked_annual_report(df, title="Stacked Annual Report (Tkinter Embed)")
-    # --- Embed using PyWebview for full interactivity ---
-    import webview
-
-    # Convert Plotly figure to HTML
-    html = fig.to_html(include_plotlyjs="cdn", full_html=True)
-
-    # Create and show the interactive window
-    print("🧭 Launching interactive Plotly viewer via PyWebview...")
-    webview.create_window(
-        "Stacked Annual Report Viewer",
-        html=html,
-        width=1300,
-        height=950,
-        resizable=True
-    )
-    webview.start()
-    print("✅ Interactive Plotly viewer closed.")
+    render_stacked_annual_report(df, title="Test Annual Report (Auto-Infer)")
