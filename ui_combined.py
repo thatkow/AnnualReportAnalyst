@@ -166,12 +166,63 @@ class CombinedUIMixin:
                 # === Identify year columns ===
                 year_cols = [c for c in df.columns if c[:2].isdigit() or c.startswith("31.")]
 
-                # === Prepare factor lookup ===
-                factor_lookup = {
-                    "half": {y: 0.5 for y in year_cols},
-                    "normal": {y: 1.0 for y in year_cols},
-                    "double": {y: 2.0 for y in year_cols},
+                # === Replace factor_lookup with stock price-based lookup (inverted prices) ===
+                from analyst_yahoo import get_stock_data_for_dates
+
+                # Provide optional parameter for lookup label
+                lookup_label = getattr(self, "factor_label", "Stock-adjusted factors")
+
+                # Define date shifts for keys
+                shift_keys = {
+                    "": 0,  # blank entry maps to 1
+                    "Prior month (-30)": -30,
+                    "Prior week (-7)": -7,
+                    "Prior day (-1)": -1,
+                    "On release (0)": 0,
+                    "Next day (+1)": 1,
+                    "Next week (+7)": 7,
+                    "Next month (+30)": 30,
                 }
+
+                ticker = company_name or "UNKNOWN"
+                print(f"📈 Fetching stock prices for {ticker} (label: {lookup_label})...")
+
+                stock_df = get_stock_data_for_dates(
+                    ticker=ticker,
+                    dates=year_cols,
+                    days=[d for d in shift_keys.values() if d != 0],
+                    cache_filepath="stock_cache.json"
+                )
+
+                factor_lookup = {}
+
+                # Blank entry first, as scalar 1 (not per-date map)
+                factor_lookup[""] = 1.0
+
+                # Informational log
+                print("🟦 Added blank factor_lookup entry = 1.0")
+
+                for key_label, day_offset in shift_keys.items():
+                    if key_label == "":
+                        continue
+
+                    subset = stock_df[stock_df["OffsetDays"] == day_offset]
+                    price_map = {}
+                    for _, row in subset.iterrows():
+                        base = row["BaseDate"]
+                        price = row["Price"]
+                        if pd.notna(price) and price > 0:
+                            price_map[base] = 1.0 / float(price)
+
+                    factor_lookup[key_label] = price_map
+
+                if factor_lookup:
+                    print(f"✅ {lookup_label} generated:")
+                    for k, v in factor_lookup.items():
+                        ex = list(v.items())[:2]
+                        print(f"  {k}: sample {ex}")
+                else:
+                    print("⚠️ Stock price lookup returned no data; continuing without adjustment.")
 
                 # === Extract share counts from 'Number of shares' rows ===
                 share_counts = {}
@@ -200,6 +251,7 @@ class CombinedUIMixin:
                     df_plot,
                     title=f"Financial/Income for {company_name}",
                     factor_lookup=factor_lookup,
+                    factor_label="Value Per Stock Price Dollar",
                     share_counts=share_counts,
                     out_path=out_path,
                 )

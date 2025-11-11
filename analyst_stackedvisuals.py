@@ -9,6 +9,7 @@ def render_stacked_annual_report(
     df: pd.DataFrame,
     title: str = "Stacked Annual Report",
     factor_lookup: dict | None = None,
+    factor_label: str = "Adjustment Factor",
     share_counts: dict | None = None,
     out_path: str = "stacked_annual_report.html",
 ):
@@ -103,6 +104,12 @@ const shareCounts = {json.dumps(share_counts)};
 const factorLookup = {json.dumps(factor_lookup)};
 const typeOffsets = {json.dumps(type_offsets)};
 const typeLineStyles = {json.dumps(type_linestyles)};
+
+// Add label for dropdown
+const factorLabel = {json.dumps(factor_label)};
+document.addEventListener("DOMContentLoaded", () => {{
+  document.querySelector('label b').textContent = factorLabel + ":";
+}});
 
 // --- Human readable number formatter ---
 function humanReadable(val) {{
