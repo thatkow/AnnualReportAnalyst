@@ -261,10 +261,24 @@ function buildShareTraces() {{
   return traces;
 }}
 
+// === Dynamically scale Y-axis based on min and max share values ===
+const allShareVals = [];
+for (const ticker of tickers) {{
+  const sc = shareCounts[ticker];
+  if (!sc) continue;
+  for (const y of years) {{
+    const v = sc[y];
+    if (v !== undefined && v !== null && !isNaN(v)) allShareVals.push(v);
+  }}
+}}
+let yMin = Math.min(...allShareVals);
+let yMax = Math.max(...allShareVals);
+const pad = (yMax - yMin) * 0.05;
+
 Plotly.newPlot("plotShare", buildShareTraces(), {{
   height: 600,
   title: "Normalized Share Count",
-  yaxis: {{ title: "Normalized Value", range: [0, 1.1] }},
+  yaxis: {{ title: "Normalized Value", range: [yMin - pad, yMax + pad] }},
   xaxis: {{ title: "Date" }},
   hoverlabel: {{ bgcolor: "white", font: {{ family: "Courier New" }} }},
   showlegend: true
