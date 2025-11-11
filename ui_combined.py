@@ -160,8 +160,44 @@ class CombinedUIMixin:
                 if hasattr(self, "logger") and self.logger:
                     self.logger.info("✅ Applied share, stock, and type multipliers before plotting.")
 
-                # Call the stacked visuals plotter
-                render_stacked_annual_report(df, title=f"{company_name} – Stacked Annual Report")
+                # === Inject Ticker column using company_name ===
+                df["Ticker"] = company_name
+
+                # === Prepare factor lookup ===
+                year_cols = [c for c in df.columns if c[:2].isdigit() or c.startswith("31.")]
+                factor_lookup = {
+                    "half": {y: 0.5 for y in year_cols},
+                    "normal": {y: 1.0 for y in year_cols},
+                    "double": {y: 2.0 for y in year_cols},
+                }
+
+                # === Prepare share counts ===
+                share_counts = {}
+                share_rows = df[df["ITEM"].str.lower().str.contains("number of shares", na=False)]
+                share_counts[company_name] = {}
+                if not share_rows.empty:
+                    row = share_rows.iloc[0]
+                    for y in year_cols:
+                        val = row.get(y)
+                        share_counts[company_name][y] = float(val) if pd.notna(val) else 1.0
+                else:
+                    share_counts[company_name] = {y: 1.0 for y in year_cols}
+
+                # === Output directory ===
+                from pathlib import Path
+                visuals_dir = Path("companies") / "visuals"
+                visuals_dir.mkdir(parents=True, exist_ok=True)
+
+                out_path = visuals_dir / f"ARVisuals_{company_name}.html"
+
+                # === Call the stacked visuals plotter ===
+                render_stacked_annual_report(
+                    df,
+                    title=f"Financial/Income for {company_name}",
+                    factor_lookup=factor_lookup,
+                    share_counts=share_counts,
+                    out_path=out_path,
+                )
 
             except Exception as e:
                 messagebox.showerror("Plot Error", f"Failed to plot stacked visuals:\n{e}")
