@@ -89,7 +89,8 @@ class ScrapeResultPanel:
                     self._updating_multiplier = True
                     self.multiplier_var.set(content)
                     self._updating_multiplier = False
-                    messagebox.showinfo("Reload Multiplier", f"Reloaded from {multiplier_txt.name}")
+                    # Removed popup confirmation when clicking multiplier input
+                    print(f"ℹ️ Reloaded multiplier from {multiplier_txt.name}")
                 else:
                     messagebox.showinfo("Reload Multiplier", f"{multiplier_txt.name} is empty.")
             except Exception as e:
