@@ -1,317 +1,323 @@
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import re
+import os
+import webbrowser
+import json
 
 
-def render_stacked_annual_report(df, title="Stacked Annual Report", share_count_note_name="share_count"):
-    # --- Infer key dimensions ---
-    print("🔍 Inferring configuration from DataFrame...")
-    # Detect year-like columns (e.g. "30.06.2024")
-    years = [c for c in df.columns if re.match(r"\d{2}\.\d{2}\.\d{4}", str(c))]
-    if not years:
-        raise ValueError("❌ No year-like columns found (expected format DD.MM.YYYY).")
-    # Sort years chronologically (DD.MM.YYYY)
-    from datetime import datetime
-    try:
-        years = sorted(
-            years,
-            key=lambda y: datetime.strptime(y, "%d.%m.%Y")
-        )
-    except Exception:
-        years = sorted(years)
+def render_stacked_annual_report(
+    df: pd.DataFrame,
+    title: str = "Stacked Annual Report",
+    factor_lookup: dict | None = None,
+    share_counts: dict = None,
+    out_path: str = "stacked_annual_report.html"
+):
+    """
+    Generate a standalone interactive HTML report with:
+      - Financial Values (stacked bar + per share toggle)
+      - Normalized Share Count
+    Opens automatically in a browser.
 
-    print(f"📅 Years (sorted): {years}")
-    # Sort years chronologically (DD.MM.YYYY)
-    from datetime import datetime
-    try:
-        years = sorted(
-            years,
-            key=lambda y: datetime.strptime(y, "%d.%m.%Y")
-        )
-    except Exception:
-        years = sorted(years)
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with Ticker, TYPE, CATEGORY, SUBCATEGORY, ITEM, and date columns.
+    title : str
+        HTML report title.
+    factor_lookup : dict
+        Mapping of factor name -> {date -> scaling value}.
+        Example:
+            {"Nominal": {"31.12.2020": 1, "31.12.2021": 1, ...},
+             "Forecast": {"31.12.2020": 0.9, "31.12.2021": 1.1, ...}}
+    share_counts : dict
+        Required. Mapping of ticker -> {date -> number of shares}.
+    out_path : str
+        Output HTML file path.
+    """
+    if share_counts is None:
+        raise ValueError("❌ 'share_counts' must be provided explicitly.")
 
-    print(f"📅 Years (sorted): {years}")
+    # --- Identify relevant columns ---
+    year_cols = [c for c in df.columns if c[:2].isdigit() or c.startswith("31.")]
+    tickers = sorted(df["Ticker"].dropna().unique())
+    types = sorted(df["TYPE"].dropna().unique())
 
-    # Infer tickers if present, otherwise default to single
-    tickers = sorted(df["Ticker"].dropna().unique().tolist()) if "Ticker" in df.columns else ["Default"]
-    print(f"🏷️ Tickers: {tickers}")
+    # --- Fallback factorLookup if not provided ---
+    if factor_lookup is None:
+        factor_lookup = {"Nominal": {y: 1 for y in year_cols}}
 
-    # Infer types
-    types = sorted(df["TYPE"].dropna().unique().tolist()) if "TYPE" in df.columns else ["Default"]
-    print(f"📂 Types: {types}")
+    # --- Prepare report data ---
+    records = []
+    for _, r in df.iterrows():
+        rec = {
+            "Ticker": r.get("Ticker"),
+            "TYPE": r.get("TYPE"),
+            "CATEGORY": r.get("CATEGORY"),
+            "SUBCATEGORY": r.get("SUBCATEGORY"),
+            "ITEM": r.get("ITEM"),
+        }
+        for y in year_cols:
+            val = r.get(y)
+            if pd.isna(val):
+                val = 0
+            rec[y] = float(val)
+        records.append(rec)
 
-    # --- Extract share_count values ---
-    share_count = {}
-    sc_rows = df[df["NOTE"].str.lower() == share_count_note_name.lower()] if "NOTE" in df.columns else pd.DataFrame()
-    if sc_rows.empty:
-        print("⚠️ No rows found with NOTE == 'share_count'. Using 1 for all years.")
-        share_count = {tic: {y: 1 for y in years} for tic in tickers}
-    else:
-        for ticker in tickers:
-            share_count[ticker] = {}
-            sub = sc_rows[(sc_rows.get("Ticker", ticker) == ticker) | (not "Ticker" in sc_rows.columns)]
-            if sub.empty:
-                for y in years:
-                    share_count[ticker][y] = 1
-            else:
-                for y in years:
-                    try:
-                        val = float(sub.iloc[0][y])
-                    except Exception:
-                        val = 1
-                    share_count[ticker][y] = val
-        print("✅ Share count extracted for each ticker.")
+    # --- Build JS dicts dynamically ---
+    type_offsets = {t: round((i - (len(types) - 1) / 2) * 0.6, 2) for i, t in enumerate(types)}
+    type_linestyles = {t: ("solid" if i % 2 == 0 else "dot") for i, t in enumerate(types)}
 
-    # --- Dynamic color and style assignment ---
-    base_colors = [
-        "#1f77b4", "#2ca02c", "#d62728", "#9467bd", "#8c564b",
-        "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
-    ]
-    ticker_colors = {tic: base_colors[i % len(base_colors)] for i, tic in enumerate(tickers)}
-    style_patterns = ["solid", "dot", "dash", "longdash", "dashdot"]
+    # --- Write interactive HTML ---
+    out_path = os.path.abspath(out_path)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{title}</title>
+  <script src="https://cdn.plot.ly/plotly-2.31.1.min.js"></script>
+  <style>
+    body {{ font-family: sans-serif; margin: 40px; }}
+    #tabs {{ display: flex; border-bottom: 2px solid #ccc; margin-bottom: 10px; }}
+    .tab {{
+      padding: 10px 20px;
+      cursor: pointer;
+      border: 1px solid #ccc;
+      border-bottom: none;
+      background: #f0f0f0;
+      margin-right: 4px;
+      border-radius: 6px 6px 0 0;
+    }}
+    .tab.active {{
+      background: white;
+      border-bottom: 2px solid white;
+      font-weight: bold;
+    }}
+    .tab-content {{ display: none; }}
+    .tab-content.active {{ display: block; }}
+    #controls {{ margin: 15px 0; }}
+  </style>
+</head>
+<body>
 
-    # Filter out special placeholder types like 'Shares' before plotting
-    types = [ty for ty in types if str(ty).lower() not in ("shares", "share")]
+<h2>{title}</h2>
 
-    type_styles = {ty: style_patterns[i % len(style_patterns)] for i, ty in enumerate(types)}
+<div id="tabs">
+  <div id="tabBars" class="tab active">Financial Values</div>
+  <div id="tabShare" class="tab">Share Count</div>
+</div>
 
-    print(f"🎨 Colors: {ticker_colors}")
-    print(f"📈 Styles: {type_styles}")
+<div id="contentBars" class="tab-content active">
+  <div id="controls">
+    <label for="factorSelector"><b>Select Factor:</b></label>
+    <select id="factorSelector"></select>
+    <label style="margin-left:20px;">
+      <input type="checkbox" id="perShareCheckbox" checked />
+      Per Share
+    </label>
+  </div>
+  <div id="plotBars"></div>
+</div>
 
-    # --- Helper functions ---
-    def get_value(r, year, norm=False):
-        try:
-            val = float(r[year])
-            if norm:
-                t = r.get("Ticker", tickers[0])
-                return val / share_count.get(t, {}).get(year, 1)
-            return val
-        except Exception:
-            return 0
+<div id="contentShare" class="tab-content">
+  <div id="plotShare"></div>
+</div>
 
-    # --- Build traces ---
-    def build_main(norm=False):
-        traces, xpos, sums = [], [], {}
+<script>
+const years = {json.dumps(year_cols)};
+const tickers = {json.dumps(tickers)};
+const types = {json.dumps(types)};
+const rawData = {json.dumps(records)};
+const shareCounts = {json.dumps(share_counts)};
+const factorLookup = {json.dumps(factor_lookup)};
+const typeOffsets = {json.dumps(type_offsets)};
+const typeLineStyles = {json.dumps(type_linestyles)};
 
-        # Exclude share_count rows from visual data
-        plot_df = df
-        if "NOTE" in df.columns:
-            plot_df = df[df["NOTE"].str.lower() != share_count_note_name.lower()]
+// --- Color function ---
+function hashColor(str){{
+  let hash = 0;
+  for(let i=0;i<str.length;i++) hash = str.charCodeAt(i)+((hash<<5)-hash);
+  const hue=Math.abs(hash)%360;
+  return `hsl(${{hue}},70%,55%)`;
+}}
 
-        barw, tgap, ygap = 0.25, 0.05, 0.8
-        for i, y in enumerate(years):
-            base = i * (len(tickers) * len(types) * (barw + tgap) + ygap)
-            for ti, tic in enumerate(tickers):
-                for ty_i, ty in enumerate(types):
-                    off = base + (ti * len(types) + ty_i) * (barw + tgap)
-                    xpos.append((y, tic, ty, off))
+const baseYears = years.map((_,i)=>i*2.0);
+const tickerOffsets = Object.fromEntries(tickers.map((t,i)=>[t,(i-((tickers.length-1)/2))*0.25]));
 
-        for y, tic, ty, x in xpos:
-            sub = plot_df[(plot_df.TYPE == ty) & (plot_df.get("Ticker", tic) == tic)]
+// consistent color by CATEGORY+SUBCATEGORY+ITEM
+const colorMap = {{}};
+rawData.forEach(r=>{{
+  const id=`${{r.CATEGORY}}-${{r.SUBCATEGORY}}-${{r.ITEM}}`;
+  if(!colorMap[id]) colorMap[id]=hashColor(id);
+}});
 
-            # Use NaN-safe summation to prevent invalid totals
-            vals = [get_value(r, y, norm) for _, r in sub.iterrows()]
-            if len(vals) == 0:
-                total = 0.0
-            else:
-                total = np.nansum(vals)
+const sel = document.getElementById("factorSelector");
+Object.keys(factorLookup).forEach(f=>{{
+  const opt=document.createElement("option");
+  opt.value=f; opt.textContent=f;
+  sel.appendChild(opt);
+}});
+sel.value=Object.keys(factorLookup)[0];
 
-            if np.isnan(total):
-                print(f"⚠️ Total still NaN for TYPE={ty}, Ticker={tic}, Year={y} (subset={len(sub)})")
+function buildBarTraces(factorName, perShare){{
+  const factorMap=factorLookup[factorName];
+  const traces=[];
+  for(const ticker of tickers){{
+    for(const typ of types){{
+      const subset=rawData.filter(r=>r.TYPE===typ && r.Ticker===ticker);
+      for(const row of subset){{
+        const id=`${{row.CATEGORY}}-${{row.SUBCATEGORY}}-${{row.ITEM}}`;
+        const color=colorMap[id];
+        const yvals=years.map(y=>{{
+          const baseVal=(row[y]||0)*(factorMap[y]||1);
+          return perShare && shareCounts[ticker]?.[y] ? baseVal/shareCounts[ticker][y] : baseVal;
+        }});
+        const xvals=baseYears.map(b=>b+(typeOffsets[typ]||0)+(tickerOffsets[ticker]||0));
+        traces.push({{
+          x:xvals, y:yvals, type:"bar",
+          marker:{{color, line:{{width:0.3,color:"#333"}}}},
+          offsetgroup:`${{ticker}}-${{typ}}-${{row.CATEGORY}}-${{row.SUBCATEGORY}}-${{row.ITEM}}`,
+          legendgroup:`${{ticker}}-${{typ}}`,
+          barmode:"relative",
+          hovertemplate:`TICKER:${{ticker}}<br>YEAR:%{{customdata[0]}}<br>TYPE:${{typ}}<br>CATEGORY:${{row.CATEGORY}}<br>SUBCATEGORY:${{row.SUBCATEGORY}}<br>ITEM:${{row.ITEM}}<br>VALUE:%{{y:.4f}}${{perShare?" (per share)":""}}<extra></extra>`,
+          customdata:years.map(y=>[y]),
+          legendgroup:ticker
+        }});
+      }}
+    }}
+  }}
+  return traces;
+}}
 
-            pos = sub[sub[y] > 0].sort_values(by=y, key=lambda s: -s.abs())
-            neg = sub[sub[y] < 0].sort_values(by=y, key=lambda s: -s.abs())
-            pb, nb = 0, 0
-            for _, r in pos.iterrows():
-                v = get_value(r, y, norm)
-                traces.append(go.Bar(
-                    x=[x], y=[v], base=[pb], width=barw,
-                    name=f"{ty}-{tic}", meta={"TYPE":ty}, hoverinfo="text",
-                    hovertext=(
-                        f"<span style='font-family:Courier New;'>"
-                        f"YEAR:{y}<br>"
-                        f"TICKER:{tic}<br>"
-                        f"TYPE:{ty}<br>"
-                        f"CATEGORY:{r.CATEGORY}<br>"
-                        f"SUBCATEGORY:{r.SUBCATEGORY}<br>"
-                        f"ITEM:{r.ITEM}<br>"
-                        f"VALUE:{v:,.2f}</span>"
-                    )
-                ))
-                pb += v
-            for _, r in neg.iterrows():
-                v = get_value(r, y, norm)
-                traces.append(go.Bar(
-                    x=[x], y=[v], base=[nb], width=barw,
-                    name=f"{ty}-{tic}", meta={"TYPE":ty}, hoverinfo="text",
-                    hovertext=(
-                        f"<span style='font-family:Courier New;'>"
-                        f"YEAR:{y}<br>"
-                        f"TICKER:{tic}<br>"
-                        f"TYPE:{ty}<br>"
-                        f"CATEGORY:{r.CATEGORY}<br>"
-                        f"SUBCATEGORY:{r.SUBCATEGORY}<br>"
-                        f"ITEM:{r.ITEM}<br>"
-                        f"VALUE:{v:,.2f}</span>"
-                    )
-                ))
-                nb += v
-            sums.setdefault((ty, tic), []).append((x, total))
+function buildCumsumLines(factorName, perShare){{
+  const factorMap=factorLookup[factorName];
+  const lines=[];
+  for(const ticker of tickers){{
+    for(const typ of types){{
+      const perYearTotals=years.map(y=>{{
+        const subset=rawData.filter(r=>r.TYPE===typ && r.Ticker===ticker);
+        const sum=subset.reduce((acc,r)=>acc+(r[y]||0)*(factorMap[y]||1),0);
+        return perShare && shareCounts[ticker]?.[y] ? sum/shareCounts[ticker][y] : sum;
+      }});
+      const xvals=baseYears.map(b=>b+(typeOffsets[typ]||0)+(tickerOffsets[ticker]||0));
+      const color=hashColor(ticker+typ);
+      lines.push({{
+        x:xvals, y:perYearTotals, mode:"lines+markers",
+        line:{{color, dash:typeLineStyles[typ]||"solid", width:3}},
+        marker:{{color, size:8, symbol:"circle"}},
+        hovertemplate:`TICKER:${{ticker}}<br>YEAR:%{{customdata[0]}}<br>TYPE:${{typ}}<br>TOTAL:%{{y:.4f}}${{perShare?" (per share)":""}}<extra></extra>`,
+        customdata:years.map(y=>[y]),
+        showlegend:false
+      }});
+    }}
+  }}
+  return lines;
+}}
 
-        for (ty, tic), pts in sums.items():
-            pts = sorted(pts, key=lambda p: p[0])
-            xs, ys = zip(*pts)
-            color = ticker_colors.get(tic, "#000000")
-            dash = type_styles.get(ty, "solid")
-            traces.append(go.Scatter(
-                x=xs, y=ys, mode="lines",
-                line=dict(width=1.8, dash=dash, color=color),
-                name=f"{ty}-{tic} line", meta={"TYPE":ty}))
-            # Format readable numeric labels and tooltips for dots
-            def format_val(v):
-                if pd.isna(v) or abs(v) < 1e-8:
-                    return ""
-                av = abs(v)
-                if av >= 1_000_000_000:
-                    return f"{v/1_000_000_000:.2f}B"
-                elif av >= 1_000_000:
-                    return f"{v/1_000_000:.2f}M"
-                elif av >= 1_000:
-                    return f"{v/1_000:.2f}k"
-                else:
-                    return f"{v:.2f}"
+function renderBars(){{
+  const factorName=sel.value;
+  const perShare=document.getElementById("perShareCheckbox").checked;
+  const traces=[...buildBarTraces(factorName,perShare),...buildCumsumLines(factorName,perShare)];
+  const layoutBars={{
+    barmode:"relative", height:750,
+    title:`Financial Values — Factor: ${{factorName}}${{perShare?" (Per Share)":""}}`,
+    yaxis:{{title:perShare?"Value (Per Share)":"Value", zeroline:true}},
+    xaxis:{{title:"Date (Financial Year End)", tickvals:baseYears, ticktext:years, tickangle:45, mirror:true, linecolor:"black", linewidth:4}},
+    hoverlabel:{{bgcolor:"white", font:{{family:"Courier New"}}}},
+    showlegend:false
+  }};
+  Plotly.newPlot("plotBars", traces, layoutBars);
+}}
+renderBars();
+sel.addEventListener("change", renderBars);
+document.getElementById("perShareCheckbox").addEventListener("change", renderBars);
 
-            hover_texts = [
-                f"<span style='font-family:Courier New;'>"
-                f"YEAR:{years[i]}<br>"
-                f"TICKER:{tic}<br>"
-                f"TYPE:{ty}<br>"
-                f"VALUE:{ys[i]:,.2f}</span>"
-                for i in range(len(ys))
-            ]
+// Share count normalized
+function buildShareTraces(){{
+  const traces=[];
+  for(const ticker of tickers){{
+    const sc=shareCounts[ticker];
+    if(!sc) continue;
+    const latestYear=years[years.length-1];
+    const latest=sc[latestYear];
+    const normY=years.map(y=>sc[y]/latest);
+    const rawY=years.map(y=>sc[y]);
+    const color=hashColor(ticker);
+    traces.push({{
+      x:years, y:normY, mode:"lines+markers+text",
+      text:normY.map(v=>v.toFixed(2)), textposition:"top center",
+      line:{{width:2,color}}, marker:{{color}},
+      customdata:years.map((y,i)=>[y,rawY[i]]),
+      hovertemplate:`TICKER:${{ticker}}<br>YEAR:%{{customdata[0]}}<br>NORMALIZED:%{{y:.2f}}<br>ORIGINAL:%{{customdata[1]}}<extra></extra>`,
+      name:ticker
+    }});
+  }}
+  return traces;
+}}
+Plotly.newPlot("plotShare", buildShareTraces(), {{
+  height:600, title:"Normalized Share Count by Ticker",
+  yaxis:{{title:"Normalized Value (Relative to Latest Year)", range:[0,1.1]}},
+  xaxis:{{title:"Date (Financial Year End)"}},
+  hoverlabel:{{bgcolor:"white", font:{{family:"Courier New"}}}},
+  showlegend:true
+}});
 
-            traces.append(go.Scatter(
-                x=xs,
-                y=ys,
-                mode="markers+text",
-                marker=dict(size=8, color=color),
-                text=[format_val(y) for y in ys],
-                textposition="top center",
-                hoverinfo="text",
-                hovertext=hover_texts,
-                name=f"{ty}-{tic} dots",
-                meta={"TYPE": ty}
-            ))
-        return traces
+// Tabs
+function activateTab(tabId){{
+  document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
+  document.querySelectorAll(".tab-content").forEach(c=>c.classList.remove("active"));
+  if(tabId==="Bars"){{document.getElementById("tabBars").classList.add("active");document.getElementById("contentBars").classList.add("active");}}
+  else{{document.getElementById("tabShare").classList.add("active");document.getElementById("contentShare").classList.add("active");}}
+}}
+document.getElementById("tabBars").onclick=()=>activateTab("Bars");
+document.getElementById("tabShare").onclick=()=>activateTab("Share");
+</script>
+</body>
+</html>""")
 
-    def build_share():
-        traces = []
-        for ticker in tickers:
-            color = ticker_colors.get(ticker, "#000000")
-            yvals = [share_count[ticker][y] for y in years]
-            traces.append(go.Scatter(
-                x=years, y=yvals,
-                mode="lines+markers+text",
-                line=dict(color=color, width=2),
-                text=[f"{v:,.0f}" for v in yvals],
-                textposition="top center", name=f"ShareCount {ticker}",
-                hoverinfo="text",
-                hovertext=[f"<span style='font-family:Courier New;'>TICKER:{ticker}<br>YEAR:{y}<br>COUNT:{share_count[ticker][y]:,.0f}</span>" for y in years]
-            ))
-        return traces
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        shared_xaxes=True,
-        # Slightly shrink top graph and expand bottom one
-        row_heights=[0.22, 0.78],
-        # Increase gap to prevent title/xlabel overlap
-        vertical_spacing=0.08,
-        subplot_titles=("Share Count", title)
+    print(f"✅ HTML report generated: {out_path}")
+    webbrowser.open(f"file://{out_path}")
+
+
+if __name__ == "__main__":
+    import numpy as np
+    np.random.seed(42)
+
+    tickers = ["DART", "AGRI"]
+    types = ["A", "B"]
+    categories = ["Revenue", "Expense", "Investment"]
+    years = ["31.12.2020", "31.12.2021", "31.12.2022", "31.12.2023"]
+
+    records = []
+    for ticker in tickers:
+        for t in types:
+            for cat in categories:
+                sub = f"Sub_{cat}"
+                item = f"Item_{cat}"
+                vals = np.random.randint(-15, 20, size=len(years)).tolist()
+                record = {
+                    "Ticker": ticker,
+                    "TYPE": t,
+                    "CATEGORY": cat,
+                    "SUBCATEGORY": sub,
+                    "ITEM": item,
+                }
+                for y, v in zip(years, vals):
+                    record[y] = v
+                records.append(record)
+
+    df = pd.DataFrame(records)
+
+    share_counts = {
+        "DART": {"31.12.2020": 1000, "31.12.2021": 1200, "31.12.2022": 1400, "31.12.2023": 1600},
+        "AGRI": {"31.12.2020": 900, "31.12.2021": 1100, "31.12.2022": 1300, "31.12.2023": 1500},
+    }
+
+    print(df.head())
+    render_stacked_annual_report(
+        df,
+        title="Dynamic Stacked Annual Report",
+        factor_lookup={"Nominal": {y: 1 for y in ["31.12.2020", "31.12.2021", "31.12.2022", "31.12.2023"]}},
+        share_counts=share_counts,
+        out_path="stacked_annual_report.html"
     )
-
-    # Adjust title and label positioning for clarity
-    fig.update_layout(
-        margin=dict(t=120, b=80),
-        title_y=0.97
-    )
-
-    main_raw, main_norm, share = build_main(False), build_main(True), build_share()
-    for t in share: fig.add_trace(t, row=1, col=1)
-    for t in main_raw + main_norm: fig.add_trace(t, row=2, col=1)
-
-    n_share, n_raw, n_norm = len(share), len(main_raw), len(main_norm)
-    modes, types_sel, norms = ["both", "bars", "dots"], ["*"] + types, [False, True]
-
-    def vis_mask(norm, mode, typ):
-        vis = [True]*n_share
-        body = ([True]*n_raw if not norm else [False]*n_raw) + ([False]*n_norm if not norm else [True]*n_norm)
-        if typ != "*":
-            for i, t in enumerate(fig.data[n_share:], start=n_share):
-                tp = t.meta.get("TYPE") if hasattr(t, "meta") and t.meta else None
-                if tp not in (typ, None):
-                    body[i-n_share] = False
-        if mode == "bars":
-            for i, t in enumerate(fig.data[n_share:], start=n_share):
-                if isinstance(t, go.Scatter): body[i-n_share] = False
-        elif mode == "dots":
-            for i, t in enumerate(fig.data[n_share:], start=n_share):
-                if not isinstance(t, go.Scatter): body[i-n_share] = False
-        return vis + body
-
-    combos = {(n, m, t): vis_mask(n, m, t) for n in norms for m in modes for t in types_sel}
-    current = (False, "both", "*")
-
-    def button(label, change):
-        n, m, t = list(current)
-        n = change.get("norm", n)
-        m = change.get("mode", m)
-        t = change.get("type", t)
-        return dict(label=label, method="update", args=[{"visible": combos[(n, m, t)]}])
-
-    fig.update_layout(
-        height=950, width=1300, template="plotly_white",
-        hoverlabel=dict(bgcolor="white", font_family="Courier New", font_size=12),
-        updatemenus=[
-            dict(type="buttons", direction="right", x=0.25, y=1.12,
-                 buttons=[button("Raw", {"norm": False}),
-                          button("Normalize", {"norm": True})]),
-            dict(type="dropdown", direction="down", x=0.7, y=1.12,
-                 buttons=[button("Bars + Dots/Lines", {"mode": "both"}),
-                          button("Bars only", {"mode": "bars"}),
-                          button("Dots/Lines only", {"mode": "dots"})]),
-            dict(type="dropdown", direction="down", x=0.85, y=1.12,
-                 buttons=[button("TYPE * (All)", {"type": "*"})] +
-                         [button(f"TYPE {t}", {"type": t}) for t in types])
-        ],
-        yaxis=dict(title="Share Count"),
-        yaxis2=dict(title="Value"),
-        showlegend=False
-    )
-
-    # Compute approximate x positions for tick labels (midpoints of each year group)
-    # These positions are already determined by build_main() ordering logic.
-    # We'll re-create those bases consistently.
-    barw, tgap, ygap = 0.25, 0.05, 0.8
-    per_year_width = len(tickers) * len(types) * (barw + tgap) + ygap
-    tick_positions = [
-        (i * per_year_width) + (per_year_width / 2) - (ygap / 2)
-        for i in range(len(years))
-    ]
-
-    fig.update_xaxes(
-        tickmode="array",
-        tickvals=tick_positions,
-        ticktext=years,
-        tickangle=45,
-        title="Date (Financial Year End)"
-    )
-
-    for i, v in enumerate(combos[current]):
-        fig.data[i].visible = v
-
-    fig.show()
-    return fig
