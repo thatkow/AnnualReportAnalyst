@@ -142,6 +142,14 @@ class ScrapeResultPanel:
             command=self.delete_column,
         )
         self.delete_column_button.pack(side=tk.LEFT, padx=(6, 0))
+
+        # === Reload CSV button (similar creation to Delete Column) ===
+        self.reload_csv_button = ttk.Button(
+            actions_row,
+            text="Reload CSV",
+            command=self.load_from_files,
+        )
+        self.reload_csv_button.pack(side=tk.LEFT, padx=(6, 0))
         self.delete_csv_button = ttk.Button(
             actions_row,
             text="Delete CSV",
