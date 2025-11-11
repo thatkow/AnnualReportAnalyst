@@ -190,17 +190,18 @@ class CombinedUIMixin:
                 stock_df = get_stock_data_for_dates(
                     ticker=ticker,
                     dates=year_cols,
-                    days=[d for d in shift_keys.values() if d != 0],
+                    days=[d for d in shift_keys.values()],
                     cache_filepath="stock_cache.json"
                 )
 
                 factor_lookup = {}
 
-                # Blank entry first, as scalar 1 (not per-date map)
-                factor_lookup[""] = 1.0
+
+                # Blank entry maps every year to factor=1.0
+                factor_lookup[""] = {y: 1.0 for y in year_cols}
 
                 # Informational log
-                print("🟦 Added blank factor_lookup entry = 1.0")
+                print(f"🟦 Added blank factor_lookup entry for all years: {len(year_cols)} columns mapped to 1.0")
 
                 for key_label, day_offset in shift_keys.items():
                     if key_label == "":

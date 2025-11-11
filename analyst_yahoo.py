@@ -81,7 +81,26 @@ def get_stock_data_for_dates(
 
                 # === Retry logic if no data found ===
                 if price is None or pd.isna(price):
-                    direction = 1 if offset >= 0 else -1
+                    # === Determine search direction ===
+                    # For offset == 0 (On release), respect zero_days_search_forward flag
+                    search_forward = True
+                    try:
+                        # Lookup user preference from global or passed param
+                        search_forward = zero_days_search_forward  # type: ignore[name-defined]
+                    except NameError:
+                        # Default fallback if not defined
+                        search_forward = False
+
+                    if offset == 0:
+                        if search_forward:
+                            direction = 1
+                            print(f"🔁 On release date: retrying FORWARD up to 30 days for {ticker} near {target_date}")
+                        else:
+                            direction = -1
+                            print(f"🔁 On release date: retrying BACKWARD up to 30 days for {ticker} near {target_date}")
+                    else:
+                        direction = 1 if offset >= 0 else -1
+
                     found = False
                     for retry in range(1, 31):  # search up to 30 days
                         try_date = target_date + timedelta(days=retry * direction)
@@ -106,9 +125,16 @@ def get_stock_data_for_dates(
                                 else nearest["Close"]
                             )
                             found = True
-                            print(
-                                f"🔁 Found substitute price for {ticker} ({offset:+}d → {retry*direction:+}d): {price:.2f}"
-                            )
+                            if offset == 0:
+                                direction_label = "forward" if direction == 1 else "backward"
+                                print(
+                                    f"✅ Found fallback 'On release' price for {ticker} ({direction_label} {retry:+}d): {price:.2f}"
+                                )
+                            else:
+                                print(
+                                    f"🔁 Found substitute price for {ticker} ({offset:+}d → {retry*direction:+}d): {price:.2f}"
+                                )
+                            break
                             break
 
                     if not found:

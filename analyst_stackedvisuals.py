@@ -27,9 +27,24 @@ def render_stacked_annual_report(
     tickers = sorted(df["Ticker"].dropna().unique())
     types = sorted(df["TYPE"].dropna().unique())
 
+    # Ensure default structures exist
+    factor_lookup = factor_lookup or {}
+    share_counts = share_counts or {}
+
     # Default factor lookup
     if factor_lookup is None:
         factor_lookup = {"Normal": {y: 1.0 for y in year_cols}}
+
+
+    # Convert scalar factor entries (like "") to uniform dicts
+    for k, v in list(factor_lookup.items()):
+        if isinstance(v, (int, float)):
+            # Broadcast scalar to all date columns
+            factor_lookup[k] = {y: float(v) for y in df.columns if y[:2].isdigit() or y.startswith("31.")}
+
+    # Guarantee at least one factor for safety
+    if not factor_lookup:
+        factor_lookup = {"": {y: 1.0 for y in df.columns if y[:2].isdigit() or y.startswith("31.")}}
 
     records = []
     for _, r in df.iterrows():
