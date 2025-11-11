@@ -237,17 +237,89 @@ function buildCumsumLines(factorName, perShare) {{
 function renderBars() {{
   const factorName = sel.value;
   const perShare = document.getElementById("perShareCheckbox").checked;
-  const traces = [...buildBarTraces(factorName, perShare), ...buildCumsumLines(factorName, perShare)];
+  const barTraces = buildBarTraces(factorName, perShare);
+  const cumsumLines = buildCumsumLines(factorName, perShare);
+
+  // === Compute per-ticker, per-type cumulative-sum data ===
+  const factorMap = factorLookup[factorName];
+  const cumsumMap = {{}};
+  for (const ticker of tickers) {{
+    for (const typ of types) {{
+      const key = ticker + "::" + typ;
+      const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
+      if (subset.length === 0) continue;
+      const vals = years.map(y => {{
+        const sum = subset.reduce((acc, r) => acc + (r[y] || 0) * (factorMap[y] || 1), 0);
+        const adj = perShare && shareCounts[ticker]?.[y] ? sum / shareCounts[ticker][y] : sum;
+        return adj;
+      }});
+      cumsumMap[key] = vals;
+    }}
+  }}
+
+  // === Build one boxplot per ticker+type ===
+  const boxTraces = [];
+  const baseX = baseYears[baseYears.length - 1] + 3.0;
+  const spacing = 0.4;
+  let i = 0;
+  for (const key of Object.keys(cumsumMap)) {{
+    const vals = cumsumMap[key];
+    const [ticker, typ] = key.split("::");
+    if (!vals || vals.length === 0) continue;
+
+    const sorted = vals.slice().sort((a,b)=>a-b);
+    const q1 = sorted[Math.floor(0.25*sorted.length)];
+    const q2 = sorted[Math.floor(0.5*sorted.length)];
+    const q3 = sorted[Math.floor(0.75*sorted.length)];
+    const min = sorted[0];
+    const max = sorted[sorted.length-1];
+    const color = hashColor(ticker + typ);
+
+    const tooltip =
+      `<b>Ticker:</b> ${{ticker}}<br>` +
+      `<b>Type:</b> ${{typ}}<br>` +
+      `<b>Count:</b> ${{vals.length}}<br>` +
+      `<b>Min:</b> ${{humanReadable(min)}}<br>` +
+      `<b>Q1:</b> ${{humanReadable(q1)}}<br>` +
+      `<b>Median:</b> ${{humanReadable(q2)}}<br>` +
+      `<b>Q3:</b> ${{humanReadable(q3)}}<br>` +
+      `<b>Max:</b> ${{humanReadable(max)}}`;
+
+    boxTraces.push({{
+      y: vals,
+      x: Array(vals.length).fill(baseX + i * spacing),
+      name: `${{ticker}}-${{typ}} Box`,
+      type: "box",
+      marker: {{ color, opacity: 0.65 }},
+      line: {{ color }},
+      boxmean: true,
+      boxpoints: "outliers",
+      hovertemplate: tooltip + "<extra></extra>"
+    }});
+    i++;
+  }}
+
+  const traces = [...barTraces, ...cumsumLines, ...boxTraces];
+
+  // === Layout ===
   const layout = {{
     barmode: "relative",
     height: 750,
     title: `Financial Values — Factor: ${{factorName}}`,
     yaxis: {{ title: perShare ? "Value (Per Share)" : "Value", zeroline: true }},
-    xaxis: {{ title: "Date", tickvals: baseYears, ticktext: years, tickangle: 45,
-              mirror: true, linecolor: "black", linewidth: 4 }},
+    xaxis: {{
+      title: "Date",
+      tickvals: [...baseYears, baseX + i * spacing],
+      ticktext: [...years, "Box Plots"],
+      tickangle: 45,
+      mirror: true,
+      linecolor: "black",
+      linewidth: 4
+    }},
     hoverlabel: {{ bgcolor: "white", font: {{ family: "Courier New" }} }},
     showlegend: false
   }};
+
   Plotly.newPlot("plotBars", traces, layout);
 }}
 renderBars();
