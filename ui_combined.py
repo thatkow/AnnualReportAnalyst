@@ -163,15 +163,17 @@ class CombinedUIMixin:
                 # === Inject Ticker column using company_name ===
                 df["Ticker"] = company_name
 
-                # === Prepare factor lookup ===
+                # === Identify year columns ===
                 year_cols = [c for c in df.columns if c[:2].isdigit() or c.startswith("31.")]
+
+                # === Prepare factor lookup ===
                 factor_lookup = {
                     "half": {y: 0.5 for y in year_cols},
                     "normal": {y: 1.0 for y in year_cols},
                     "double": {y: 2.0 for y in year_cols},
                 }
 
-                # === Prepare share counts ===
+                # === Extract share counts from 'Number of shares' rows ===
                 share_counts = {}
                 share_rows = df[df["ITEM"].str.lower().str.contains("number of shares", na=False)]
                 share_counts[company_name] = {}
@@ -183,6 +185,9 @@ class CombinedUIMixin:
                 else:
                     share_counts[company_name] = {y: 1.0 for y in year_cols}
 
+                # === Remove 'Number of shares' rows for plotting ===
+                df_plot = df[~df["ITEM"].str.lower().str.contains("number of shares", na=False)].copy()
+
                 # === Output directory ===
                 from pathlib import Path
                 visuals_dir = Path("companies") / "visuals"
@@ -192,7 +197,7 @@ class CombinedUIMixin:
 
                 # === Call the stacked visuals plotter ===
                 render_stacked_annual_report(
-                    df,
+                    df_plot,
                     title=f"Financial/Income for {company_name}",
                     factor_lookup=factor_lookup,
                     share_counts=share_counts,
