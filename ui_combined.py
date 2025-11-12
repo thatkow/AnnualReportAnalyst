@@ -214,6 +214,8 @@ class CombinedUIMixin:
                         price = row["Price"]
                         if pd.notna(price) and price > 0:
                             price_map[base] = 1.0 / float(price)
+                        else:
+                            price_map[base] = float("nan")
 
                     factor_lookup[key_label] = price_map
 
