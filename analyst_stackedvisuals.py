@@ -318,14 +318,15 @@ function renderBars() {{
     const vals = cumsumMap[key];
     const [ticker, typ] = key.split("::");
     if (!vals || vals.length === 0) continue;
-
     const sorted = vals.slice().sort((a,b)=>a-b);
     const q1 = sorted[Math.floor(0.25*sorted.length)];
     const q2 = sorted[Math.floor(0.5*sorted.length)];
     const q3 = sorted[Math.floor(0.75*sorted.length)];
     const min = sorted[0];
     const max = sorted[sorted.length-1];
+    const mean = vals.reduce((a,b)=>a+b,0)/vals.length;
     const color = hashColor(ticker + typ);
+
     // Determine latest raw (unfactored) total for ratio
     const subsetRaw = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
     const latestYear = years[years.length - 1];
@@ -353,6 +354,7 @@ function renderBars() {{
       `<b>Q1:</b> ${{humanReadable(q1)}} (${{safeRatio(q1)}})<br>` +
       `<b>Median:</b> ${{humanReadable(q2)}} (${{safeRatio(q2)}})<br>` +
       `<b>Q3:</b> ${{humanReadable(q3)}} (${{safeRatio(q3)}})<br>` +
+      `<b>Mean:</b> ${{humanReadable(mean)}} (${{safeRatio(mean)}})<br>` +
       `<b>Max:</b> ${{humanReadable(max)}} (${{safeRatio(max)}})<br>` +
       `<b>Latest raw total${{perShare ? " (per share)" : ""}}:</b> ${{humanReadable(rawTotal)}}`;
 
