@@ -326,16 +326,35 @@ function renderBars() {{
     const min = sorted[0];
     const max = sorted[sorted.length-1];
     const color = hashColor(ticker + typ);
+    // Determine latest raw (unfactored) total for ratio
+    const subsetRaw = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
+    const latestYear = years[years.length - 1];
+    let rawTotal = subsetRaw.reduce((acc, r) => acc + (r[latestYear] || 0), 0);
+
+    // Apply per-share adjustment if checkbox ticked
+    if (perShare && shareCounts[ticker]?.[latestYear]) {{
+      const shares = shareCounts[ticker][latestYear];
+      if (shares && !isNaN(shares) && shares !== 0) {{
+        rawTotal = rawTotal / shares;
+      }}
+    }}
+
+    const safeRatio = (stat) => {{
+      if (!stat || isNaN(stat) || stat === 0) return "–";
+      if (rawTotal === 0 || isNaN(rawTotal)) return "–";
+      return (rawTotal / stat).toFixed(2);
+    }};
 
     const tooltip =
       `<b>Ticker:</b> ${{ticker}}<br>` +
       `<b>Type:</b> ${{typ}}<br>` +
       `<b>Count:</b> ${{vals.length}}<br>` +
-      `<b>Min:</b> ${{humanReadable(min)}}<br>` +
-      `<b>Q1:</b> ${{humanReadable(q1)}}<br>` +
-      `<b>Median:</b> ${{humanReadable(q2)}}<br>` +
-      `<b>Q3:</b> ${{humanReadable(q3)}}<br>` +
-      `<b>Max:</b> ${{humanReadable(max)}}`;
+      `<b>Min:</b> ${{humanReadable(min)}} (${{safeRatio(min)}})<br>` +
+      `<b>Q1:</b> ${{humanReadable(q1)}} (${{safeRatio(q1)}})<br>` +
+      `<b>Median:</b> ${{humanReadable(q2)}} (${{safeRatio(q2)}})<br>` +
+      `<b>Q3:</b> ${{humanReadable(q3)}} (${{safeRatio(q3)}})<br>` +
+      `<b>Max:</b> ${{humanReadable(max)}} (${{safeRatio(max)}})<br>` +
+      `<b>Latest raw total${{perShare ? " (per share)" : ""}}:</b> ${{humanReadable(rawTotal)}}`;
 
     boxTraces.push({{
       y: vals,
