@@ -234,13 +234,19 @@ class CombinedUIMixin:
                     for key_label, day_offset in shift_keys.items():
                         if key_label == "":
                             continue
+                        # Retrieve 1/price from factor_lookup, invert to display original price
                         lookup_map = factor_lookup.get(key_label, {})
-                        val = lookup_map.get(y, None)
-                        if val is None or pd.isna(val):
+                        inv_val = lookup_map.get(y, None)
+                        if inv_val is None or pd.isna(inv_val) or inv_val == 0:
                             entries.append(f"{day_offset:+d}: NaN")
                         else:
-                            entries.append(f"{day_offset:+d}: {val:.3f}")
+                            price_val = 1.0 / inv_val
+                            entries.append(f"{day_offset:+d}: {price_val:.3f}")
+
                     factor_tooltip[y] = entries
+
+                factor_tooltip_label = "Stock Prices"
+                print(f"🟩 Built factor_tooltip (showing stock prices) with {len(factor_tooltip)} entries.")
 
                 factor_tooltip_label = "Prices"
                 print(f"🟩 Built factor_tooltip with {len(factor_tooltip)} entries.")
