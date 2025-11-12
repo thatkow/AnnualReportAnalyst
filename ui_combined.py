@@ -227,6 +227,24 @@ class CombinedUIMixin:
                 else:
                     print("⚠️ Stock price lookup returned no data; continuing without adjustment.")
 
+                # === Build factor_tooltip map (date → ["offset: price"]) ===
+                factor_tooltip = {}
+                for y in year_cols:
+                    entries = []
+                    for key_label, day_offset in shift_keys.items():
+                        if key_label == "":
+                            continue
+                        lookup_map = factor_lookup.get(key_label, {})
+                        val = lookup_map.get(y, None)
+                        if val is None or pd.isna(val):
+                            entries.append(f"{day_offset:+d}: NaN")
+                        else:
+                            entries.append(f"{day_offset:+d}: {val:.3f}")
+                    factor_tooltip[y] = entries
+
+                factor_tooltip_label = "Prices"
+                print(f"🟩 Built factor_tooltip with {len(factor_tooltip)} entries.")
+
                 # === Extract share counts from 'Number of shares' rows ===
                 share_counts = {}
                 share_rows = df[df["ITEM"].str.lower().str.contains("number of shares", na=False)]
@@ -255,6 +273,8 @@ class CombinedUIMixin:
                     title=f"Financial/Income for {company_name}",
                     factor_lookup=factor_lookup,
                     factor_label="Value Per Stock Price Dollar",
+                    factor_tooltip=factor_tooltip,
+                    factor_tooltip_label=factor_tooltip_label,
                     share_counts=share_counts,
                     out_path=out_path,
                 )

@@ -10,6 +10,8 @@ def render_stacked_annual_report(
     title: str = "Stacked Annual Report",
     factor_lookup: dict | None = None,
     factor_label: str = "Adjustment Factor",
+    factor_tooltip: dict | None = None,
+    factor_tooltip_label: str = "Stock Factors",
     share_counts: dict | None = None,
     out_path: str = "stacked_annual_report.html",
 ):
@@ -117,8 +119,11 @@ const types = {json.dumps(types)};
 const rawData = {json.dumps(records)};
 const shareCounts = {json.dumps(share_counts)};
 const factorLookup = {json.dumps(factor_lookup)};
+const factorTooltip = {json.dumps(factor_tooltip)};
+const factorTooltipLabel = {json.dumps(factor_tooltip_label)};
 const typeOffsets = {json.dumps(type_offsets)};
 const typeLineStyles = {json.dumps(type_linestyles)};
+
 
 // Add label for dropdown
 const factorLabel = {json.dumps(factor_label)};
@@ -221,11 +226,21 @@ function buildCumsumLines(factorName, perShare) {{
         mode: "lines+markers",
         line: {{ color, dash: typeLineStyles[typ] || "solid", width: 3 }},
         marker: {{ color, size: 8, symbol: "circle" }},
-        text: perYearTotals.map(v => fmt(v, perShare)),
-        hovertemplate: "TICKER:" + ticker +
-                       "<br>YEAR:%{{customdata[0]}}" +
-                       "<br>TYPE:" + typ +
-                       "<br>TOTAL:%{{text}}<extra></extra>",
+        text: years.map((y, i) => {{
+          let tooltipArr = factorTooltip?.[y];
+          if (!Array.isArray(tooltipArr)) tooltipArr = tooltipArr ? [tooltipArr] : [];
+          const tooltipFormatted = tooltipArr.length
+            ? `<br><b>${{factorTooltipLabel}}:</b><br>` + tooltipArr.join("<br>")
+            : "";
+          return (
+            "TICKER:" + ticker +
+            "<br>YEAR:" + y +
+            "<br>TYPE:" + typ +
+            tooltipFormatted +
+            "<br>TOTAL:" + fmt(perYearTotals[i], perShare)
+          );
+        }}),
+        hoverinfo: "text",
         customdata: years.map(y => [y]),
         showlegend: false
       }});
