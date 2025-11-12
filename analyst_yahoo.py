@@ -49,6 +49,73 @@ def get_stock_data_for_dates(
 
     for d in dates:
         base_date = datetime.strptime(d, "%d.%m.%Y").date()
+
+        # Define one large window: start = base - min(days) - 30, end = base + max(days) + 30
+        start_date = base_date - timedelta(days=(abs(min(days)) + 30))
+        end_date = base_date + timedelta(days=(abs(max(days)) + 30))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=FutureWarning)
+            df_full = yf.download(
+                ticker,
+                start=start_date,
+                end=end_date,
+                progress=False,
+                interval="1d",
+                auto_adjust=False,
+            )
+
+        if df_full.empty:
+            print(f"⚠️ No data found for {ticker} in {start_date}–{end_date}. Marking all as NA.")
+            df_full = pd.DataFrame(columns=["Date", "Close"])
+        else:
+            df_full = df_full.reset_index()
+
+            # Flatten multi-level columns if present
+            if isinstance(df_full.columns, pd.MultiIndex):
+                df_full.columns = [' '.join(c).strip() for c in df_full.columns.values]
+
+            # Try to find a 'Close' column that includes the ticker
+            close_cols = [c for c in df_full.columns if "Close" in c]
+            if not close_cols:
+                print(f"⚠️ Could not find a Close column for {ticker}. Columns: {df_full.columns.tolist()}")
+                df_full["Close"] = float("nan")
+            else:
+                df_full["Close"] = df_full[close_cols[0]]
+
+            df_full["Date"] = pd.to_datetime(df_full["Date"], errors="coerce").dt.date
+            df_full["Close"] = pd.to_numeric(df_full["Close"], errors="coerce")
+
+        # Drop invalid rows
+        df_full = df_full.dropna(subset=["Date", "Close"])
+
+        print(f"DEBUG: Cleaned df_full shape {df_full.shape}")
+        print(df_full.head(5))
+
+        # Build lookup
+        price_lookup = {d_: float(v) for d_, v in zip(df_full["Date"], df_full["Close"])}
+
+
+        # Drop invalid rows
+        df_full = df_full.dropna(subset=["Date", "Close"])
+
+        print(f"DEBUG: Cleaned df_full shape {df_full.shape}")
+        print(df_full.head(5))
+
+        # Build lookup
+        price_lookup = {d_: float(v) for d_, v in zip(df_full["Date"], df_full["Close"])}
+
+
+        # Drop any invalid rows (non-numeric Close or bad Date)
+        df_full = df_full.dropna(subset=["Date", "Close"])
+
+        # Build lookup dict
+        try:
+            price_lookup = {d_: float(v) for d_, v in zip(df_full["Date"], df_full["Close"])}
+        except Exception as e:
+            print(f"⚠️ Failed to build price lookup for {ticker}: {e}")
+            price_lookup = {}
+
         for offset in days:
             target_date = base_date + timedelta(days=offset)
             key = f"{ticker}|{target_date}"
@@ -56,97 +123,48 @@ def get_stock_data_for_dates(
             if key in cache:
                 price = cache[key]
             else:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", category=FutureWarning)
-                    df = yf.download(
-                        ticker,
-                        start=target_date - timedelta(days=1),
-                        end=target_date + timedelta(days=1),
-                        progress=False,
-                        interval="1d",
-                        auto_adjust=False,
-                    )
+                price = price_lookup.get(target_date, float("nan"))
 
-                if df.empty:
-                    price = None
-                else:
-                    df = df.reset_index()
-                    df["Diff"] = (df["Date"].dt.date - target_date).abs()
-                    nearest = df.loc[df["Diff"].idxmin()]
-                    price = float(
-                        nearest["Close"].iloc[0]
-                        if hasattr(nearest["Close"], "iloc")
-                        else nearest["Close"]
-                    )
-
-                # === Retry logic if no data found ===
-                if price is None or pd.isna(price):
-                    # === Determine search direction ===
-                    # For offset == 0 (On release), respect zero_days_search_forward flag
-                    search_forward = True
-                    try:
-                        # Lookup user preference from global or passed param
-                        search_forward = zero_days_search_forward  # type: ignore[name-defined]
-                    except NameError:
-                        # Default fallback if not defined
-                        search_forward = False
-
-                    if offset == 0:
-                        if search_forward:
-                            direction = 1
-                            print(f"🔁 On release date: retrying FORWARD up to 30 days for {ticker} near {target_date}")
-                        else:
-                            direction = -1
-                            print(f"🔁 On release date: retrying BACKWARD up to 30 days for {ticker} near {target_date}")
-                    else:
-                        direction = 1 if offset >= 0 else -1
-
+                # If not found, iterate forward (if +offset) or backward (if -offset) to find next available price
+                if pd.isna(price):
+                    direction = 1 if offset >= 0 else -1
                     found = False
-                    for retry in range(1, 31):  # search up to 30 days
-                        try_date = target_date + timedelta(days=retry * direction)
-                        with warnings.catch_warnings():
-                            warnings.simplefilter("ignore", category=FutureWarning)
-                            try_df = yf.download(
-                                ticker,
-                                start=try_date - timedelta(days=1),
-                                end=try_date + timedelta(days=1),
-                                progress=False,
-                                interval="1d",
-                                auto_adjust=False,
-                            )
-
-                        if not try_df.empty:
-                            try_df = try_df.reset_index()
-                            try_df["Diff"] = (try_df["Date"].dt.date - try_date).abs()
-                            nearest = try_df.loc[try_df["Diff"].idxmin()]
-                            price = float(
-                                nearest["Close"].iloc[0]
-                                if hasattr(nearest["Close"], "iloc")
-                                else nearest["Close"]
-                            )
+                    for retry in range(1, 31):  # search within ±30 days
+                        new_date = target_date + timedelta(days=retry * direction)
+                        if new_date in price_lookup:
+                            price = price_lookup[new_date]
                             found = True
-                            if offset == 0:
-                                direction_label = "forward" if direction == 1 else "backward"
-                                print(
-                                    f"✅ Found fallback 'On release' price for {ticker} ({direction_label} {retry:+}d): {price:.2f}"
-                                )
-                            else:
-                                print(
-                                    f"🔁 Found substitute price for {ticker} ({offset:+}d → {retry*direction:+}d): {price:.2f}"
-                                )
+                            print(
+                                f"🔁 Found substitute for {ticker} on {target_date} "
+                                f"→ {new_date} ({'forward' if direction==1 else 'backward'} {retry:+}d): {price:.2f}"
+                            )
                             break
-                            break
-
                     if not found:
                         print(
-                            f"⚠️ No valid price data found for {ticker} near {target_date} "
-                            "after 30-day search window — marking as NA"
+                            f"⚠️ No valid stock price found for {ticker} near {target_date} "
+                            f"after 30-day search window — marking as NA."
                         )
                         price = float("nan")
 
-                # Cache even if NA to avoid re-querying endlessly
                 cache[key] = price
-                updated = True
+
+                # Only mark updated and cache if valid price exists
+                if not pd.isna(price):
+                    updated = True
+                else:
+                    # Do not store NaN in cache to allow future re-checks
+                    cache.pop(key, None)
+
+            if pd.isna(price):
+                print(
+                    f"⚠️ No price found for {ticker} on {target_date}, "
+                    f"even after directional lookup — marking as NA."
+                )
+            else:
+                print(
+                    f"✅ Price for {ticker} on {target_date}: {price:.2f} "
+                    f"(offset {offset:+}d)"
+                )
 
             all_rows.append({
                 "BaseDate": base_date.strftime("%d.%m.%Y"),
@@ -171,7 +189,7 @@ def get_stock_data_for_dates(
 if __name__ == "__main__":
     ticker = "AD8.AX"
     days = [-30, -7, 0, 7, 30]
-    dates = ["31.12.2016", "31.12.2017"]
+    dates = ["30.10.2017"]
 
     df = get_stock_data_for_dates(ticker, dates, days, cache_filepath="stock_cache.json")
     print(df)
