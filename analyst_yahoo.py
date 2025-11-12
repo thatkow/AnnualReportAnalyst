@@ -138,10 +138,13 @@ def get_stock_data_for_dates(
                             break
 
                     if not found:
-                        raise RuntimeError(
-                            f"❌ No valid price data found for {ticker} near {target_date} after 30-day search window"
+                        print(
+                            f"⚠️ No valid price data found for {ticker} near {target_date} "
+                            "after 30-day search window — marking as NA"
                         )
+                        price = float("nan")
 
+                # Cache even if NA to avoid re-querying endlessly
                 cache[key] = price
                 updated = True
 
@@ -166,9 +169,9 @@ def get_stock_data_for_dates(
 
 # === Main for testing ===
 if __name__ == "__main__":
-    ticker = "BRK-B"
+    ticker = "AD8.AX"
     days = [-30, -7, 0, 7, 30]
-    dates = ["31.12.2020", "31.12.2021", "31.12.2022", "31.12.2023", "31.12.2024", "30.06.2025"]
+    dates = ["31.12.2016", "31.12.2017"]
 
     df = get_stock_data_for_dates(ticker, dates, days, cache_filepath="stock_cache.json")
     print(df)
