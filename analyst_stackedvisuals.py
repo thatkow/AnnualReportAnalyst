@@ -180,10 +180,22 @@ function buildBarTraces(factorName, perShare) {{
       for (const row of subset) {{
         const id = row.CATEGORY + '-' + row.SUBCATEGORY + '-' + row.ITEM;
         const color = colorMap[id];
+        // Compute yvals, skipping NaN factor years entirely
         const yvals = years.map(y => {{
-          const baseVal = (row[y] || 0) * (factorMap[y] || 1);
-          return perShare && shareCounts[ticker]?.[y] ? baseVal / shareCounts[ticker][y] : baseVal;
+          const factor = factorMap[y];
+          if (factor === undefined || factor === null || isNaN(factor)) {{
+            return NaN;
+          }}
+          const baseVal = (row[y] || 0) * factor;
+          return perShare && shareCounts[ticker]?.[y]
+            ? baseVal / shareCounts[ticker][y]
+            : baseVal;
         }});
+
+        // If all yvals are NaN, skip this bar entirely
+        if (yvals.every(v => isNaN(v))) {{
+          continue;
+        }}
         const xvals = baseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
         traces.push({{
           x: xvals,
@@ -214,10 +226,21 @@ function buildCumsumLines(factorName, perShare) {{
   for (const ticker of tickers) {{
     for (const typ of types) {{
       const perYearTotals = years.map(y => {{
+        const factor = factorMap[y];
+        if (factor === undefined || factor === null || isNaN(factor)) {{
+          return NaN;
+        }}
         const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
-        const sum = subset.reduce((acc, r) => acc + (r[y] || 0) * (factorMap[y] || 1), 0);
-        return perShare && shareCounts[ticker]?.[y] ? sum / shareCounts[ticker][y] : sum;
+        const sum = subset.reduce((acc, r) => acc + (r[y] || 0) * factor, 0);
+        return perShare && shareCounts[ticker]?.[y]
+          ? sum / shareCounts[ticker][y]
+          : sum;
       }});
+
+      // If all totals are NaN, skip this cumsum line
+      if (perYearTotals.every(v => isNaN(v))) {{
+        continue;
+      }}
       const xvals = baseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
       const color = hashColor(ticker + typ);
       lines.push({{
