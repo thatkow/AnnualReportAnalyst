@@ -367,6 +367,48 @@ function renderBars() {{
       boxpoints: "outliers",
       hovertemplate: tooltip + "<extra></extra>"
     }});
+
+    // === Place ❓ icon above the top of the latest stacked bars (sum of positive bars only) ===
+    const latestX = baseYears[baseYears.length - 1] + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0);
+
+    // Calculate total of positive bars for this type+ticker
+    let stackedTotal = 0;
+    const subsetBars = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
+    for (const row of subsetBars) {{
+      const rawVal = row[latestYear];
+      if (rawVal !== undefined && rawVal !== null && !isNaN(rawVal) && rawVal > 0) {{
+        let adjVal = rawVal;
+        const factor = factorLookup[sel.value]?.[latestYear];
+        if (factor !== undefined && factor !== null && !isNaN(factor)) {{
+          adjVal = rawVal * factor;
+        }}
+        if (perShare && shareCounts[ticker]?.[latestYear]) {{
+          const shares = shareCounts[ticker][latestYear];
+          if (shares && !isNaN(shares) && shares !== 0) {{
+            adjVal = adjVal / shares;
+          }}
+        }}
+        stackedTotal += adjVal;
+      }}
+    }}
+
+    // Float icon slightly above that bar top (5% higher)
+    const iconTrace = {{
+      x: [latestX],
+      y: [stackedTotal * 1.05],
+      mode: "text",
+      text: ["❓"],
+      textfont: {{
+        color: color,
+        size: 20,
+        family: "Arial Black"
+      }},
+      hovertemplate: tooltip + "<extra></extra>",
+      hoverinfo: "text",
+      showlegend: false,
+      cliponaxis: false
+    }};
+    boxTraces.push(iconTrace);
     i++;
   }}
 
