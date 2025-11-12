@@ -291,7 +291,21 @@ function renderBars() {{
         const adj = perShare && shareCounts[ticker]?.[y] ? sum / shareCounts[ticker][y] : sum;
         return adj;
       }});
-      cumsumMap[key] = vals;
+      // Exclude NaN-factor years from boxplot stats
+      const filteredVals = [];
+      years.forEach((y, i) => {{
+        const factor = factorMap[y];
+        const v = vals[i];
+        if (factor !== undefined && factor !== null && !isNaN(factor) && v !== undefined && v !== null && !isNaN(v)) {{
+          filteredVals.push(v);
+        }}
+      }});
+
+      if (filteredVals.length === 0) {{
+        continue;
+      }}
+
+      cumsumMap[key] = filteredVals;
     }}
   }}
 
