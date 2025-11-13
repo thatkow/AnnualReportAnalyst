@@ -33,7 +33,8 @@ def get_stock_data_for_dates(
         cache_filepath (str | None): Optional JSON cache file to reuse previously fetched data.
 
     Returns:
-        pd.DataFrame: Columns ['BaseDate', 'OffsetDays', 'Date', 'Price']
+        pd.DataFrame: Columns ['BaseDate', 'OffsetDays', 'Date', 'ResolvedDate',
+            'ResolvedOffset', 'Price']
     """
     cache = {}
     if cache_filepath and os.path.exists(cache_filepath):
@@ -120,23 +121,47 @@ def get_stock_data_for_dates(
             target_date = base_date + timedelta(days=offset)
             key = f"{ticker}|{target_date}"
 
-            if key in cache:
-                price = cache[key]
+            cached_entry = cache.get(key)
+            resolved_date = target_date
+            if cached_entry is not None:
+                if isinstance(cached_entry, dict):
+                    price = cached_entry.get("price", float("nan"))
+                    resolved_str = cached_entry.get("resolved_date")
+                    if resolved_str:
+                        try:
+                            resolved_date = datetime.fromisoformat(resolved_str).date()
+                        except ValueError:
+                            resolved_date = target_date
+                else:
+                    price = cached_entry
             else:
                 price = price_lookup.get(target_date, float("nan"))
 
-                # If not found, iterate forward (if +offset) or backward (if -offset) to find next available price
+                # If not found, iterate to find closest available price
                 if pd.isna(price):
-                    direction = 1 if offset >= 0 else -1
+                    search_deltas: list[int] = []
+                    if offset >= 0:
+                        # Prefer walking backwards for release/forward offsets
+                        search_deltas.extend([-retry for retry in range(1, 31)])
+                        if offset > 0:
+                            # Only search forward for positive offsets after exhausting backward search
+                            search_deltas.extend([retry for retry in range(1, 31)])
+                    else:
+                        # Negative offsets continue further backward first, then forward
+                        search_deltas.extend([-retry for retry in range(1, 31)])
+                        search_deltas.extend([retry for retry in range(1, 31)])
+
                     found = False
-                    for retry in range(1, 31):  # search within ±30 days
-                        new_date = target_date + timedelta(days=retry * direction)
+                    for delta in search_deltas:
+                        new_date = target_date + timedelta(days=delta)
                         if new_date in price_lookup:
                             price = price_lookup[new_date]
+                            resolved_date = new_date
                             found = True
+                            direction = "backward" if delta < 0 else "forward"
                             print(
                                 f"🔁 Found substitute for {ticker} on {target_date} "
-                                f"→ {new_date} ({'forward' if direction==1 else 'backward'} {retry:+}d): {price:.2f}"
+                                f"→ {new_date} ({direction} {delta:+}d): {price:.2f}"
                             )
                             break
                     if not found:
@@ -146,13 +171,15 @@ def get_stock_data_for_dates(
                         )
                         price = float("nan")
 
-                cache[key] = price
+                entry_for_cache = {
+                    "price": None if pd.isna(price) else float(price),
+                    "resolved_date": resolved_date.isoformat(),
+                }
 
-                # Only mark updated and cache if valid price exists
-                if not pd.isna(price):
+                if entry_for_cache["price"] is not None:
+                    cache[key] = entry_for_cache
                     updated = True
                 else:
-                    # Do not store NaN in cache to allow future re-checks
                     cache.pop(key, None)
 
             if pd.isna(price):
@@ -163,13 +190,15 @@ def get_stock_data_for_dates(
             else:
                 print(
                     f"✅ Price for {ticker} on {target_date}: {price:.2f} "
-                    f"(offset {offset:+}d)"
+                    f"(offset {offset:+}d; resolved {resolved_date})"
                 )
 
             all_rows.append({
                 "BaseDate": base_date.strftime("%d.%m.%Y"),
                 "OffsetDays": offset,
                 "Date": target_date.strftime("%d.%m.%Y"),
+                "ResolvedDate": resolved_date.strftime("%d.%m.%Y"),
+                "ResolvedOffset": (resolved_date - base_date).days,
                 "Price": price,
             })
 
