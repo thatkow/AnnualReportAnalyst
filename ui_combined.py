@@ -673,6 +673,8 @@ class CombinedUIMixin:
             return
         paths = self._get_mapping_json_paths(company_name)
         existing = [p for p in paths.values() if p.exists()]
+
+        # === NEW: open both files; show error only if none exist ===
         if not existing:
             expected = "\n".join(str(p) for p in paths.values()) or "<no files>"
             messagebox.showinfo(
@@ -681,14 +683,23 @@ class CombinedUIMixin:
             )
             self._update_mapping_buttons()
             return
+
+        # === NEW: open ALL existing mapping files ===
+        for path in existing:
+            try:
+                if sys.platform.startswith("win"):
+                    os.startfile(str(path))  # type: ignore[attr-defined]
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", str(path)], check=False)
+                else:
+                    subprocess.run(["xdg-open", str(path)], check=False)
+            except Exception as exc:
+                # Continue trying to open the others; fail only if all fail
+                print(f"⚠️ Failed to open {path}: {exc}")
+
         try:
-            path = existing[0]
-            if sys.platform.startswith("win"):
-                os.startfile(str(path))  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                subprocess.run(["open", str(path)], check=False)
-            else:
-                subprocess.run(["xdg-open", str(path)], check=False)
+            # Optional: success message (only if both opened silently)
+            pass
         except Exception as exc:
             messagebox.showerror("Mapping", f"Failed to open mapping file: {exc}")
 
