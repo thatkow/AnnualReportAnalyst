@@ -252,7 +252,19 @@ class ScrapeUIMixin:
                 continue
             for entry in self.pdf_entries:
                 tab = ttk.Frame(inner_nb)
-                inner_nb.add(tab, text=entry.path.name)
+
+                # === NEW: Use Year (from Review tab) for nicer tab text ===
+                base_name = entry.path.stem
+                if hasattr(entry, "year") and entry.year:
+                    try:
+                        year_str = str(entry.year).strip()
+                        display = f"{base_name} ({year_str})"
+                    except Exception:
+                        display = base_name
+                else:
+                    display = base_name
+
+                inner_nb.add(tab, text=display)
                 self.scrape_pdf_tabs_by_type[(category, entry.path)] = tab
 
                 canvas = tk.Canvas(tab)
