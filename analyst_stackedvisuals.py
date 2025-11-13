@@ -14,6 +14,7 @@ def render_stacked_annual_report(
     factor_tooltip_label: str = "Stock Factors",
     share_counts: dict | None = None,
     out_path: str = "stacked_annual_report.html",
+    latest_stock_prices: dict | None = None,
 ):
     """
     Generates an interactive two-tab HTML report:
@@ -32,6 +33,7 @@ def render_stacked_annual_report(
     # Ensure default structures exist
     factor_lookup = factor_lookup or {}
     share_counts = share_counts or {}
+    latest_stock_prices = latest_stock_prices or {}
 
     # Default factor lookup
     if factor_lookup is None:
@@ -124,6 +126,7 @@ const factorTooltip = {json.dumps(factor_tooltip)};
 const factorTooltipLabel = {json.dumps(factor_tooltip_label)};
 const typeOffsets = {json.dumps(type_offsets)};
 const typeLineStyles = {json.dumps(type_linestyles)};
+const latestStockPrices = {json.dumps(latest_stock_prices)};
 
 
 // Add label for dropdown
@@ -358,6 +361,19 @@ function renderBars() {{
       return (rawTotal / stat).toFixed(2);
     }};
 
+    const priceInfo = latestStockPrices?.[ticker];
+    const priceLine = (() => {{
+      if (!priceInfo) {{
+        return "<b>Latest stock price:</b> unavailable";
+      }}
+      const priceVal = priceInfo.price;
+      if (priceVal === undefined || priceVal === null || isNaN(priceVal)) {{
+        return "<b>Latest stock price:</b> unavailable";
+      }}
+      const asOf = priceInfo.asOf ? ` as of ${{priceInfo.asOf}}` : "";
+      return `<b>Latest stock price${{asOf}}:</b> $${{Number(priceVal).toFixed(2)}}`;
+    }})();
+
     const tooltip =
       `<b>Ticker:</b> ${{ticker}}<br>` +
       `<b>Type:</b> ${{typ}}<br>` +
@@ -368,7 +384,8 @@ function renderBars() {{
       `<b>Q3:</b> ${{humanReadable(q3)}} (${{safeRatio(q3)}})<br>` +
       `<b>Mean:</b> ${{humanReadable(mean)}} (${{safeRatio(mean)}})<br>` +
       `<b>Max:</b> ${{humanReadable(max)}} (${{safeRatio(max)}})<br>` +
-      `<b>Latest raw total${{perShare ? " (per share)" : ""}}:</b> ${{humanReadable(rawTotal)}}`;
+      `<b>Latest raw total${{perShare ? " (per share)" : ""}}:</b> ${{humanReadable(rawTotal)}}<br>` +
+      `${{priceLine}}`;
 
     boxTraces.push({{
       y: vals,

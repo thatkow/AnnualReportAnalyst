@@ -268,25 +268,20 @@ class CombinedUIMixin:
                 # Provide optional parameter for lookup label
                 lookup_label = getattr(self, "factor_label", "Stock-adjusted factors")
 
-                # Define date shifts for keys
+                # Define date shifts for keys (release date only, default backwards fill)
                 shift_keys = {
-                    "": 0,  # blank entry maps to 1
-                    "Prior month (-30)": -30,
-                    "Prior week (-7)": -7,
-                    "Prior day (-1)": -1,
+                    "": None,  # blank entry maps to 1
                     "On release (0)": 0,
-                    "Next day (+1)": 1,
-                    "Next week (+7)": 7,
-                    "Next month (+30)": 30,
                 }
 
                 ticker = company_name or "UNKNOWN"
                 print(f"📈 Fetching stock prices for {ticker} (label: {lookup_label})...")
 
+                lookup_days = sorted({d for d in shift_keys.values() if d is not None})
                 stock_df = get_stock_data_for_dates(
                     ticker=ticker,
                     dates=year_cols,
-                    days=[d for d in shift_keys.values()],
+                    days=lookup_days or [0],
                     cache_filepath="stock_cache.json"
                 )
 
@@ -300,7 +295,7 @@ class CombinedUIMixin:
                 print(f"🟦 Added blank factor_lookup entry for all years: {len(year_cols)} columns mapped to 1.0")
 
                 for key_label, day_offset in shift_keys.items():
-                    if key_label == "":
+                    if day_offset is None:
                         continue
 
                     subset = stock_df[stock_df["OffsetDays"] == day_offset]
@@ -328,24 +323,65 @@ class CombinedUIMixin:
                 for y in year_cols:
                     entries = []
                     for key_label, day_offset in shift_keys.items():
-                        if key_label == "":
+                        if day_offset is None:
                             continue
-                        # Retrieve 1/price from factor_lookup, invert to display original price
                         lookup_map = factor_lookup.get(key_label, {})
                         inv_val = lookup_map.get(y, None)
+                        resolved_subset = stock_df[
+                            (stock_df["BaseDate"] == y)
+                            & (stock_df["OffsetDays"] == day_offset)
+                        ]
+                        resolved_date = None
+                        resolved_offset = None
+                        if not resolved_subset.empty:
+                            resolved_date = resolved_subset.iloc[0].get("ResolvedDate")
+                            resolved_offset = resolved_subset.iloc[0].get("ResolvedOffset")
+
                         if inv_val is None or pd.isna(inv_val) or inv_val == 0:
-                            entries.append(f"{day_offset:+d}: NaN")
+                            entries.append(
+                                f"{day_offset:+d}: NaN"
+                                + (
+                                    f" (as of {resolved_date})"
+                                    if resolved_date and resolved_date != y
+                                    else ""
+                                )
+                            )
                         else:
                             price_val = 1.0 / inv_val
-                            entries.append(f"{day_offset:+d}: {price_val:.3f}")
+                            extra = ""
+                            if resolved_date and resolved_date != y:
+                                offset_txt = ""
+                                if resolved_offset not in (None, 0):
+                                    offset_txt = f" {resolved_offset:+d}d"
+                                extra = f" (as of {resolved_date}{offset_txt})"
+                            entries.append(f"{day_offset:+d}: {price_val:.3f}{extra}")
 
                     factor_tooltip[y] = entries
 
                 factor_tooltip_label = "Stock Prices"
                 print(f"🟩 Built factor_tooltip (showing stock prices) with {len(factor_tooltip)} entries.")
 
-                factor_tooltip_label = "Prices"
-                print(f"🟩 Built factor_tooltip with {len(factor_tooltip)} entries.")
+                # Fetch the most recent available stock price for tooltip context
+                today_str = datetime.today().strftime("%d.%m.%Y")
+                latest_stock_df = get_stock_data_for_dates(
+                    ticker=ticker,
+                    dates=[today_str],
+                    days=[0],
+                    cache_filepath=None
+                )
+
+                latest_price_payload = {}
+                if not latest_stock_df.empty:
+                    latest_row = latest_stock_df.iloc[0]
+                    latest_price = latest_row.get("Price")
+                    resolved_date = latest_row.get("ResolvedDate") or latest_row.get("Date")
+                    resolved_offset = latest_row.get("ResolvedOffset")
+                    if pd.notna(latest_price):
+                        latest_price_payload[company_name] = {
+                            "price": float(latest_price),
+                            "asOf": resolved_date,
+                            "resolvedOffset": int(resolved_offset) if pd.notna(resolved_offset) else 0,
+                        }
 
                 # === Extract share counts from 'Number of shares' rows ===
                 share_counts = {}
@@ -379,6 +415,7 @@ class CombinedUIMixin:
                     factor_tooltip_label=factor_tooltip_label,
                     share_counts=share_counts,
                     out_path=out_path,
+                    latest_stock_prices=latest_price_payload,
                 )
 
             except Exception as e:
