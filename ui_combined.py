@@ -1,15 +1,31 @@
 from __future__ import annotations
 
 import csv
+import io
+import os
+import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
-from constants import COLUMNS, SCRAPE_EXPECTED_COLUMNS
+from constants import COLUMNS, DEFAULT_OPENAI_MODEL, SCRAPE_EXPECTED_COLUMNS
+
+
+COMBINED_BASE_COLUMNS = [
+    "TYPE",
+    "CATEGORY",
+    "SUBCATEGORY",
+    "ITEM",
+    "NOTE",
+    "CATEGORY_M",
+    "SUBCATEGORY_M",
+    "ITEM_M",
+]
 from ui_widgets import CollapsibleFrame
 from pdf_utils import PDFEntry, normalize_header_row
 
@@ -21,6 +37,8 @@ class CombinedUIMixin:
     combined_table: Optional[ttk.Treeview]
     combined_create_button: Optional[ttk.Button]
     combined_save_button: Optional[ttk.Button]
+    mapping_create_button: Optional[ttk.Button]
+    mapping_open_button: Optional[ttk.Button]
     combined_columns: List[str]
     combined_rows: List[List[str]]
     combined_dyn_columns: List[Dict[str, Any]]
@@ -91,6 +109,11 @@ class CombinedUIMixin:
         self.generate_multipliers_button.pack(side=tk.LEFT, padx=(6, 0))
         self.combined_create_button = ttk.Button(controls, text="Create", command=self.create_combined_dataset)
         self.combined_create_button.pack(side=tk.LEFT)
+        self.mapping_create_button = ttk.Button(controls, text="Create Mapping", command=self.create_mapping_csv)
+        self.mapping_create_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.mapping_open_button = ttk.Button(controls, text="Open Mapping", command=self.open_mapping_csv, state="disabled")
+        self.mapping_open_button.pack(side=tk.LEFT)
+        self._update_mapping_buttons()
         self.combined_save_button = ttk.Button(controls, text="Save CSV", command=self.save_combined_to_csv, state="disabled")
         self.combined_save_button.pack(side=tk.LEFT, padx=(6, 0))
 
@@ -113,7 +136,8 @@ class CombinedUIMixin:
                 fin_mult_row = df[(df["CATEGORY"].str.lower() == "financial multiplier")]
                 inc_mult_row = df[(df["CATEGORY"].str.lower() == "income multiplier")]
                
-                num_cols = [c for c in df.columns if c not in ["TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "Ticker"]]
+                excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
+                num_cols = [c for c in df.columns if c not in excluded_cols]
 
                 def extract_mult(row_df):
                     if row_df.empty:
@@ -537,7 +561,16 @@ class CombinedUIMixin:
         tv.configure(columns=col_ids, displaycolumns=col_ids, show="headings")
         for idx, cid in enumerate(col_ids):
             name = columns[idx]
-            anchor = tk.W if name.lower() in {"category", "subcategory", "item", "note"} else tk.E
+            text_columns = {
+                "category",
+                "subcategory",
+                "item",
+                "note",
+                "category_m",
+                "subcategory_m",
+                "item_m",
+            }
+            anchor = tk.W if name.lower() in text_columns else tk.E
             tv.heading(cid, text=name)
             width = self.get_scrape_column_width(name)
             tv.column(cid, width=width, anchor=anchor, stretch=True)
@@ -572,6 +605,236 @@ class CombinedUIMixin:
         except Exception as exc:
             messagebox.showerror("Save Combined", f"Failed to save combined CSV: {exc}")
 
+    def _combined_dynamic_column_offset(self) -> int:
+        return len(COMBINED_BASE_COLUMNS)
+
+    def _get_mapping_path(self, company_name: str) -> Path:
+        return (self.companies_dir / company_name / "mapping.csv").resolve()
+
+    def _load_mapping_lookup(
+        self, company_name: str
+    ) -> Dict[Tuple[str, str, str, str], Dict[str, str]]:
+        result: Dict[Tuple[str, str, str, str], Dict[str, str]] = {}
+        if not company_name:
+            return result
+        path = self._get_mapping_path(company_name)
+        if not path.exists():
+            return result
+        try:
+            with path.open("r", encoding="utf-8", newline="") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    typ = str(row.get("TYPE", "")).strip()
+                    category = str(row.get("CATEGORY", "")).strip()
+                    subcategory = str(row.get("SUBCATEGORY", "")).strip()
+                    item = str(row.get("ITEM", "")).strip()
+                    key = (typ, category, subcategory, item)
+                    result[key] = {
+                        "CATEGORY_M": str(row.get("CATEGORY_M", "")).strip(),
+                        "SUBCATEGORY_M": str(row.get("SUBCATEGORY_M", "")).strip(),
+                        "ITEM_M": str(row.get("ITEM_M", "")).strip(),
+                    }
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger = getattr(self, "logger", None)
+            if logger is not None:
+                logger.error("Failed to load mapping.csv for %s: %s", company_name, exc)
+        return result
+
+    def _update_mapping_buttons(self) -> None:
+        button = getattr(self, "mapping_open_button", None)
+        if button is None:
+            return
+        company_name = self.company_var.get().strip()
+        path: Optional[Path] = None
+        if company_name:
+            try:
+                path = self._get_mapping_path(company_name)
+            except Exception:
+                path = None
+        exists = bool(path and path.exists())
+        try:
+            button.configure(state="normal" if exists else "disabled")
+        except Exception:
+            pass
+
+    def open_mapping_csv(self) -> None:
+        company_name = self.company_var.get().strip()
+        if not company_name:
+            messagebox.showinfo("Mapping CSV", "Select a company before opening mapping.csv.")
+            return
+        path = self._get_mapping_path(company_name)
+        if not path.exists():
+            messagebox.showinfo(
+                "Mapping CSV",
+                f"No mapping.csv found for {company_name}.\n\nExpected at:\n{path}",
+            )
+            self._update_mapping_buttons()
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(path)], check=False)
+            else:
+                subprocess.run(["xdg-open", str(path)], check=False)
+        except Exception as exc:
+            messagebox.showerror("Mapping CSV", f"Failed to open mapping.csv: {exc}")
+
+    def create_mapping_csv(self) -> None:
+        company_name = self.company_var.get().strip()
+        if not company_name:
+            messagebox.showinfo("Mapping CSV", "Select a company before creating mapping.csv.")
+            return
+        if not self.combined_columns or not self.combined_rows:
+            messagebox.showinfo(
+                "Mapping CSV",
+                "Create the combined dataset first before generating mapping.csv.",
+            )
+            return
+
+        required_cols = ["TYPE", "CATEGORY", "SUBCATEGORY", "ITEM"]
+        missing_cols = [col for col in required_cols if col not in self.combined_columns]
+        if missing_cols:
+            messagebox.showerror(
+                "Mapping CSV",
+                f"Combined table is missing required columns: {', '.join(missing_cols)}",
+            )
+            return
+
+        col_index = {col: self.combined_columns.index(col) for col in required_cols}
+        seen: Set[Tuple[str, str, str, str]] = set()
+        export_rows: List[List[str]] = []
+        for row in self.combined_rows:
+            try:
+                values = {
+                    col: str(row[col_index[col]]).strip() if col_index[col] < len(row) else ""
+                    for col in required_cols
+                }
+            except Exception:
+                continue
+            typ = values["TYPE"]
+            if typ not in COLUMNS:
+                continue
+            category = values["CATEGORY"]
+            subcategory = values["SUBCATEGORY"]
+            item = values["ITEM"]
+            key = (typ, category, subcategory, item)
+            if key in seen:
+                continue
+            seen.add(key)
+            export_rows.append([typ, category, subcategory, item])
+
+        if not export_rows:
+            messagebox.showinfo(
+                "Mapping CSV",
+                "No eligible rows were found to generate mapping.csv.",
+            )
+            return
+
+        export_rows.sort()
+
+        prompt_root = getattr(self, "app_root", Path(__file__).resolve().parent)
+        prompt_path = prompt_root / "mapping_prompt.txt"
+        if not prompt_path.exists():
+            messagebox.showerror(
+                "Mapping CSV",
+                f"Prompt file not found at {prompt_path}.",
+            )
+            return
+        prompt_text = prompt_path.read_text(encoding="utf-8").strip()
+        if not prompt_text:
+            messagebox.showerror("Mapping CSV", "mapping_prompt.txt is empty.")
+            return
+
+        api_key = self.api_key_var.get().strip()
+        if not api_key:
+            messagebox.showinfo("Mapping CSV", "Enter an OpenAI API key before creating mapping.csv.")
+            return
+
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            messagebox.showerror(
+                "Mapping CSV",
+                "The 'openai' package is not installed. Install it to generate mapping.csv.",
+            )
+            return
+
+        csv_buffer = io.StringIO()
+        writer = csv.writer(csv_buffer, quoting=csv.QUOTE_ALL)
+        writer.writerow(required_cols)
+        writer.writerows(export_rows)
+        payload = csv_buffer.getvalue()
+
+        tmp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".csv", delete=False, encoding="utf-8", newline=""
+            ) as tmp_file:
+                tmp_file.write(payload)
+                tmp_path = Path(tmp_file.name)
+
+            client = OpenAI(api_key=api_key)
+            with tmp_path.open("rb") as fh:
+                uploaded = client.files.create(file=fh, purpose="assistants")
+            file_id = getattr(uploaded, "id", "")
+            if not file_id:
+                raise RuntimeError("Failed to upload CSV to OpenAI")
+
+            user_entries = [
+                {"type": "input_text", "text": prompt_text},
+                {"type": "input_file", "file_id": file_id},
+            ]
+            response = client.responses.create(
+                model=DEFAULT_OPENAI_MODEL,
+                input=[
+                    {
+                        "role": "system",
+                        "content": "You are a financial statement mapping assistant.",
+                    },
+                    {"role": "user", "content": user_entries},
+                ],
+            )
+            raw_response = self._extract_openai_response_text(response)
+            cleaned = self._strip_code_fence(raw_response).strip()
+            if not cleaned:
+                raise RuntimeError("OpenAI returned an empty response")
+
+            reader = csv.DictReader(io.StringIO(cleaned))
+            expected = required_cols + ["CATEGORY_M", "SUBCATEGORY_M", "ITEM_M"]
+            fieldnames = reader.fieldnames or []
+            missing = [col for col in expected if col not in fieldnames]
+            if missing:
+                raise RuntimeError(
+                    f"OpenAI response is missing expected columns: {', '.join(missing)}"
+                )
+
+            mapping_path = self._get_mapping_path(company_name)
+            mapping_path.parent.mkdir(parents=True, exist_ok=True)
+            mapping_path.write_text(cleaned, encoding="utf-8")
+
+            messagebox.showinfo(
+                "Mapping CSV",
+                f"mapping.csv created successfully at:\n{mapping_path}",
+            )
+            self._update_mapping_buttons()
+            try:
+                self.create_combined_dataset()
+            except Exception as exc:  # pragma: no cover - refresh best effort
+                logger = getattr(self, "logger", None)
+                if logger is not None:
+                    logger.warning("Failed to refresh combined dataset after mapping.csv: %s", exc)
+        except Exception as exc:
+            logger = getattr(self, "logger", None)
+            if logger is not None:
+                logger.error("Failed to create mapping.csv: %s", exc)
+            messagebox.showerror("Mapping CSV", f"Failed to create mapping.csv: {exc}")
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
     def _on_combined_header_right_click(self, event: tk.Event) -> None:  # type: ignore[override]
         try:
             tv: ttk.Treeview = event.widget  # type: ignore[assignment]
@@ -605,7 +868,8 @@ class CombinedUIMixin:
             if idx < len(all_cols_ids):
                 tv.heading(all_cols_ids[idx], text=new_name)
             if self.combined_table is not None and self.combined_columns:
-                c_idx = 4 + dyn_idx
+                base_offset = self._combined_dynamic_column_offset()
+                c_idx = base_offset + dyn_idx
                 if 0 <= c_idx < len(self.combined_columns):
                     self.combined_columns[c_idx] = new_name
                     if self.combined_table_col_ids and c_idx < len(self.combined_table_col_ids):
@@ -629,13 +893,18 @@ class CombinedUIMixin:
                     tv.heading(self.combined_table_col_ids[idx], text=new_name)
                 except Exception:
                     pass
-            dyn_idx = idx - 4
+            dyn_idx = idx - self._combined_dynamic_column_offset()
             if 0 <= dyn_idx < len(self.combined_rename_names):
                 self.combined_rename_names[dyn_idx] = new_name
 
     def create_combined_dataset(self) -> None:
         dyn_cols, rows_by_type, warnings = self._build_date_matrix_data()
         self.combined_dyn_columns = dyn_cols
+
+        company_name = self.company_var.get().strip()
+        mapping_lookup: Dict[Tuple[str, str, str, str], Dict[str, str]] = {}
+        if company_name:
+            mapping_lookup = self._load_mapping_lookup(company_name)
 
         conflicts = []
         key_data: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
@@ -651,9 +920,9 @@ class CombinedUIMixin:
                     if len(padded) < len(normalized_header):
                         padded.extend([""] * (len(normalized_header) - len(padded)))
                     mapping = dict(zip(normalized_header, padded))
-                    category = mapping.get("CATEGORY", "")
-                    subcategory = mapping.get("SUBCATEGORY", "")
-                    item = mapping.get("ITEM", "")
+                    category = str(mapping.get("CATEGORY", "")).strip()
+                    subcategory = str(mapping.get("SUBCATEGORY", "")).strip()
+                    item = str(mapping.get("ITEM", "")).strip()
                     note_val = mapping.get("NOTE", "")
                     # Include typ in key for downstream TYPE assignment
                     key = (category, subcategory, item, typ)
@@ -762,10 +1031,11 @@ class CombinedUIMixin:
             return
 
         # Add TYPE as first column
-        columns = ["TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"] + self.combined_rename_names
+        columns = COMBINED_BASE_COLUMNS + self.combined_rename_names
 
         # PDF source and multiplier rows are considered Meta
-        pdf_summary = ["PDF source", "", "", ""] + [dc.get("pdf", "") for dc in dyn_cols]
+        pdf_summary_values = [dc.get("pdf", "") for dc in dyn_cols]
+        pdf_summary = ["Meta", "PDF source", "", "", "excluded", "", "", ""] + pdf_summary_values
 
         # === Collect multiplier values for each type (Financial, Income, Shares) ===
         multipliers: Dict[str, Dict[str, str]] = {}
@@ -789,22 +1059,19 @@ class CombinedUIMixin:
         multiplier_rows = []
         for typ in ("Financial", "Income", "Shares"):
             # Mark NOTE column as 'meta' for metadata rows
-            row = [f"{typ}", f"{typ} Multiplier", "", "", "excluded"]
+            row = [f"{typ}", f"{typ} Multiplier", "", "", "excluded", "", "", ""]
             for dc in dyn_cols:
                 pdf = dc.get("pdf", "")
                 val = multipliers.get(pdf, {}).get(typ, "")
                 row.append(val)
             multiplier_rows.append(row)
 
-        # Mark PDF source row as meta and add TYPE column = Meta
-        pdf_summary = ["Meta", "PDF source", "", "", "excluded"] + pdf_summary[4:]
-
         # Append Share Multiplier row to pdf_summary
+        share_row: List[str] = ["Meta", "Stock Multiplier", "", "", "excluded", "", "", ""] + ["" for _ in dyn_cols]
         try:
             import csv
             from pathlib import Path
 
-            company_name = self.company_var.get().strip()
             stock_path = self.companies_dir / company_name / "stock_multipliers.csv"
 
             # Ensure stock_multipliers.csv exists
@@ -830,7 +1097,7 @@ class CombinedUIMixin:
                         stock_data[row[0].strip()] = row[1].strip()
 
             # Build Stock Multiplier row aligned by date columns
-            share_row = ["Meta", "Stock Multiplier", "", "", "excluded"]
+            share_row = ["Meta", "Stock Multiplier", "", "", "excluded", "", "", ""]
             for dc in dyn_cols:
                 date_label = dc.get("default_name", "").strip()
                 val = stock_data.get(date_label, "1")
@@ -871,12 +1138,18 @@ class CombinedUIMixin:
 
             # Use the typ from the key directly as TYPE
             assigned_type = typ if typ in COLUMNS else "Meta"
-            rows_out.append([assigned_type, cat, sub, item, note_val] + values_for_row)
+            mapping_key = (assigned_type, cat, sub, item)
+            mapped_values = mapping_lookup.get(mapping_key, {})
+            cat_m = mapped_values.get("CATEGORY_M", "")
+            sub_m = mapped_values.get("SUBCATEGORY_M", "")
+            item_m = mapped_values.get("ITEM_M", "")
+            rows_out.append([assigned_type, cat, sub, item, note_val, cat_m, sub_m, item_m] + values_for_row)
 
         final_rows = [pdf_summary] + multiplier_rows + [share_row] + rows_out
         self._populate_combined_table(columns, final_rows)
         self.combined_columns = columns
         self.combined_rows = final_rows
+        self._update_mapping_buttons()
         if self.combined_save_button is not None:
             self.combined_save_button.configure(state="normal")
         messagebox.showinfo("Combined", f"Combined dataset created with {len(final_rows)} rows and {len(columns)} columns.")
@@ -948,6 +1221,7 @@ class CombinedUIMixin:
             self.combined_rows = rows
 
             self._populate_combined_table(columns, rows)
+            self._update_mapping_buttons()
 
             if self.combined_save_button is not None:
                 self.combined_save_button.configure(state="normal")

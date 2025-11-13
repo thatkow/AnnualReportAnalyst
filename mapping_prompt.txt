@@ -1,0 +1,36 @@
+You will be given a CSV with columns TYPE, CATEGORY, SUBCATEGORY, ITEM.
+
+Your task: create 3 new columns:
+- CATEGORY_M  (“mapped category”)
+- SUBCATEGORY_M (“mapped subcategory”)
+- ITEM_M (“mapped item”)
+
+General rules for all mappings:
+
+1. Compare and map values only within the same TYPE group.
+   - CATEGORY_M is determined by comparing CATEGORY values within the same TYPE.
+   - SUBCATEGORY_M is determined by comparing SUBCATEGORY values within the same (TYPE + CATEGORY_M) group.
+   - ITEM_M is determined by comparing ITEM values within the same (TYPE + CATEGORY_M + SUBCATEGORY_M) group.
+
+2. Identify when two values refer to the same concept (e.g., capitalization differences, plural vs singular, reordered words, punctuation differences, parenthesis permutations).
+   - Treat capitalization differences as equivalent (e.g. “FINANCE AND FINANCIAL PRODUCTS” == “Finance and Financial Products”).
+   - Treat plural/singular as equivalent.
+   - Treat reordered words as equivalent.
+   - Treat punctuation variants as equivalent (hyphens, commas, slashes, parentheses permutations).
+   - Ignore cosmetic phrases such as:
+       “FOR THE YEAR”, “NET OF TAX”, “ATTRIBUTABLE TO …”, “UNDER … CONTRACTS”, etc.
+   - For ITEM only: treat (LOSS)/PROFIT vs PROFIT/(LOSS) as equivalent.
+
+3. For each group, if multiple values map to the same underlying meaning, assign the same canonical mapping.
+   - Choose the cleanest, shortest existing text in the group as the canonical value.
+   - If a value has no equivalences within its group, leave the mapping blank (inherit original).
+
+4. Future CSVs may contain quoted fields (e.g. "PROPERTY, PLANT AND EQUIPMENT"). Treat quoted strings normally.
+
+5. Output the same CSV but with the three new appended columns:
+   CATEGORY_M, SUBCATEGORY_M, ITEM_M
+
+6. All text fields in the output must be wrapped in double quotes.
+   No other formatting changes.
+
+Return only the final CSV, with the new 3 mapping columns added.
