@@ -66,7 +66,7 @@ class CombinedUIMixin:
         if not values or len(values) < 6:
             return
 
-        type_value = str(values[3]).strip()
+        type_value = str(values[0]).strip()
         pdf_name = str(values[5]).strip()
         if not type_value or not pdf_name:
             return
@@ -1122,7 +1122,10 @@ class CombinedUIMixin:
 
             ttk.Label(
                 viewer,
-                text="Conflicting NOTE values detected while combining datasets.",
+                text=(
+                    "Conflicting NOTE values detected while combining datasets.\n"
+                    "TYPE column is included to show which statement the conflict belongs to."
+                ),
                 font=("Segoe UI", 11, "bold")
             ).pack(pady=6)
 
@@ -1135,18 +1138,19 @@ class CombinedUIMixin:
 
                 cat, sub, item, typ = key
                 tab = ttk.Frame(nb)
-                nb.add(tab, text=f"{cat[:12]} | {sub[:12]} | {typ}")
+                nb.add(tab, text=f"{typ} | {cat[:12]} | {sub[:12]}")
 
                 tree = ttk.Treeview(
                     tab,
-                    columns=("Category", "Subcategory", "Item", "Type", "Note", "PDF File"),
+                    columns=("TYPE", "Category", "Subcategory", "Item", "Note", "PDF File"),
                     show="headings",
                     height=10
                 )
 
-                for col in ("Category", "Subcategory", "Item", "Type", "Note", "PDF File"):
+                # Columns reordered to put TYPE first
+                for col in ("TYPE", "Category", "Subcategory", "Item", "Note", "PDF File"):
                     tree.heading(col, text=col)
-                    tree.column(col, width=140, anchor="center")
+                    tree.column(col, width=150 if col == "TYPE" else 140, anchor="center")
 
                 # Collect matching rows directly from source CSVs
                 for entry in self.pdf_entries:
@@ -1170,12 +1174,12 @@ class CombinedUIMixin:
                                         "",
                                         tk.END,
                                         values=(
-                                            row.get("CATEGORY", ""),
-                                            row.get("SUBCATEGORY", ""),
-                                            row.get("ITEM", ""),
-                                            row.get("TYPE", ""),
-                                            row.get("NOTE", ""),
-                                            entry.path.name,
+                                            row.get("TYPE", typ),          # TYPE
+                                            row.get("CATEGORY", ""),       # Category
+                                            row.get("SUBCATEGORY", ""),    # Subcategory
+                                            row.get("ITEM", ""),           # Item
+                                            row.get("NOTE", ""),           # Note
+                                            entry.path.name,               # PDF
                                         ),
                                     )
                     except Exception as e:
