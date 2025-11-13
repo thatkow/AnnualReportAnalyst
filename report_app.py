@@ -157,8 +157,7 @@ class ReportAppV2(
             self.thread_count = self.get_thread_count()
             self.logger.info("🔁 Loaded AIScrape thread count = %d", self.thread_count)
         except Exception as e:
-            import logging
-            logging.warning("⚠️ Could not load AIScrape thread count from config: %s", e)
+            self.logger.warning("⚠️ Could not load AIScrape thread count from config: %s", e)
             self.thread_count = 3
             self.set_thread_count(self.thread_count)
             self.logger.info("🆕 Initialized AIScrape thread count = %d (default)", self.thread_count)
