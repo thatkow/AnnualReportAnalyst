@@ -845,3 +845,56 @@ class ScrapeResultPanel:
     def update_note_coloring(self) -> None:
         for item_id in self.table.get_children(""):
             self._apply_note_color_to_item(item_id)
+
+    # ============================================================
+    # NEW: Visually flash a row (CATEGORY, SUBCATEGORY, ITEM)
+    # ============================================================
+    def flash_row(self, category: str, subcategory: str, item: str) -> None:
+        """
+        Flash-highlight the row matching (category, subcategory, item).
+        """
+        try:
+            target_key = (category, subcategory, item)
+
+            # Locate matching item_id
+            target_id = None
+            for row_id, key in self.row_keys.items():
+                if key == target_key:
+                    target_id = row_id
+                    break
+
+            if not target_id:
+                print(f"⚠️ flash_row: No row found for {target_key}")
+                return
+
+            tv = self.table
+
+            # Apply selection so scrolling and focus work properly
+            try:
+                tv.selection_set(target_id)
+                tv.focus(target_id)
+                tv.see(target_id)
+            except Exception:
+                pass
+
+            # Flash color tag
+            flash_tag = "flash-highlight"
+            try:
+                tv.tag_configure(flash_tag, background="#fff3a3")  # pale yellow
+            except Exception:
+                pass
+
+            # Add tag
+            tv.item(target_id, tags=(flash_tag,))
+
+            # Remove after delay
+            def _remove_flash():
+                try:
+                    tv.item(target_id, tags=())
+                except Exception:
+                    pass
+
+            tv.after(600, _remove_flash)
+        except Exception as exc:
+            print(f"⚠️ flash_row failed: {exc}")
+

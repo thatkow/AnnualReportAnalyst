@@ -68,6 +68,12 @@ class CombinedUIMixin:
 
         type_value = str(values[0]).strip()
         pdf_name = str(values[5]).strip()
+        # Row identity for flashing
+        category   = str(values[1]).strip()
+        subcat     = str(values[2]).strip()
+        item       = str(values[3]).strip()
+        # TYPE is in type_value
+
         if not type_value or not pdf_name:
             return
 
@@ -91,6 +97,28 @@ class CombinedUIMixin:
                 self.set_active_scrape_panel(entry, type_value)
             except Exception as exc:
                 print(f"⚠️ Unable to focus Scrape panel for {type_value}/{pdf_name}: {exc}")
+
+            # === NEW: flash the specific row in the active scrape panel ===
+            try:
+                active_key = getattr(self, "active_scrape_key", None)
+                if active_key:
+                    # Find the corresponding panel object
+                    target_panel = None
+                    for panel in self.scrape_panels.values():
+                        p_entry = getattr(panel, "entry", None)
+                        if p_entry and (p_entry.path, panel.category) == active_key:
+                            target_panel = panel
+                            break
+
+                    # Flash-highlight the matching row
+                    if target_panel and hasattr(target_panel, "flash_row"):
+                        target_panel.flash_row(category, subcat, item)
+                    else:
+                        print(f"⚠️ flash_row: No panel found for {active_key}")
+                else:
+                    print("⚠️ flash_row: No active scrape key")
+            except Exception as exc:
+                print(f"⚠️ flash_row failed for row ({category}, {subcat}, {item}): {exc}")
 
         try:
             self.root.after(0, _focus_scrape_panel)
