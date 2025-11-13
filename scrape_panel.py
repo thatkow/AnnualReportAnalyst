@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import csv
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -187,6 +188,26 @@ class ScrapeResultPanel:
             command=self.delete_csv,
         )
         self.delete_csv_button.pack(side=tk.LEFT, padx=(6, 0))
+
+        # === NEW: Browse PDF Folder button ===
+        def _browse_pdf_folder():
+            try:
+                # Same base as Delete CSV, but inside subfolder PDF_FOLDER
+                pdf_folder = self.target_dir / "PDF_FOLDER"
+
+                if not pdf_folder.exists():
+                    messagebox.showwarning(
+                        "Browse PDF Folder",
+                        f"PDF_FOLDER not found:\n{pdf_folder}"
+                    )
+                    return
+
+                os.startfile(pdf_folder)
+            except Exception as e:
+                messagebox.showerror("Browse PDF Folder", f"Failed to open directory:\n{e}")
+
+        self.browse_pdf_button = ttk.Button(actions_row, text="Browse PDF", command=_browse_pdf_folder)
+        self.browse_pdf_button.pack(side=tk.LEFT, padx=(6, 0))
 
         table_container = ttk.Frame(self.frame)
         
