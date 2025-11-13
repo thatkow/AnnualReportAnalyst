@@ -777,7 +777,7 @@ class CombinedUIMixin:
         try:
             client = OpenAI(api_key=api_key)
             response = client.responses.create(
-                model=DEFAULT_OPENAI_MODEL,
+                model="gpt-5",
                 input=[
                     {
                         "role": "system",
