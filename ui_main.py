@@ -53,15 +53,13 @@ class MainUIMixin:
                 if isinstance(result, bool) and result and folder_valid:
                     self.load_pdfs()
                     # Update Combined tab when company is set manually
-                    if hasattr(self, "load_company_combined_csv"):
-                        self.load_company_combined_csv(after_company)
-                        print(f"📂 Loaded Combined.csv for company: {after_company}")
+                    self.load_company_combined_csv(after_company)
+                    print(f"📂 Loaded Combined.csv for company: {after_company}")
                 elif company_changed and folder_valid:
                     # Some selectors don't return a bool but still update vars
                     self.load_pdfs()
-                    if hasattr(self, "load_company_combined_csv"):
-                        self.load_company_combined_csv(after_company)
-                        print(f"📂 Loaded Combined.csv for company: {after_company}")
+                    self.load_company_combined_csv(after_company)
+                    print(f"📂 Loaded Combined.csv for company: {after_company}")
 
             except Exception as e:
                 messagebox.showerror("Error", f"Error during company selection:\n{e}")
@@ -114,8 +112,7 @@ class MainUIMixin:
                     val = int(var.get())
                     self.set_scrape_row_height(val)
                     for panel in self.scrape_panels.values():
-                        if hasattr(panel, "set_row_height"):
-                            panel.set_row_height(val)
+                        panel.set_row_height(val)
                     messagebox.showinfo(
                         "Row Height Updated",
                         f"Scrape row height set to {val}px and applied to all tables.",
@@ -152,11 +149,10 @@ class MainUIMixin:
             ).pack(pady=(15, 5))
 
             current_val = 3
-            if hasattr(self, "get_thread_count"):
-                try:
-                    current_val = self.get_thread_count()
-                except Exception:
-                    pass
+            try:
+                current_val = self.get_thread_count()
+            except Exception:
+                pass
 
             var = tk.StringVar(value=str(current_val))
             entry = tk.Entry(dialog, textvariable=var, justify="center", font=("Consolas", 11))
@@ -167,8 +163,7 @@ class MainUIMixin:
                     val = int(var.get())
                     if val <= 0:
                         raise ValueError
-                    if hasattr(self, "set_thread_count"):
-                        self.set_thread_count(val)
+                    self.set_thread_count(val)
                     messagebox.showinfo("AIScrape Threads", f"Saved thread count = {val}")
                     dialog.destroy()
                 except ValueError:
@@ -191,12 +186,9 @@ class MainUIMixin:
         self.notebook.pack(fill=tk.BOTH, expand=True)
         self.notebook.bind("<<NotebookTabChanged>>", self._on_main_tab_changed)
 
-        if hasattr(self, "build_review_tab"):
-            self.build_review_tab(self.notebook)
-        if hasattr(self, "build_scrape_tab"):
-            self.build_scrape_tab(self.notebook)
-        if hasattr(self, "build_combined_tab"):
-            self.build_combined_tab(self.notebook)
+        self.build_review_tab(self.notebook)
+        self.build_scrape_tab(self.notebook)
+        self.build_combined_tab(self.notebook)
 
     def _on_main_tab_changed(self, event: tk.Event) -> None:  # type: ignore[override]
         try:
@@ -401,7 +393,7 @@ class MainUIMixin:
         # After auto-load, update Combined tab
         try:
             company_name = self.company_var.get().strip()
-            if hasattr(self, "load_company_combined_csv") and company_name:
+            if company_name:
                 print(f"🔄 Auto-loading Combined.csv for last company: {company_name}")
                 self.load_company_combined_csv(company_name)
         except Exception as e:

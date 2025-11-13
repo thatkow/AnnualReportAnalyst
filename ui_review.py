@@ -446,11 +446,10 @@ class ReviewUIMixin:
         if abs(width - self.scrape_preview_last_width) <= 2:
             return
         self.scrape_preview_last_width = width
-        if hasattr(self, "scrape_preview_canvas") and hasattr(self, "scrape_preview_window"):
-            try:
-                self.scrape_preview_canvas.itemconfigure(self.scrape_preview_window, width=width)
-            except Exception:
-                pass
+        try:
+            self.scrape_preview_canvas.itemconfigure(self.scrape_preview_window, width=width)
+        except Exception:
+            pass
         if self.scrape_preview_pages:
             self._display_scrape_preview_page(force=True)
 
@@ -474,9 +473,6 @@ class ReviewUIMixin:
         try:
             idx = int(event.char) - 1
         except (ValueError, TypeError):
-            return
-
-        if not hasattr(self, "scrape_preview_pages"):
             return
 
         pages = self.scrape_preview_pages

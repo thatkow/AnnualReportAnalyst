@@ -75,7 +75,7 @@ class ScrapeResultPanel:
         # === Reload multiplier.txt when input box clicked ===
         def _reload_multiplier_from_file(event=None):
             try:
-                if not hasattr(self, "csv_path") or not self.csv_path.exists():
+                if not self.csv_path.exists():
                     messagebox.showwarning("Reload Multiplier", "No base CSV file found.")
                     return
 
@@ -612,8 +612,7 @@ class ScrapeResultPanel:
             self._is_propagating = True
             try:
                 # Just update logical state, no config reload
-                if hasattr(self.app, "scrape_row_state_by_key"):
-                    self.app.scrape_row_state_by_key[key] = normalized
+                self.app.scrape_row_state_by_key[key] = normalized
 
                 for panel in self.app.scrape_panels.values():
                     # Skip this panel (already updated)
@@ -706,8 +705,7 @@ class ScrapeResultPanel:
     def _update_action_states(self) -> None:
         has_csv = self.csv_path.exists()
         self.open_csv_button.configure(state="normal" if has_csv else "disabled")
-        if hasattr(self, "delete_csv_button"):
-            self.delete_csv_button.configure(state="normal" if has_csv or self.has_csv_data else "disabled")
+        self.delete_csv_button.configure(state="normal" if has_csv or self.has_csv_data else "disabled")
         has_raw = self.raw_path.exists()
         self.view_raw_button.configure(state="normal" if has_raw else "disabled")
 

@@ -46,11 +46,10 @@ class ReportAppV2(
             raise RuntimeError("PyMuPDF (fitz) is not installed")
 
         self.root = root
-        if hasattr(self.root, "title"):
-            try:
-                self.root.title("Annual Report Analyst (Preview)")
-            except tk.TclError:
-                pass
+        try:
+            self.root.title("Annual Report Analyst (Preview)")
+        except tk.TclError:
+            pass
         self.root.after(0, self._maximize_window)
 
         self.app_root = Path(__file__).resolve().parent
@@ -170,9 +169,6 @@ class ReportAppV2(
 
     def _apply_config_state(self) -> None:
         """Populate runtime state from the shared configuration object."""
-
-        if not hasattr(self, "config"):
-            return
 
         self.scrape_row_height = int(getattr(self.config, "scrape_row_height", 22))
         self.scrape_column_widths = dict(getattr(self.config, "scrape_column_widths", {})) or {
@@ -361,8 +357,7 @@ class ReportAppV2(
 
         value = getattr(self.config, "thread_count", default)
         if isinstance(value, int) and value > 0:
-            if hasattr(self, "logger"):
-                self.logger.info("🔁 Restored thread count = %d from config", value)
+            self.logger.info("🔁 Restored thread count = %d from config", value)
             return value
         return default
 
@@ -378,11 +373,9 @@ class ReportAppV2(
         self.config.thread_count = count
         try:
             self.config.save()
-            if hasattr(self, "logger"):
-                self.logger.info("💾 Saved thread count = %d to config", count)
+            self.logger.info("💾 Saved thread count = %d to config", count)
         except OSError as exc:
-            if hasattr(self, "logger"):
-                self.logger.warning("⚠️ Could not save thread count: %s", exc)
+            self.logger.warning("⚠️ Could not save thread count: %s", exc)
 
     def _persist_api_key(self, value: str) -> None:
         trimmed = value.strip()

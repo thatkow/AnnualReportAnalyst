@@ -270,12 +270,11 @@ class ScrapeManagerMixin:
             if combined:
                 return combined
 
-        if hasattr(response, "choices"):
-            for choice in getattr(response, "choices", []):
-                message = getattr(choice, "message", None)
-                content = getattr(message, "content", None)
-                if isinstance(content, str) and content.strip():
-                    return content.strip()
+        for choice in getattr(response, "choices", []):
+            message = getattr(choice, "message", None)
+            content = getattr(message, "content", None)
+            if isinstance(content, str) and content.strip():
+                return content.strip()
 
         raise ValueError("OpenAI response did not contain any text output")
 
@@ -299,8 +298,7 @@ class ScrapeManagerMixin:
         api_key = self.api_key_var.get().strip()
         if not api_key:
             messagebox.showwarning("AIScrape", "Enter an OpenAI API key before running AIScrape.")
-            if hasattr(self, "api_key_entry"):
-                self.api_key_entry.focus_set()
+            self.api_key_entry.focus_set()
             return
         self._persist_api_key(api_key)
 

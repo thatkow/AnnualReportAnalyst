@@ -100,7 +100,7 @@ class CombinedUIMixin:
 
         def _on_plot_stacked_visuals():
             try:
-                if not hasattr(self, "combined_rows") or not self.combined_rows:
+                if not self.combined_rows:
                     messagebox.showwarning("No Data", "No combined data loaded or generated.")
                     return
 
@@ -127,7 +127,7 @@ class CombinedUIMixin:
                 inc_mult = extract_mult(inc_mult_row)
 
                 # Determine company/ticker name
-                company_name = self.company_var.get().strip() if hasattr(self, "company_var") else "UNKNOWN"
+                company_name = self.company_var.get().strip()
                 df["Ticker"] = company_name
 
                 # Remove NOTE=exclude
@@ -157,8 +157,7 @@ class CombinedUIMixin:
                     df.loc[(df["TYPE"].str.lower() == "financial") & (df["ITEM"].str.lower() != "financial multiplier"), c] *= fin_mult.get(c, 1.0)
                     df.loc[(df["TYPE"].str.lower() == "income") & (df["ITEM"].str.lower() != "income multiplier"), c] *= inc_mult.get(c, 1.0)
 
-                if hasattr(self, "logger") and self.logger:
-                    self.logger.info("✅ Applied share, stock, and type multipliers before plotting.")
+                self.logger.info("✅ Applied share, stock, and type multipliers before plotting.")
 
                 # === Inject Ticker column using company_name ===
                 df["Ticker"] = company_name
@@ -805,14 +804,13 @@ class CombinedUIMixin:
             import csv
             from pathlib import Path
 
-            company_name = self.company_var.get().strip() if hasattr(self, "company_var") else ""
+            company_name = self.company_var.get().strip()
             stock_path = self.companies_dir / company_name / "stock_multipliers.csv"
 
             # Ensure stock_multipliers.csv exists
             if not stock_path.exists():
                 msg = f"The required file 'stock_multipliers.csv' is missing for {company_name}.\n\nExpected at:\n{stock_path}"
-                if hasattr(self, "logger") and self.logger:
-                    self.logger.error(f"❌ {msg}")
+                self.logger.error(f"❌ {msg}")
                 try:
                     messagebox.showerror(
                         "Missing Stock Multipliers",
@@ -838,14 +836,12 @@ class CombinedUIMixin:
                 val = stock_data.get(date_label, "1")
                 share_row.append(val)
 
-            if hasattr(self, "logger") and self.logger:
-                self.logger.info(f"🧮 Added 'Stock Multiplier' row from {stock_path} ({len(stock_data)} entries)")
+            self.logger.info(f"🧮 Added 'Stock Multiplier' row from {stock_path} ({len(stock_data)} entries)")
 
         except FileNotFoundError:
             raise
         except Exception as e:
-            if hasattr(self, "logger") and self.logger:
-                self.logger.error(f"❌ Failed to append 'Stock Multiplier' row to PDF summary: {e}")
+            self.logger.error(f"❌ Failed to append 'Stock Multiplier' row to PDF summary: {e}")
             raise
 
         def key_sort(k: Tuple[str, str, str]) -> Tuple[str, str, str]:
@@ -951,8 +947,7 @@ class CombinedUIMixin:
             self.combined_columns = columns
             self.combined_rows = rows
 
-            if hasattr(self, "_populate_combined_table"):
-                self._populate_combined_table(columns, rows)
+            self._populate_combined_table(columns, rows)
 
             if self.combined_save_button is not None:
                 self.combined_save_button.configure(state="normal")

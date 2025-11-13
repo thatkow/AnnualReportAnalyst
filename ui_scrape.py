@@ -168,9 +168,6 @@ class ScrapeUIMixin:
 
     def _navigate_scrape_pdf_tab(self, delta: int) -> None:
         """Switch to previous/next PDF filename tab within the active TYPE tab."""
-        if not hasattr(self, "scrape_type_notebook"):
-            raise RuntimeError("scrape_type_notebook not initialized.")
-
         type_nb = self.scrape_type_notebook
         type_tab = type_nb.select()
         if not type_tab:
@@ -191,9 +188,6 @@ class ScrapeUIMixin:
 
     def _navigate_scrape_type_tab(self, delta: int) -> None:
         """Switch to previous/next TYPE tab (Financial, Income, Shares) in Scrape view."""
-        if not hasattr(self, "scrape_type_notebook"):
-            raise RuntimeError("scrape_type_notebook not initialized.")
-
         notebook = self.scrape_type_notebook
         total_tabs = notebook.index("end")
         if total_tabs <= 0:
@@ -204,9 +198,6 @@ class ScrapeUIMixin:
         notebook.select(new_idx)
 
     def _refresh_scrape_results(self) -> None:
-        if not hasattr(self, "scrape_type_notebook"):
-            return
-
         for panel in self.scrape_panels.values():
             panel.destroy()
         self.scrape_panels.clear()
@@ -349,8 +340,6 @@ class ScrapeUIMixin:
         self.refresh_combined_tab()
 
     def _clear_scrape_preview(self) -> None:
-        if not hasattr(self, "scrape_preview_label"):
-            return
         self.scrape_preview_photo = None
         self.scrape_preview_canvas.configure(background="#f0f0f0")
         self.scrape_preview_label.configure(image="", text="Select a section to preview.", background="#f0f0f0")

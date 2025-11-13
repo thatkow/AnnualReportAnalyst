@@ -82,8 +82,7 @@ def reload_stock_multipliers(ui_instance):
         current_company_name=getattr(ui_instance, "current_company_name", None),
     )
     ui_instance.stock_multipliers = mults
-    if hasattr(ui_instance, "_populate_date_matrix_table"):
-        ui_instance._populate_date_matrix_table()
+    ui_instance._populate_date_matrix_table()
     logger = getattr(ui_instance, "logger", None)
     if logger:
         logger.info("🔁 Reloaded stock multipliers into Date Columns view")

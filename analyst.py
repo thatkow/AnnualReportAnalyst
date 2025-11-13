@@ -1340,7 +1340,7 @@ class FinanceDataset:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.URLError as exc:
             raise ValueError(
-                f"Unable to download share price history for {symbol}: {exc.reason if hasattr(exc, 'reason') else exc}"
+                f"Unable to download share price history for {symbol}: {exc.reason}"
             ) from exc
 
         chart = payload.get("chart", {}) if isinstance(payload, dict) else {}
@@ -2467,7 +2467,7 @@ class FinancePlotFrame(ttk.Frame):
         else:
             menu.add_command(label=label, state=tk.DISABLED)
         try:
-            if gui_event is not None and hasattr(gui_event, "x_root") and hasattr(gui_event, "y_root"):
+            if gui_event is not None:
                 menu.tk_popup(gui_event.x_root, gui_event.y_root)
             else:
                 menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
@@ -2687,8 +2687,9 @@ class BarHoverHelper:
         bbox_patch = annotation.get_bbox_patch()
         if bbox_patch is not None:
             bbox_patch.set_zorder(1000)
-        if hasattr(annotation, "arrow_patch") and annotation.arrow_patch is not None:
-            annotation.arrow_patch.set_zorder(1000)
+        arrow_patch = annotation.arrow_patch
+        if arrow_patch is not None:
+            arrow_patch.set_zorder(1000)
         annotation.set_visible(False)
         return annotation
 
@@ -3215,8 +3216,6 @@ class FinanceAnalystApp:
         self._update_period_all_state()
 
     def _update_period_all_state(self) -> None:
-        if not hasattr(self, "period_all_check"):
-            return
         if not self.period_vars:
             self._updating_period_checks = True
             self.period_all_var.set(False)
