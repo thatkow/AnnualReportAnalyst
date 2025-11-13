@@ -5,7 +5,6 @@ import io
 import os
 import subprocess
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -764,27 +763,19 @@ class CombinedUIMixin:
         writer = csv.writer(csv_buffer, quoting=csv.QUOTE_ALL)
         writer.writerow(required_cols)
         writer.writerows(export_rows)
-        payload = csv_buffer.getvalue()
+        payload = csv_buffer.getvalue().strip()
 
-        tmp_path: Optional[Path] = None
+        if not payload:
+            messagebox.showerror(
+                "Mapping CSV",
+                "No data was generated for mapping.csv.",
+            )
+            return
+
+        combined_prompt = f"{prompt_text}\n\n{payload}" if prompt_text else payload
+
         try:
-            with tempfile.NamedTemporaryFile(
-                "w", suffix=".csv", delete=False, encoding="utf-8", newline=""
-            ) as tmp_file:
-                tmp_file.write(payload)
-                tmp_path = Path(tmp_file.name)
-
             client = OpenAI(api_key=api_key)
-            with tmp_path.open("rb") as fh:
-                uploaded = client.files.create(file=fh, purpose="assistants")
-            file_id = getattr(uploaded, "id", "")
-            if not file_id:
-                raise RuntimeError("Failed to upload CSV to OpenAI")
-
-            user_entries = [
-                {"type": "input_text", "text": prompt_text},
-                {"type": "input_file", "file_id": file_id},
-            ]
             response = client.responses.create(
                 model=DEFAULT_OPENAI_MODEL,
                 input=[
@@ -792,7 +783,15 @@ class CombinedUIMixin:
                         "role": "system",
                         "content": "You are a financial statement mapping assistant.",
                     },
-                    {"role": "user", "content": user_entries},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": combined_prompt,
+                            }
+                        ],
+                    },
                 ],
             )
             raw_response = self._extract_openai_response_text(response)
@@ -829,12 +828,6 @@ class CombinedUIMixin:
             if logger is not None:
                 logger.error("Failed to create mapping.csv: %s", exc)
             messagebox.showerror("Mapping CSV", f"Failed to create mapping.csv: {exc}")
-        finally:
-            if tmp_path is not None:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
     def _on_combined_header_right_click(self, event: tk.Event) -> None:  # type: ignore[override]
         try:
             tv: ttk.Treeview = event.widget  # type: ignore[assignment]
