@@ -66,7 +66,9 @@ class ScrapeResultPanel:
         multiplier_box.pack(side=tk.RIGHT)
         ttk.Label(multiplier_box, text="Multiplier:").pack(side=tk.LEFT)
         self.multiplier_var = tk.StringVar(master=self.frame)
-        self.multiplier_entry = ttk.Entry(multiplier_box, textvariable=self.multiplier_var, width=16)
+        # Disable manual typing — controlled via cycle button
+        self.multiplier_entry = ttk.Entry(multiplier_box, textvariable=self.multiplier_var,
+                                          width=16, state="disabled")
         self.multiplier_entry.pack(side=tk.LEFT, padx=(4, 0))
         self.multiplier_entry.bind("<FocusOut>", self._on_multiplier_changed)
         self.multiplier_entry.bind("<Return>", self._on_multiplier_submit)
@@ -97,8 +99,37 @@ class ScrapeResultPanel:
                 import traceback
                 traceback.print_exc()
                 messagebox.showerror("Reload Multiplier", f"Failed to reload multiplier:\n{e}")
-
         self.multiplier_entry.bind("<Button-1>", _reload_multiplier_from_file, add="+")
+
+        # === Multiplier cycle button ===
+        def _cycle_multiplier():
+            cycle_values = ["1", "1000", "1000000", "1000000000"]
+            current = self.multiplier_var.get().strip()
+            try:
+                idx = cycle_values.index(current)
+                new_value = cycle_values[(idx + 1) % len(cycle_values)]
+            except ValueError:
+                # If invalid, reset to 1
+                new_value = cycle_values[0]
+
+            # Update display (entry is disabled so use .set)
+            self._updating_multiplier = True
+            self.multiplier_var.set(new_value)
+            self._updating_multiplier = False
+
+            # Persist to file
+            try:
+                self.save_multiplier()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                messagebox.showerror(
+                    "Multiplier",
+                    f"Failed to save multiplier:\n{e}"
+                )
+
+        cycle_btn = ttk.Button(multiplier_box, text="Cycle", command=_cycle_multiplier)
+        cycle_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         # === Button to open the related _multiplier.txt file ===
         def _open_multiplier_txt():
