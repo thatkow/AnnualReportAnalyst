@@ -323,6 +323,19 @@ class CombinedUIMixin:
                 else:
                     print("⚠️ Stock price lookup returned no data; continuing without adjustment.")
 
+                # today's price (OffsetDays == 0)
+                from datetime import datetime
+
+                today = datetime.now().strftime("%d.%m.%Y")
+                stock_df = get_stock_data_for_dates(
+                    ticker=ticker,
+                    dates=[today],
+                    days=[0],
+                    cache_filepath="stock_cache.json"
+                )
+                p = stock_df.iloc[0]["Price"]
+                
+
                 # === Build factor_tooltip map (date → ["offset: price"]) ===
                 factor_tooltip = {}
                 for y in year_cols:
@@ -338,7 +351,7 @@ class CombinedUIMixin:
                         else:
                             price_val = 1.0 / inv_val
                             entries.append(f"{day_offset:+d}: {price_val:.3f}")
-
+                    entries.append(f"Today: {p:.3f}" if p > 0 else "Today: NaN")
                     factor_tooltip[y] = entries
 
                 factor_tooltip_label = "Stock Prices"
@@ -379,6 +392,7 @@ class CombinedUIMixin:
                     factor_tooltip_label=factor_tooltip_label,
                     share_counts=share_counts,
                     out_path=out_path,
+                    
                 )
 
             except Exception as e:

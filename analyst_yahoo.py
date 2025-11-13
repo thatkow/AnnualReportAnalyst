@@ -127,7 +127,7 @@ def get_stock_data_for_dates(
 
                 # If not found, iterate forward (if +offset) or backward (if -offset) to find next available price
                 if pd.isna(price):
-                    direction = 1 if offset >= 0 else -1
+                    direction = 1 if offset > 0 else -1
                     found = False
                     for retry in range(1, 31):  # search within ±30 days
                         new_date = target_date + timedelta(days=retry * direction)

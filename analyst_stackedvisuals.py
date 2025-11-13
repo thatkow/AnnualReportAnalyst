@@ -368,7 +368,12 @@ function renderBars() {{
       `<b>Q3:</b> ${{humanReadable(q3)}} (${{safeRatio(q3)}})<br>` +
       `<b>Mean:</b> ${{humanReadable(mean)}} (${{safeRatio(mean)}})<br>` +
       `<b>Max:</b> ${{humanReadable(max)}} (${{safeRatio(max)}})<br>` +
-      `<b>Latest raw total${{perShare ? " (per share)" : ""}}:</b> ${{humanReadable(rawTotal)}}`;
+      `<b>Latest raw total${{perShare ? " (per share)" : ""}}:</b> ${{humanReadable(rawTotal)}}` +
+      (factorTooltip?.[years[years.length-1]]?.length
+        ? "<br><b>Today's Price:</b> " +
+          (factorTooltip[years[years.length-1]].find(e => e.startsWith("Today")) || "Today: NaN")
+        : "");
+
 
     boxTraces.push({{
       y: vals,
