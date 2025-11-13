@@ -283,6 +283,56 @@ class ScrapeResultPanel:
             label="Share count (all)",
             command=lambda: self._set_row_state("share_count", apply_all=True),
         )
+
+        # === New Section Separator ===
+        self._context_menu.add_separator()
+
+        # === New: Flip Sign for selected row ===
+        def _flip_sign():
+            row_id = self._context_item
+            if not row_id:
+                return
+
+            values = list(self.table.item(row_id, "values"))
+            new_vals = []
+            for v in values:
+                try:
+                    new_vals.append(str(-1 * float(v)))
+                except Exception:
+                    new_vals.append(v)
+
+            self.table.item(row_id, values=new_vals)
+            self.save_table_to_csv()
+            self.load_from_files()
+
+        self._context_menu.add_command(
+            label="Flip Sign (row)",
+            command=_flip_sign,
+        )
+
+        # === New Section Separator ===
+        self._context_menu.add_separator()
+
+        # === New: Flip Sign option ===
+        def _flip_sign():
+            # Multiply all numeric date-column values by -1.0
+            rows = []
+            for item_id in self.table.get_children(""):
+                values = list(self.table.item(item_id, "values"))
+                new_vals = []
+                for v in values:
+                    try:
+                        new_vals.append(str(-1 * float(v)))
+                    except Exception:
+                        new_vals.append(v)
+                self.table.item(item_id, values=new_vals)
+            self.save_table_to_csv()
+            self.app.reload_scrape_panels()
+
+        self._context_menu.add_command(
+            label="Flip Sign",
+            command=_flip_sign,
+        )
         self.table.bind("<Button-3>", self._on_table_right_click)
         if sys.platform == "darwin":
             # macOS sends Control-Button-1 for context menus
