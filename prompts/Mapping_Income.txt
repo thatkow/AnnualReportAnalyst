@@ -1,0 +1,111 @@
+You will be given a list of ITEM strings taken from a single section of an
+income statement. The list will appear **below this prompt**.
+
+Your task is to group ITEMs that refer to the same underlying income-statement
+concept and return a JSON object where:
+
+• each key is the canonical merged ITEM name, and
+• each value is the list of original ITEM strings that map to that group.
+
+──────────────────────────────
+TEXT NORMALISATION RULES
+──────────────────────────────
+
+Treat two ITEMs as equivalent if they match after:
+
+• Case-insensitive comparison
+• Singular vs plural equivalence
+• Minor word reordering
+• Normalising punctuation:
+    hyphens, commas, slashes, unicode apostrophes, parentheses
+• Normalising unicode hyphens (–, —, − → -)
+• Collapsing "&" vs "AND"
+• Space-insensitive comparisons
+• Treating PROFIT/(LOSS) vs (LOSS)/PROFIT as equivalent formatting
+
+Ignore cosmetic suffixes such as:
+• “FOR THE YEAR”
+• “NET OF TAX”
+• “ATTRIBUTABLE TO …”
+• “FROM CONTINUING OPERATIONS” (unless meaning changes)
+• “BEFORE TAX” vs “PRE-TAX” (equivalent)
+• “AFTER TAX” vs “POST-TAX” (equivalent)
+
+──────────────────────────────
+INCOME-STATEMENT FINANCIAL RULES
+──────────────────────────────
+
+Merge items only if the underlying **income-statement meaning is identical**.
+
+Examples that SHOULD merge (same economic meaning):
+
+• COST OF REVENUE  
+  = COST OF REVENUES
+
+• NET PROFIT  
+  = NET PROFIT AFTER TAX  
+  = NET PROFIT/(LOSS) BEFORE TAX (if PROFIT version only)  
+  (**Only merge when the direction Profit vs Loss is consistent**)
+
+• OPERATING INCOME  
+  = OPERATING SURPLUS
+
+• SALES AND MARKETING  
+  = SALES & MARKETING
+
+• FINANCE EXPENSE  
+  = INTEREST EXPENSE  
+  = FINANCE COSTS
+
+• FINANCE INCOME  
+  = INTEREST INCOME  
+  = NET INTEREST INCOME (if meaning is net finance income)
+
+• OTHER INCOME  
+  = OTHER OPERATING INCOME  
+  = OTHER INCOME AND EXPENSES (if net amount is income-side)
+
+Examples that should NOT merge:
+
+• NET PROFIT ≠ NET LOSS  
+  (direction changes the meaning)
+
+• GROSS PROFIT ≠ OPERATING PROFIT  
+• OPERATING EXPENSES ≠ OTHER EXPENSES  
+• INCOME TAX EXPENSE ≠ INCOME TAX CREDIT  
+• REVENUE ≠ OTHER INCOME  
+• FINANCE INCOME ≠ FINANCE EXPENSE
+
+──────────────────────────────
+CANONICAL KEY RULE
+──────────────────────────────
+
+For each equivalence group:
+
+• The key must be the cleanest, shortest, punctuation-neutral version
+  of the economic concept.
+
+Examples:
+• “OPERATING INCOME”
+• “NET LOSS”
+• “INCOME TAX EXPENSE”
+• “SALES AND MARKETING”
+• “FINANCE EXPENSE”
+
+──────────────────────────────
+OUTPUT FORMAT
+──────────────────────────────
+
+Return ONLY a JSON object in this format:
+
+{
+  "canonical_item_1": ["original1", "original2", ...],
+  "canonical_item_2": ["original3", ...],
+  ...
+}
+
+No explanation. No markdown. JSON only.
+
+──────────────────────────────
+ITEM LIST BELOW:
+──────────────────────────────

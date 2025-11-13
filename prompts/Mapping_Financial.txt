@@ -1,0 +1,93 @@
+You will be given a list of ITEM strings taken from a single section of a
+financial statement (a balance sheet). The list will appear **below this prompt**.
+
+Your task is to group ITEMs that refer to the same underlying balance-sheet
+concept and return a JSON object where:
+
+• each key is the canonical merged ITEM name, and
+• each value is the list of original ITEM strings that map to that group.
+
+──────────────────────────────
+TEXT NORMALISATION RULES
+──────────────────────────────
+
+Treat two ITEMs as equivalent if they match after:
+
+• Case-insensitive comparison
+• Singular vs plural equivalence
+• Minor word reordering
+• Normalising punctuation:
+    hyphens, commas, slashes, ampersands, unicode apostrophes
+• Normalising unicode hyphens (–, —, − → -)
+• Collapsing "&" vs "AND"
+• Space-insensitive comparisons:
+    “PROPERTY, PLANT AND EQUIPMENT”
+    “PROPERTY,PLANT & EQUIPMENT”
+    “PROPERTY , PLANT AND  EQUIPMENT”
+• Normalising parentheses patterns
+
+Ignore cosmetic suffixes such as:
+• “NET OF TAX”
+• “FOR THE YEAR”
+• “ATTRIBUTABLE TO …”
+
+──────────────────────────────
+BALANCE-SHEET FINANCIAL RULES
+──────────────────────────────
+
+Merge items only if the underlying **balance-sheet category is identical**.
+
+Examples that SHOULD merge (identical BS meaning):
+
+• TRADE AND OTHER RECEIVABLES
+  = TRADE&OTHER RECEIVABLES
+  = TRADE AND OTHER RECEIVables
+
+• SHORT-TERM DEPOSITS
+  = SHORT TERM DEPOSITS
+  = SHORT–TERM DEPOSITS (unicode hyphens)
+
+• PROPERTY, PLANT AND EQUIPMENT
+  = PROPERTY,PLANT AND EQUIPMENT
+  = PROPERTY, PLANT & EQUIPMENT
+  = PROPERTY,PLANT& EQUIPMENT
+
+• DEFERRED TAX LIABILITIES
+  = DEFERRED TAX LIABILITY
+  (same meaning for balance-sheet grouping)
+
+Examples that should NOT merge:
+
+• CASH AND CASH EQUIVALENTS ≠ CASH AT BANK  
+• OTHER CURRENT ASSETS ≠ OTHER RECEIVABLES  
+• DEFERRED TAX ASSETS ≠ DEFERRED TAX BENEFIT  
+• LEASE LIABILITIES ≠ TERM DEBT  
+• LONG-TERM PROVISIONS ≠ SHORT-TERM PROVISIONS  
+• CURRENT LIABILITIES ≠ NON-CURRENT LIABILITIES  
+
+──────────────────────────────
+CANONICAL KEY RULE
+──────────────────────────────
+
+For each equivalence group:
+
+• The key must be the cleanest, shortest, punctuation-neutral version
+  of the concept.
+
+──────────────────────────────
+OUTPUT FORMAT
+──────────────────────────────
+
+Return ONLY a JSON object in this format:
+
+{
+  "canonical_item_1": ["original1", "original2", ...],
+  "canonical_item_2": ["original3", ...],
+  ...
+}
+
+No explanation. No markdown. JSON only.
+
+──────────────────────────────
+ITEM LIST BELOW:
+──────────────────────────────
