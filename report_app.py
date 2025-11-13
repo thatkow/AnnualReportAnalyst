@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,6 +16,7 @@ except ImportError:  # pragma: no cover - handled at runtime
 from PIL import ImageTk
 
 
+from app_logging import get_logger
 from company_manager import CompanyManagerMixin
 from config_manager import ConfigManager
 from constants import COLUMNS, DEFAULT_OPENAI_MODEL, DEFAULT_NOTE_COLOR_SCHEME, FALLBACK_NOTE_PALETTE
@@ -139,8 +141,7 @@ class ReportAppV2(
         self._load_pattern_config()
         self._load_config()
         # ---------------------- Logger setup ----------------------
-        import logging
-        self.logger = logging.getLogger("annualreport")
+        self.logger = get_logger()
         if not self.logger.handlers:
             handler = logging.StreamHandler()
             handler.setFormatter(
@@ -165,17 +166,7 @@ class ReportAppV2(
         self._refresh_company_options()
         self._maybe_auto_load_last_company()
 
-        try:
-            # Find correct MRO base with a defined __init__ before calling
-            if hasattr(ScrapeManagerMixin, "__init__"):
-                super(ScrapeManagerMixin, self).__init__()
-            # Explicitly assign the logger to this instance
-            self.logger.info("Logger initialized and bound to ReportAppV2")
-        except Exception as e:
-            print(f"⚠️ Logger setup warning: {e}")
-            import traceback; traceback.print_exc()
-
-        # Bind logger to ScrapeManagerMixin explicitly
+        self.logger.info("Logger initialized and bound to ReportAppV2")
         self.logger.info("✅ Shared logger setup complete")
 
     def _apply_config_state(self) -> None:

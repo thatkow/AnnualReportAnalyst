@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 import tempfile
 from pathlib import Path
@@ -17,11 +16,12 @@ except ImportError:  # pragma: no cover - handled at runtime
 
 from PIL import Image, ImageTk
 
+from app_logging import get_logger
 from constants import COLUMNS
 from pdf_utils import Match, PDFEntry
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 
 class PDFManagerMixin:

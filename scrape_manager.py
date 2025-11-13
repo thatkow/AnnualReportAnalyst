@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import io
-import logging
 import shutil
 import threading
 from pathlib import Path
@@ -15,6 +14,7 @@ try:
 except ImportError:  # pragma: no cover - handled at runtime
     OpenAI = None  # type: ignore[assignment]
 
+from app_logging import get_logger
 from constants import COLUMNS, DEFAULT_OPENAI_MODEL, SCRAPE_EXPECTED_COLUMNS
 from models import ScrapeJob
 from pdf_utils import normalize_header_row
@@ -22,12 +22,8 @@ from pdf_utils import normalize_header_row
 
 
 class ScrapeManagerMixin:
-    def __init__(self, logger=None):
-        # Use shared logger from ReportAppV2 if provided
-        self.logger = logger or logging.getLogger("annualreport")
+    logger = get_logger()
 
-
-class ScrapeManagerMixin:
     scrape_button: Any
     scrape_progress: Any
     pdf_entries: List[Any]

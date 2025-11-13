@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 import sys
@@ -11,13 +10,14 @@ import sys
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
+from app_logging import get_logger
 from constants import SCRAPE_EXPECTED_COLUMNS, SCRAPE_PLACEHOLDER_ROWS
 from pdf_utils import PDFEntry, normalize_header_row
 
 if TYPE_CHECKING:  # pragma: no cover
     from report_app import ReportAppV2
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 class ScrapeResultPanel:
     def __init__(
