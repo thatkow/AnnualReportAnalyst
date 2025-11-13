@@ -52,6 +52,51 @@ class CombinedUIMixin:
     assigned_pages: Dict[str, Dict[str, Any]]
     canvas_window: int
 
+    def _on_note_conflict_double_click(self, event: tk.Event, tree: ttk.Treeview) -> None:
+        """Focus the Scrape TYPE/PDF tabs when a conflict row is double-clicked."""
+
+        try:
+            row_id = tree.identify_row(event.y)
+            if not row_id:
+                return
+            values = tree.item(row_id, "values")
+        except Exception:
+            return
+
+        if not values or len(values) < 6:
+            return
+
+        type_value = str(values[3]).strip()
+        pdf_name = str(values[5]).strip()
+        if not type_value or not pdf_name:
+            return
+
+        entry: Optional[PDFEntry] = None
+        for candidate in getattr(self, "pdf_entries", []):
+            if candidate.path.name == pdf_name:
+                entry = candidate
+                break
+        if entry is None:
+            return
+
+        def _focus_scrape_panel() -> None:
+            notebook = getattr(self, "notebook", None)
+            scrape_tab = getattr(self, "scrape_tab", None)
+            if notebook is not None and scrape_tab is not None:
+                try:
+                    notebook.select(scrape_tab)
+                except Exception:
+                    pass
+            try:
+                self.set_active_scrape_panel(entry, type_value)
+            except Exception as exc:
+                print(f"⚠️ Unable to focus Scrape panel for {type_value}/{pdf_name}: {exc}")
+
+        try:
+            self.root.after(0, _focus_scrape_panel)
+        except Exception:
+            _focus_scrape_panel()
+
     def build_combined_tab(self, notebook: ttk.Notebook) -> None:
         combined_tab = ttk.Frame(notebook)
         notebook.add(combined_tab, text="Combined")
@@ -1141,6 +1186,11 @@ class CombinedUIMixin:
                 tree.configure(yscroll=vsb.set)
                 vsb.pack(side=tk.RIGHT, fill=tk.Y)
                 tree.pack(fill=tk.BOTH, expand=True)
+
+                tree.bind(
+                    "<Double-1>",
+                    lambda e, tr=tree: self._on_note_conflict_double_click(e, tr),
+                )
 
             ttk.Button(viewer, text="Close", command=viewer.destroy).pack(pady=8)
 

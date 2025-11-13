@@ -14,6 +14,7 @@ from ui_widgets import CollapsibleFrame
 
 class ScrapeUIMixin:
     root: tk.Misc
+    scrape_tab: Optional[ttk.Frame]
     scrape_type_notebook: ttk.Notebook
     scrape_panels: Dict[Tuple[Path, str], ScrapeResultPanel]
     scrape_type_tabs: Dict[str, ttk.Frame]
@@ -47,6 +48,7 @@ class ScrapeUIMixin:
 
     def build_scrape_tab(self, notebook: ttk.Notebook) -> None:
         scrape_tab = ttk.Frame(notebook)
+        self.scrape_tab = scrape_tab
         notebook.add(scrape_tab, text="Scrape")
 
         scrape_controls = ttk.Frame(scrape_tab, padding=8)
