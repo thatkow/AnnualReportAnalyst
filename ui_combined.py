@@ -772,7 +772,26 @@ class CombinedUIMixin:
             )
             return
 
+
         combined_prompt = f"{prompt_text}\n\n{payload}" if prompt_text else payload
+
+        # === NEW: Save prompt+CSV to temp file for debugging ===
+        try:
+            import tempfile
+            temp_dir = Path(tempfile.gettempdir())
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dump_path = temp_dir / f"mapping_prompt_dump_{company_name}_{timestamp}.txt"
+
+            dump_path.write_text(combined_prompt, encoding="utf-8")
+
+            logger = getattr(self, "logger", None)
+            if logger:
+                logger.info(f"📝 Saved OpenAI mapping prompt+CSV to: {dump_path}")
+            else:
+                print(f"📝 Saved OpenAI mapping prompt+CSV to: {dump_path}")
+
+        except Exception as e:
+            print(f"⚠️ Failed to save prompt dump: {e}")
 
         try:
             client = OpenAI(api_key=api_key)
