@@ -156,11 +156,25 @@ function hashColor(str) {{
 const baseYears = years.map((_, i) => i * 2.0);
 const tickerOffsets = Object.fromEntries(tickers.map((t, i) => [t, (i - ((tickers.length - 1) / 2)) * 0.25]));
 
+// --- Canonical colour mapping using mapped fields ---
 const colorMap = {{}};
 rawData.forEach(r => {{
-  const id = r.CATEGORY + '-' + r.SUBCATEGORY + '-' + r.ITEM;
-  if (!colorMap[id]) colorMap[id] = hashColor(id);
+
+  const catM  = (r.CATEGORY_M && r.CATEGORY_M.trim()) ? r.CATEGORY_M : r.CATEGORY;
+  const subM  = (r.SUBCATEGORY_M && r.SUBCATEGORY_M.trim()) ? r.SUBCATEGORY_M : r.SUBCATEGORY;
+  const itemM = (r.ITEM_M && r.ITEM_M.trim()) ? r.ITEM_M : r.ITEM;
+
+  // TYPE included so Income vs Financial don’t collide
+  const canonicalKey = `${{r.TYPE}}|${{catM}}|${{subM}}|${{itemM}}`;
+
+  if (!colorMap[canonicalKey]) {{
+    colorMap[canonicalKey] = hashColor(canonicalKey);
+  }}
+
+  // Attach the canonical key for later use
+  r._CANONICAL_KEY = canonicalKey;
 }});
+
 
 const sel = document.getElementById("factorSelector");
 Object.keys(factorLookup).forEach(f => {{
@@ -178,8 +192,8 @@ function buildBarTraces(factorName, perShare) {{
     for (const typ of types) {{
       const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
       for (const row of subset) {{
-        const id = row.CATEGORY + '-' + row.SUBCATEGORY + '-' + row.ITEM;
-        const color = colorMap[id];
+        // Mapped consistent colour key
+        const color = colorMap[row._CANONICAL_KEY];
         // Compute yvals, skipping NaN factor years entirely
         const yvals = years.map(y => {{
           const factor = factorMap[y];
@@ -202,7 +216,7 @@ function buildBarTraces(factorName, perShare) {{
           y: yvals,
           type: "bar",
           marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
-          offsetgroup: ticker + "-" + typ + "-" + id,
+          offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
           text: yvals.map(v => fmt(v, perShare)),
           hovertemplate: "TICKER:" + ticker +
                          "<br>YEAR:%{{customdata[0]}}" +
@@ -400,11 +414,7 @@ function renderBars() {{
       y: [stackedTotal * 1.05],
       mode: "text",
       text: ["❓"],
-      textfont: {{
-        color: color,
-        size: 20,
-        family: "Arial Black"
-      }},
+      textfont: {{ color: color, size: 20, family: "Arial Black" }},
       hovertemplate: tooltip + "<extra></extra>",
       hoverinfo: "text",
       showlegend: false,
