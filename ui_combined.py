@@ -773,7 +773,18 @@ class CombinedUIMixin:
             return
 
 
+
         combined_prompt = f"{prompt_text}\n\n{payload}" if prompt_text else payload
+
+        # === NEW: Remove blank lines between CSV rows ===
+        try:
+            cleaned = "\n".join(
+                line for line in combined_prompt.splitlines()
+                if line.strip() != ""
+            )
+            combined_prompt = cleaned
+        except Exception as e:
+            print(f"⚠️ Failed to clean CSV row spacing: {e}")
 
         # === NEW: Save prompt+CSV to temp file for debugging ===
         try:

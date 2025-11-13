@@ -2,77 +2,121 @@ You will be given a CSV with columns:
 TYPE, CATEGORY, SUBCATEGORY, ITEM
 
 Your task is to append three new columns:
-- CATEGORY_M   (“mapped category”)
-- SUBCATEGORY_M (“mapped subcategory”)
-- ITEM_M       (“mapped item”)
+- CATEGORY_M     (“mapped category”)
+- SUBCATEGORY_M  (“mapped subcategory”)
+- ITEM_M         (“mapped item”)
 
-──────────────────────────────────────────────
-GENERAL MAPPING PRINCIPLES
-──────────────────────────────────────────────
+────────────────────────────────────────────────────────
+1. GROUPING LOGIC
+────────────────────────────────────────────────────────
 
-1. Compare values only within the appropriate grouping level:
-   • CATEGORY_M     → mapped by comparing CATEGORY values within the same TYPE.
-   • SUBCATEGORY_M  → mapped by comparing SUBCATEGORY values within the same (TYPE + CATEGORY_M).
-   • ITEM_M         → mapped by comparing ITEM values within the same (TYPE + CATEGORY_M + SUBCATEGORY_M).
+Mapping happens in three layers:
 
-2. Text-equivalence rules:
-   Treat these as equivalent:
-   • Capitalisation differences
-   • Singular vs plural
-   • Word reordering
-   • Punctuation differences (hyphens, commas, slashes, ampersands, parentheses spacing)
-   • Cosmetic suffix/prefix phrases, including:
-       “FOR THE YEAR”, “NET OF TAX”, “ATTRIBUTABLE TO …”, “UNDER … CONTRACTS”
-   • For ITEM only: treat PROFIT/(LOSS), (LOSS)/PROFIT, and similar parenthesis permutations as equivalent
+• CATEGORY_M is produced by comparing CATEGORY values  
+  within the same TYPE group.
 
-3. Additional domain-aware financial mapping rules:
-   • Only merge when the financial meaning is truly identical.
-   • Do NOT merge:
-       – Pre-tax vs post-tax measures
-       – Profit vs loss values
-       – Operating income vs operating surplus (for-profit context)
-       – Other income vs other operating revenue
-       – Finance income vs net interest income
-       – Share of profit vs gain on investment (equity method vs disposal gains)
-       – OCI vs comprehensive income vs net income
-   • Do merge when entries are semantically identical except for punctuation, such as:
-       – “TOTAL REVENUE AND OTHER INCOME”
-         = “TOTAL REVENUE & OTHER INCOME”
-       – “BASIC AND DILUTED LOSS PER SHARE”
-         = “BASIC & DILUTED LOSS PER SHARE”
+• SUBCATEGORY_M is produced by comparing SUBCATEGORY values  
+  within the same (TYPE + CATEGORY_M) group.
 
-4. Canonicalisation rule:
-   Normally, equivalent values would share the same canonical `_M` value.
-   BUT the strict rule here is:
+• ITEM_M is produced by comparing ITEM values  
+  within the same (TYPE + CATEGORY_M + SUBCATEGORY_M) group.
 
-   **If any merge occurs in a group, then ALL members of that merged group must have a blank mapping.**
+CATEGORY and SUBCATEGORY must be evaluated **independently of ITEM**.
 
-   That is:
-   • ITEM_M / CATEGORY_M / SUBCATEGORY_M is only populated when the value has *no other equivalent match*.
-   • If the group contains 2+ equivalent entries, ALL `_M` fields for that group remain blank.
+────────────────────────────────────────────────────────
+2. TEXT NORMALISATION RULES
+────────────────────────────────────────────────────────
 
-   This suppresses the canonical output so the user sees clearly where merges occurred.
+Two values refer to the same concept if they match after applying:
 
-5. Future CSVs may contain quoted fields — treat them as normal values.
+• Case-insensitive comparison  
+• Singular vs plural equivalence  
+• Word reordering equivalence  
+• Hyphens, commas, slashes, ampersands, spacing differences  
+• Unicode apostrophe/quote normalisation  
+• Parentheses permutations, spacing normalization  
+• Cosmetic phrases ignored:
+    “FOR THE YEAR”, “NET OF TAX”, “ATTRIBUTABLE TO …”, “UNDER … CONTRACTS”
 
-6. Output requirements:
-   • Return the SAME CSV, but with CATEGORY_M, SUBCATEGORY_M, ITEM_M appended as the final columns.
-   • All text fields must be wrapped in double quotes.
-   • No formatting changes besides adding the three new columns.
-   • You may reorder nothing.
+For ITEM only:
+• Treat PROFIT/(LOSS), (LOSS)/PROFIT, and similar Profit/Loss permutations as equivalent.
 
-7. When asked to display only rows with non-empty mapping fields:
-   • Only include rows where at least one of CATEGORY_M, SUBCATEGORY_M, ITEM_M is non-blank.
+────────────────────────────────────────────────────────
+3. DOMAIN-AWARE FINANCIAL MEANING RULES
+────────────────────────────────────────────────────────
 
-──────────────────────────────────────────────
-YOUR OUTPUT
-──────────────────────────────────────────────
+Do NOT merge unless the underlying IFRS/GAAP meaning is identical.
 
-Return only the final CSV with columns:
+Do NOT merge:
+• Net profit vs net loss  
+• Pre-tax vs post-tax items  
+• Operating income vs operating surplus  
+• Finance income vs net interest income  
+• Other income vs other operating revenue  
+• Share of profit of associate vs gain on investment in associate  
+• OCI vs comprehensive income vs net income
+
+You SHOULD merge when the meaning is identical except punctuation or minor formatting:
+Examples:
+• “TOTAL REVENUE & OTHER INCOME”
+  = “TOTAL REVENUE AND OTHER INCOME”
+• “BASIC AND DILUTED LOSS PER SHARE”
+  = “BASIC & DILUTED LOSS PER SHARE”
+
+────────────────────────────────────────────────────────
+4. CANONICALISATION RULES
+────────────────────────────────────────────────────────
+
+For CATEGORY:
+• If CATEGORY is non-empty and appears more than once in the same TYPE group
+  (even if spelled identically),
+  → CATEGORY_M must be populated for ALL those rows.
+• If CATEGORY appears only once, leave CATEGORY_M blank.
+
+For SUBCATEGORY:
+• If SUBCATEGORY is non-empty and appears more than once in the same (TYPE + CATEGORY_M) group,
+  → SUBCATEGORY_M must be populated for ALL those rows.
+• If SUBCATEGORY appears only once, leave SUBCATEGORY_M blank.
+
+For ITEM:
+• Build equivalence groups within the same (TYPE + CATEGORY_M + SUBCATEGORY_M) group.
+• If ITEM belongs to a group with 2 or more equivalent values → populate ITEM_M
+  using the canonical representative.
+• If ITEM is the only member of its equivalence group → leave ITEM_M blank.
+
+Canonical representative rule:
+• The canonical form is the cleanest, shortest, punctuation-neutral member
+  of the group.
+
+────────────────────────────────────────────────────────
+5. QUOTING REQUIREMENTS
+────────────────────────────────────────────────────────
+
+• Every output field must be wrapped in double quotes.
+• Preserve input ordering and formatting.
+• Append new columns at the end: CATEGORY_M, SUBCATEGORY_M, ITEM_M.
+
+────────────────────────────────────────────────────────
+6. FINAL FILTERING RULE (IMPORTANT)
+────────────────────────────────────────────────────────
+
+After computing CATEGORY_M, SUBCATEGORY_M, ITEM_M:
+
+**Return ONLY the rows where at least one of the mapping columns is populated.**
+
+This means:
+• Only rows that participated in a merge at ANY level (CATEGORY, SUBCATEGORY, or ITEM)
+  appear in the output.
+
+Rows with no merges at any level must be removed from the final CSV.
+
+────────────────────────────────────────────────────────
+7. FINAL OUTPUT FORMAT
+────────────────────────────────────────────────────────
+
+Return ONLY the final filtered CSV with columns exactly:
+
 TYPE, CATEGORY, SUBCATEGORY, ITEM, CATEGORY_M, SUBCATEGORY_M, ITEM_M
-(all fields in double quotes).
 
+No markdown. No explanation. CSV only.
 
-──────────────────────────────────────────────
-DATA BELOW
-──────────────────────────────────────────────
