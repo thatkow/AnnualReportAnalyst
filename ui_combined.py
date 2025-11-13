@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -21,9 +24,7 @@ COMBINED_BASE_COLUMNS = [
     "SUBCATEGORY",
     "ITEM",
     "NOTE",
-    "CATEGORY_M",
-    "SUBCATEGORY_M",
-    "ITEM_M",
+    "Key4Coloring",
 ]
 from ui_widgets import CollapsibleFrame
 from pdf_utils import PDFEntry, normalize_header_row
@@ -565,9 +566,7 @@ class CombinedUIMixin:
                 "subcategory",
                 "item",
                 "note",
-                "category_m",
-                "subcategory_m",
-                "item_m",
+                "key4coloring",
             }
             anchor = tk.W if name.lower() in text_columns else tk.E
             tv.heading(cid, text=name)
@@ -607,50 +606,61 @@ class CombinedUIMixin:
     def _combined_dynamic_column_offset(self) -> int:
         return len(COMBINED_BASE_COLUMNS)
 
-    def _get_mapping_path(self, company_name: str) -> Path:
-        return (self.companies_dir / company_name / "mapping.csv").resolve()
+    def _get_mapping_json_paths(self, company_name: str) -> Dict[str, Path]:
+        base = (self.companies_dir / company_name).resolve()
+        return {
+            "Financial": base / "mapping_financial.json",
+            "Income": base / "mapping_income.json",
+        }
 
-    def _load_mapping_lookup(
-        self, company_name: str
-    ) -> Dict[Tuple[str, str, str, str], Dict[str, str]]:
-        result: Dict[Tuple[str, str, str, str], Dict[str, str]] = {}
+    def _load_key4color_lookup(self, company_name: str) -> Dict[str, Dict[str, str]]:
+        lookup: Dict[str, Dict[str, str]] = {}
         if not company_name:
-            return result
-        path = self._get_mapping_path(company_name)
-        if not path.exists():
-            return result
-        try:
-            with path.open("r", encoding="utf-8", newline="") as fh:
-                reader = csv.DictReader(fh)
-                for row in reader:
-                    typ = str(row.get("TYPE", "")).strip()
-                    category = str(row.get("CATEGORY", "")).strip()
-                    subcategory = str(row.get("SUBCATEGORY", "")).strip()
-                    item = str(row.get("ITEM", "")).strip()
-                    key = (typ, category, subcategory, item)
-                    result[key] = {
-                        "CATEGORY_M": str(row.get("CATEGORY_M", "")).strip(),
-                        "SUBCATEGORY_M": str(row.get("SUBCATEGORY_M", "")).strip(),
-                        "ITEM_M": str(row.get("ITEM_M", "")).strip(),
-                    }
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger = getattr(self, "logger", None)
-            if logger is not None:
-                logger.error("Failed to load mapping.csv for %s: %s", company_name, exc)
-        return result
+            return lookup
+        paths = self._get_mapping_json_paths(company_name)
+        for typ, path in paths.items():
+            if not path.exists():
+                continue
+            try:
+                raw_text = path.read_text(encoding="utf-8")
+                data = json.loads(raw_text)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger = getattr(self, "logger", None)
+                if logger is not None:
+                    logger.error("Failed to load %s: %s", path, exc)
+                continue
+            if not isinstance(data, dict):
+                continue
+            type_map = lookup.setdefault(typ, {})
+            for canonical, originals in data.items():
+                if not isinstance(canonical, str):
+                    continue
+                canonical_clean = canonical.strip()
+                if canonical_clean:
+                    type_map.setdefault(canonical_clean.casefold(), canonical_clean)
+                if not isinstance(originals, list):
+                    continue
+                for item in originals:
+                    if not isinstance(item, str):
+                        continue
+                    raw_item = item.strip()
+                    if not raw_item:
+                        continue
+                    type_map.setdefault(raw_item.casefold(), canonical_clean or raw_item)
+        return lookup
 
     def _update_mapping_buttons(self) -> None:
         button = getattr(self, "mapping_open_button", None)
         if button is None:
             return
         company_name = self.company_var.get().strip()
-        path: Optional[Path] = None
+        exists = False
         if company_name:
             try:
-                path = self._get_mapping_path(company_name)
+                paths = self._get_mapping_json_paths(company_name)
+                exists = any(path.exists() for path in paths.values())
             except Exception:
-                path = None
-        exists = bool(path and path.exists())
+                exists = False
         try:
             button.configure(state="normal" if exists else "disabled")
         except Exception:
@@ -659,17 +669,20 @@ class CombinedUIMixin:
     def open_mapping_csv(self) -> None:
         company_name = self.company_var.get().strip()
         if not company_name:
-            messagebox.showinfo("Mapping CSV", "Select a company before opening mapping.csv.")
+            messagebox.showinfo("Mapping", "Select a company before opening mapping files.")
             return
-        path = self._get_mapping_path(company_name)
-        if not path.exists():
+        paths = self._get_mapping_json_paths(company_name)
+        existing = [p for p in paths.values() if p.exists()]
+        if not existing:
+            expected = "\n".join(str(p) for p in paths.values()) or "<no files>"
             messagebox.showinfo(
-                "Mapping CSV",
-                f"No mapping.csv found for {company_name}.\n\nExpected at:\n{path}",
+                "Mapping",
+                f"No mapping JSON files found for {company_name}.\n\nExpected at:\n{expected}",
             )
             self._update_mapping_buttons()
             return
         try:
+            path = existing[0]
             if sys.platform.startswith("win"):
                 os.startfile(str(path))  # type: ignore[attr-defined]
             elif sys.platform == "darwin":
@@ -677,137 +690,172 @@ class CombinedUIMixin:
             else:
                 subprocess.run(["xdg-open", str(path)], check=False)
         except Exception as exc:
-            messagebox.showerror("Mapping CSV", f"Failed to open mapping.csv: {exc}")
+            messagebox.showerror("Mapping", f"Failed to open mapping file: {exc}")
 
     def create_mapping_csv(self) -> None:
         company_name = self.company_var.get().strip()
         if not company_name:
-            messagebox.showinfo("Mapping CSV", "Select a company before creating mapping.csv.")
+            messagebox.showinfo("Mapping", "Select a company before creating mapping files.")
             return
         if not self.combined_columns or not self.combined_rows:
             messagebox.showinfo(
-                "Mapping CSV",
-                "Create the combined dataset first before generating mapping.csv.",
+                "Mapping",
+                "Create the combined dataset first before generating mapping files.",
             )
             return
 
-        required_cols = ["TYPE", "CATEGORY", "SUBCATEGORY", "ITEM"]
+        required_cols = ["TYPE", "ITEM"]
         missing_cols = [col for col in required_cols if col not in self.combined_columns]
         if missing_cols:
             messagebox.showerror(
-                "Mapping CSV",
+                "Mapping",
                 f"Combined table is missing required columns: {', '.join(missing_cols)}",
             )
             return
 
         col_index = {col: self.combined_columns.index(col) for col in required_cols}
-        seen: Set[Tuple[str, str, str, str]] = set()
-        export_rows: List[List[str]] = []
+        items_by_type: Dict[str, Set[str]] = {}
         for row in self.combined_rows:
             try:
-                values = {
-                    col: str(row[col_index[col]]).strip() if col_index[col] < len(row) else ""
-                    for col in required_cols
-                }
+                typ = str(row[col_index["TYPE"]]).strip() if col_index["TYPE"] < len(row) else ""
+                item = str(row[col_index["ITEM"]]).strip() if col_index["ITEM"] < len(row) else ""
             except Exception:
                 continue
-            typ = values["TYPE"]
             if typ not in COLUMNS:
                 continue
-            category = values["CATEGORY"]
-            subcategory = values["SUBCATEGORY"]
-            item = values["ITEM"]
-            key = (typ, category, subcategory, item)
-            if key in seen:
+            if not item:
                 continue
-            seen.add(key)
-            export_rows.append([typ, category, subcategory, item])
+            items_by_type.setdefault(typ, set()).add(item)
 
-        if not export_rows:
+        if not items_by_type:
             messagebox.showinfo(
-                "Mapping CSV",
-                "No eligible rows were found to generate mapping.csv.",
+                "Mapping",
+                "No eligible rows were found to generate mapping files.",
             )
             return
 
-        export_rows.sort()
+        prompt_root_obj = getattr(self, "app_root", Path(__file__).resolve().parent)
+        prompt_root = Path(prompt_root_obj)
+        prompt_dir = prompt_root / "prompts"
+        prompt_files: Dict[str, Path] = {
+            "Financial": prompt_dir / "Mapping_Financial.txt",
+            "Income": prompt_dir / "Mapping_Income.txt",
+        }
 
-        prompt_root = getattr(self, "app_root", Path(__file__).resolve().parent)
-        prompt_path = prompt_root / "mapping_prompt.txt"
-        if not prompt_path.exists():
+        unsupported_types = [typ for typ in items_by_type if typ not in prompt_files and items_by_type.get(typ)]
+        items_for_prompt: Dict[str, List[str]] = {}
+        for typ, items in items_by_type.items():
+            if typ not in prompt_files:
+                continue
+            if not items:
+                continue
+            items_for_prompt[typ] = sorted(items)
+
+        if not items_for_prompt:
+            note = ""
+            if unsupported_types:
+                note = (
+                    "\n\nThese TYPE values are currently unsupported for auto-mapping: "
+                    + ", ".join(sorted(set(unsupported_types)))
+                )
+            messagebox.showinfo(
+                "Mapping",
+                "No supported Financial or Income items were found for mapping." + note,
+            )
+            return
+
+        missing_prompts = [typ for typ, path in prompt_files.items() if typ in items_for_prompt and not path.exists()]
+        if missing_prompts:
+            detail = "\n".join(str(prompt_files[typ]) for typ in missing_prompts)
             messagebox.showerror(
-                "Mapping CSV",
-                f"Prompt file not found at {prompt_path}.",
+                "Mapping",
+                f"Prompt file not found for TYPE(s): {', '.join(missing_prompts)}.\n\nChecked paths:\n{detail}",
             )
             return
-        prompt_text = prompt_path.read_text(encoding="utf-8").strip()
-        if not prompt_text:
-            messagebox.showerror("Mapping CSV", "mapping_prompt.txt is empty.")
+
+        prompt_payloads: Dict[str, str] = {}
+        empty_prompt_types: List[str] = []
+        for typ, items in items_for_prompt.items():
+            prompt_path = prompt_files[typ]
+            prompt_text = prompt_path.read_text(encoding="utf-8").strip()
+            if not prompt_text:
+                empty_prompt_types.append(typ)
+                continue
+            item_block = "\n".join(items)
+            combined_prompt = f"{prompt_text}\n\n{item_block}".strip()
+            prompt_payloads[typ] = combined_prompt
+
+        if empty_prompt_types:
+            detail = "\n".join(str(prompt_files[typ]) for typ in empty_prompt_types)
+            messagebox.showerror(
+                "Mapping",
+                f"Prompt file is empty for TYPE(s): {', '.join(empty_prompt_types)}.\n\nChecked paths:\n{detail}",
+            )
+            return
+
+        if not prompt_payloads:
+            messagebox.showerror(
+                "Mapping",
+                "No prompts were prepared for OpenAI processing.",
+            )
             return
 
         api_key = self.api_key_var.get().strip()
         if not api_key:
-            messagebox.showinfo("Mapping CSV", "Enter an OpenAI API key before creating mapping.csv.")
+            messagebox.showinfo("Mapping", "Enter an OpenAI API key before creating mapping files.")
             return
 
         try:
             from openai import OpenAI
-        except ImportError as exc:
+        except ImportError:
             messagebox.showerror(
-                "Mapping CSV",
-                "The 'openai' package is not installed. Install it to generate mapping.csv.",
+                "Mapping",
+                "The 'openai' package is not installed. Install it to generate mapping files.",
             )
             return
 
-        csv_buffer = io.StringIO()
-        writer = csv.writer(csv_buffer, quoting=csv.QUOTE_ALL)
-        writer.writerow(required_cols)
-        writer.writerows(export_rows)
-        payload = csv_buffer.getvalue().strip()
+        logger = getattr(self, "logger", None)
+        if logger is not None:
+            summary = {typ: len(items) for typ, items in items_for_prompt.items()}
+            logger.info("Starting Key4Coloring mapping for %s: %s", company_name, summary)
 
-        if not payload:
-            messagebox.showerror(
-                "Mapping CSV",
-                "No data was generated for mapping.csv.",
-            )
-            return
-
-
-
-        combined_prompt = f"{prompt_text}\n\n{payload}" if prompt_text else payload
-
-        # === NEW: Remove blank lines between CSV rows ===
+        progress_win = tk.Toplevel(self.root)
+        progress_win.title("Mapping")
+        progress_win.resizable(False, False)
+        ttk.Label(
+            progress_win,
+            text="Processing mapping with OpenAI. This may take a moment...",
+            padding=(12, 10),
+            wraplength=320,
+            justify=tk.LEFT,
+        ).pack(fill=tk.X)
+        progress_bar = ttk.Progressbar(progress_win, mode="indeterminate", length=260)
+        progress_bar.pack(padx=16, pady=(0, 16))
+        progress_bar.start(10)
         try:
-            cleaned = "\n".join(
-                line for line in combined_prompt.splitlines()
-                if line.strip() != ""
-            )
-            combined_prompt = cleaned
-        except Exception as e:
-            print(f"⚠️ Failed to clean CSV row spacing: {e}")
+            progress_win.transient(self.root)
+            progress_win.grab_set()
+            progress_win.lift()
+        except Exception:
+            pass
+        progress_win.protocol("WM_DELETE_WINDOW", lambda: None)
 
-        # === NEW: Save prompt+CSV to temp file for debugging ===
-        try:
-            import tempfile
-            temp_dir = Path(tempfile.gettempdir())
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            dump_path = temp_dir / f"mapping_prompt_dump_{company_name}_{timestamp}.txt"
+        def close_progress() -> None:
+            try:
+                progress_bar.stop()
+            except Exception:
+                pass
+            try:
+                progress_win.destroy()
+            except Exception:
+                pass
 
-            dump_path.write_text(combined_prompt, encoding="utf-8")
+        model_name = DEFAULT_OPENAI_MODEL or "gpt-5"
 
-            logger = getattr(self, "logger", None)
-            if logger:
-                logger.info(f"📝 Saved OpenAI mapping prompt+CSV to: {dump_path}")
-            else:
-                print(f"📝 Saved OpenAI mapping prompt+CSV to: {dump_path}")
-
-        except Exception as e:
-            print(f"⚠️ Failed to save prompt dump: {e}")
-
-        try:
+        def run_prompt(typ: str, prompt_text: str) -> Dict[str, List[str]]:
             client = OpenAI(api_key=api_key)
             response = client.responses.create(
-                model="gpt-5",
+                model=model_name,
                 input=[
                     {
                         "role": "system",
@@ -818,7 +866,7 @@ class CombinedUIMixin:
                         "content": [
                             {
                                 "type": "input_text",
-                                "text": combined_prompt,
+                                "text": prompt_text,
                             }
                         ],
                     },
@@ -827,37 +875,81 @@ class CombinedUIMixin:
             raw_response = self._extract_openai_response_text(response)
             cleaned = self._strip_code_fence(raw_response).strip()
             if not cleaned:
-                raise RuntimeError("OpenAI returned an empty response")
+                raise RuntimeError(f"OpenAI returned an empty response for {typ} mapping")
+            try:
+                parsed = json.loads(cleaned)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"OpenAI response for {typ} is not valid JSON: {exc}") from exc
+            if not isinstance(parsed, dict):
+                raise RuntimeError(f"OpenAI response for {typ} is not a JSON object")
+            return parsed
 
-            reader = csv.DictReader(io.StringIO(cleaned))
-            expected = required_cols + ["CATEGORY_M", "SUBCATEGORY_M", "ITEM_M"]
-            fieldnames = reader.fieldnames or []
-            missing = [col for col in expected if col not in fieldnames]
-            if missing:
-                raise RuntimeError(
-                    f"OpenAI response is missing expected columns: {', '.join(missing)}"
+        def on_success(saved_paths: List[Path]) -> None:
+            close_progress()
+            if saved_paths:
+                files_list = "\n".join(str(p) for p in saved_paths)
+                note = ""
+                if unsupported_types:
+                    note = (
+                        "\n\nSkipped TYPE values without prompts: "
+                        + ", ".join(sorted(set(unsupported_types)))
+                    )
+                messagebox.showinfo(
+                    "Mapping",
+                    "Mapping JSON files created successfully:\n"
+                    + files_list
+                    + note,
                 )
-
-            mapping_path = self._get_mapping_path(company_name)
-            mapping_path.parent.mkdir(parents=True, exist_ok=True)
-            mapping_path.write_text(cleaned, encoding="utf-8")
-
-            messagebox.showinfo(
-                "Mapping CSV",
-                f"mapping.csv created successfully at:\n{mapping_path}",
-            )
+            else:
+                messagebox.showwarning(
+                    "Mapping",
+                    "OpenAI responses were received but no files were written.",
+                )
             self._update_mapping_buttons()
             try:
                 self.create_combined_dataset()
             except Exception as exc:  # pragma: no cover - refresh best effort
-                logger = getattr(self, "logger", None)
                 if logger is not None:
-                    logger.warning("Failed to refresh combined dataset after mapping.csv: %s", exc)
-        except Exception as exc:
-            logger = getattr(self, "logger", None)
-            if logger is not None:
-                logger.error("Failed to create mapping.csv: %s", exc)
-            messagebox.showerror("Mapping CSV", f"Failed to create mapping.csv: {exc}")
+                    logger.warning(
+                        "Failed to refresh combined dataset after Key4Coloring mapping: %s",
+                        exc,
+                    )
+
+        def on_error(exc: Exception) -> None:
+            close_progress()
+            messagebox.showerror("Mapping", f"Failed to create mapping files: {exc}")
+
+        def worker() -> None:
+            try:
+                results: Dict[str, Dict[str, List[str]]] = {}
+                with ThreadPoolExecutor(max_workers=max(1, len(prompt_payloads))) as executor:
+                    future_map = {
+                        executor.submit(run_prompt, typ, prompt): typ
+                        for typ, prompt in prompt_payloads.items()
+                    }
+                    for future in as_completed(future_map):
+                        typ = future_map[future]
+                        results[typ] = future.result()
+
+                mapping_paths = self._get_mapping_json_paths(company_name)
+                saved_paths: List[Path] = []
+                for typ, data in results.items():
+                    path = mapping_paths.get(typ)
+                    if path is None:
+                        continue
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with path.open("w", encoding="utf-8") as fh:
+                        json.dump(data, fh, ensure_ascii=False, indent=2)
+                    saved_paths.append(path)
+
+                self.root.after(0, lambda: on_success(saved_paths))
+            except Exception as exc:  # pragma: no cover - best effort reporting
+                if logger is not None:
+                    logger.error("Failed to create Key4Coloring mapping: %s", exc, exc_info=True)
+                self.root.after(0, lambda: on_error(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _on_combined_header_right_click(self, event: tk.Event) -> None:  # type: ignore[override]
         try:
             tv: ttk.Treeview = event.widget  # type: ignore[assignment]
@@ -925,9 +1017,9 @@ class CombinedUIMixin:
         self.combined_dyn_columns = dyn_cols
 
         company_name = self.company_var.get().strip()
-        mapping_lookup: Dict[Tuple[str, str, str, str], Dict[str, str]] = {}
+        mapping_lookup: Dict[str, Dict[str, str]] = {}
         if company_name:
-            mapping_lookup = self._load_mapping_lookup(company_name)
+            mapping_lookup = self._load_key4color_lookup(company_name)
 
         conflicts = []
         key_data: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
@@ -1058,7 +1150,7 @@ class CombinedUIMixin:
 
         # PDF source and multiplier rows are considered Meta
         pdf_summary_values = [dc.get("pdf", "") for dc in dyn_cols]
-        pdf_summary = ["Meta", "PDF source", "", "", "excluded", "", "", ""] + pdf_summary_values
+        pdf_summary = ["Meta", "PDF source", "", "", "excluded", ""] + pdf_summary_values
 
         # === Collect multiplier values for each type (Financial, Income, Shares) ===
         multipliers: Dict[str, Dict[str, str]] = {}
@@ -1082,7 +1174,7 @@ class CombinedUIMixin:
         multiplier_rows = []
         for typ in ("Financial", "Income", "Shares"):
             # Mark NOTE column as 'meta' for metadata rows
-            row = [f"{typ}", f"{typ} Multiplier", "", "", "excluded", "", "", ""]
+            row = [f"{typ}", f"{typ} Multiplier", "", "", "excluded", ""]
             for dc in dyn_cols:
                 pdf = dc.get("pdf", "")
                 val = multipliers.get(pdf, {}).get(typ, "")
@@ -1090,7 +1182,7 @@ class CombinedUIMixin:
             multiplier_rows.append(row)
 
         # Append Share Multiplier row to pdf_summary
-        share_row: List[str] = ["Meta", "Stock Multiplier", "", "", "excluded", "", "", ""] + ["" for _ in dyn_cols]
+        share_row: List[str] = ["Meta", "Stock Multiplier", "", "", "excluded", ""] + ["" for _ in dyn_cols]
         try:
             import csv
             from pathlib import Path
@@ -1120,7 +1212,7 @@ class CombinedUIMixin:
                         stock_data[row[0].strip()] = row[1].strip()
 
             # Build Stock Multiplier row aligned by date columns
-            share_row = ["Meta", "Stock Multiplier", "", "", "excluded", "", "", ""]
+            share_row = ["Meta", "Stock Multiplier", "", "", "excluded", ""]
             for dc in dyn_cols:
                 date_label = dc.get("default_name", "").strip()
                 val = stock_data.get(date_label, "1")
@@ -1161,12 +1253,15 @@ class CombinedUIMixin:
 
             # Use the typ from the key directly as TYPE
             assigned_type = typ if typ in COLUMNS else "Meta"
-            mapping_key = (assigned_type, cat, sub, item)
-            mapped_values = mapping_lookup.get(mapping_key, {})
-            cat_m = mapped_values.get("CATEGORY_M", "")
-            sub_m = mapped_values.get("SUBCATEGORY_M", "")
-            item_m = mapped_values.get("ITEM_M", "")
-            rows_out.append([assigned_type, cat, sub, item, note_val, cat_m, sub_m, item_m] + values_for_row)
+            key4_value = ""
+            item_clean = item.strip()
+            type_map = mapping_lookup.get(assigned_type, {})
+            if item_clean:
+                lookup_key = item_clean.casefold()
+                key4_value = type_map.get(lookup_key, "") or type_map.get(item_clean, "")
+            if not key4_value and item_clean:
+                key4_value = item_clean
+            rows_out.append([assigned_type, cat, sub, item, note_val, key4_value] + values_for_row)
 
         final_rows = [pdf_summary] + multiplier_rows + [share_row] + rows_out
         self._populate_combined_table(columns, final_rows)

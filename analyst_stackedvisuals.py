@@ -56,6 +56,7 @@ def render_stacked_annual_report(
             "CATEGORY": r.get("CATEGORY"),
             "SUBCATEGORY": r.get("SUBCATEGORY"),
             "ITEM": r.get("ITEM"),
+            "Key4Coloring": r.get("Key4Coloring"),
         }
         for y in year_cols:
             val = r.get(y)
@@ -159,13 +160,10 @@ const tickerOffsets = Object.fromEntries(tickers.map((t, i) => [t, (i - ((ticker
 // --- Canonical colour mapping using mapped fields ---
 const colorMap = {{}};
 rawData.forEach(r => {{
-
-  const catM  = (r.CATEGORY_M && r.CATEGORY_M.trim()) ? r.CATEGORY_M : r.CATEGORY;
-  const subM  = (r.SUBCATEGORY_M && r.SUBCATEGORY_M.trim()) ? r.SUBCATEGORY_M : r.SUBCATEGORY;
-  const itemM = (r.ITEM_M && r.ITEM_M.trim()) ? r.ITEM_M : r.ITEM;
-
-  // TYPE included so Income vs Financial don’t collide
-  const canonicalKey = `${{r.TYPE}}|${{catM}}|${{subM}}|${{itemM}}`;
+  const keyCandidate = (r.Key4Coloring && r.Key4Coloring.trim()) ? r.Key4Coloring.trim() : (r.ITEM || "");
+  const fallback = (r.ITEM && r.ITEM.trim()) ? r.ITEM.trim() : "";
+  const key4 = keyCandidate || fallback;
+  const canonicalKey = `${{r.TYPE}}|${{key4}}`;
 
   if (!colorMap[canonicalKey]) {{
     colorMap[canonicalKey] = hashColor(canonicalKey);
