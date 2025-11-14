@@ -209,6 +209,47 @@ class ScrapeResultPanel:
         self.browse_pdf_button = ttk.Button(actions_row, text="Browse PDF", command=_browse_pdf_folder)
         self.browse_pdf_button.pack(side=tk.LEFT, padx=(6, 0))
 
+        # ============================================================
+        # NEW BUTTON: Delete Row
+        # ============================================================
+        def _delete_selected_rows():
+            try:
+                selected = list(self.table.selection())
+                if not selected:
+                    messagebox.showinfo("Delete Row", "No rows selected.")
+                    return
+
+                confirm = messagebox.askyesno(
+                    "Delete Row",
+                    f"Delete {len(selected)} selected row(s)?\nThis cannot be undone.",
+                    parent=self.frame,
+                )
+                if not confirm:
+                    return
+
+                # Remove from Treeview
+                for item_id in selected:
+                    self.table.delete(item_id)
+
+                # Save updated table
+                self.save_table_to_csv()
+
+                # Reload everything (so placeholder rows etc. work correctly)
+                self.load_from_files()
+
+            except Exception as e:
+                messagebox.showerror(
+                    "Delete Row",
+                    f"Error deleting rows:\n{e}"
+                )
+
+        self.delete_row_button = ttk.Button(
+            actions_row,
+            text="Delete Row",
+            command=_delete_selected_rows,
+        )
+        self.delete_row_button.pack(side=tk.LEFT, padx=(6, 0))
+
         table_container = ttk.Frame(self.frame)
         
         table_container.columnconfigure(0, weight=1)
