@@ -401,6 +401,46 @@ class CombinedUIMixin:
         self.plot_visuals_button = ttk.Button(controls, text="Plot Stacked Visuals", command=_on_plot_stacked_visuals)
         self.plot_visuals_button.pack(side=tk.LEFT, padx=(6, 0))
 
+        # === New button: Copy ReleaseDate Prompt ===
+        from combined_utils import build_release_date_prompt
+
+        def _on_copy_releasedate_prompt():
+            try:
+                company = self.company_var.get().strip()
+                if not company:
+                    messagebox.showwarning("Company Missing", "Select a company before generating the prompt.")
+                    return
+
+                # Need the combined dataset first
+                if not self.combined_columns or not self.combined_rows:
+                    messagebox.showwarning("No Combined Data", "Create the combined dataset first.")
+                    return
+
+                # Extract date columns (dynamic columns only)
+                date_cols = [
+                    c for c in self.combined_columns
+                    if c not in ("TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "Key4Coloring")
+                ]
+
+                # Build prompt text
+                text = build_release_date_prompt(company, date_cols)
+
+                # Copy to clipboard
+                self.root.clipboard_clear()
+                self.root.clipboard_append(text)
+                self.root.update()  # keep clipboard when app closes
+                # no confirmation popup
+
+            except Exception as exc:
+                messagebox.showerror("Error", f"Failed to generate ReleaseDate prompt:\n{exc}")
+
+        copy_prompt_btn = ttk.Button(
+            controls,
+            text="Copy ReleaseDate Prompt",
+            command=_on_copy_releasedate_prompt,
+        )
+        copy_prompt_btn.pack(side=tk.LEFT, padx=(6, 0))
+
         table_container = ttk.Frame(combined_tab, padding=(8, 0, 8, 8))
         table_container.pack(fill=tk.BOTH, expand=True)
         table_container.rowconfigure(0, weight=1)

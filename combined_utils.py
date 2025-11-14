@@ -86,9 +86,73 @@ def reload_stock_multipliers(ui_instance):
     logger = getattr(ui_instance, "logger", None)
     if logger:
         logger.info("🔁 Reloaded stock multipliers into Date Columns view")
-
-
 def generate_and_open_stock_multipliers(logger=None, company_dir=None, date_columns=None, current_company_name=None):
+    ...
+    return
+
+def build_release_date_prompt(company: str, dates: list[str]) -> str:
+    """
+    Build the ReleaseDate research prompt for clipboard use.
+    Produces the CSV block:
+        Date,ReleaseDate
+        30.06.2020,
+        30.06.2021,
+    And injects COMPANY into the template.
+    """
+
+    # Build CSV
+    rows = ["Date,ReleaseDate"]
+    for d in dates:
+        if isinstance(d, str) and d.strip():
+            rows.append(f"{d.strip()},")
+    csv_block = "\n".join(rows)
+
+    template = f"""
+You are a highly accurate filings-research assistant.
+
+I will supply a CSV file with a column named “Date”.
+Each row represents the financial year-end date for a company.
+
+Your task:
+For each year-end date, conduct a **thorough, exhaustive, multi-source search** to determine
+the **public release date** of that year’s Annual Report (or equivalent filing containing
+the full audited annual financial statements).
+
+Your search MUST include, at minimum:
+• Stock exchange announcements from every exchange the company is or was listed on
+• Official company investor-relations website archives
+• Regulatory filings databases:
+    – SEC EDGAR
+    – ASX Announcements
+    – HKEXnews
+    – SGX Company Announcements
+    – LSE RNS
+    – TSX/SEDAR+
+• PDF annual reports and archived versions
+• MarketIndex announcement records (mandatory)
+• Third-party filings repositories that store historical annual reports
+• Press releases and earnings-release portals if they host annual report PDFs
+
+Rules:
+1. Identify the **earliest publicly released document** containing the FULL audited
+   annual financial statements for that financial year.
+2. Use only verifiable, authoritative sources (including MarketIndex).
+3. If a release date cannot be **confidently and conclusively** established,
+   leave the “ReleaseDate” field blank.
+4. Format all dates as **DD.MM.YYYY**.
+5. Do **not** hallucinate or infer dates without evidence.
+
+Output:
+• Return only a CSV with the original data and a new column “ReleaseDate”.
+• No explanations, no narrative — **CSV only**.
+
+Company: {company}
+
+CSV:
+{csv_block}
+""".strip()
+
+    return template
     """Force-create a new stock_multipliers.csv using all date columns and open it."""
     fpath = get_stock_multiplier_path(logger, company_dir, current_company_name)
     if not date_columns:
