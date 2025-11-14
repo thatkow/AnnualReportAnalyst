@@ -154,16 +154,9 @@ class CombinedUIMixin:
         controls = ttk.Frame(combined_tab, padding=8)
         controls.pack(fill=tk.X)
 
-        # === New stock multiplier control buttons ===
-        from combined_utils import open_stock_multipliers_file, reload_stock_multipliers, generate_and_open_stock_multipliers
 
-        self.stock_multiplier_button = ttk.Button(
-            controls, text="Stock Multiplier",
-            command=lambda: open_stock_multipliers_file(logger=getattr(self, "logger", None),
-                                                       company_dir=self.companies_dir,
-                                                       current_company_name=self.company_var.get())
-        )
-        self.stock_multiplier_button.pack(side=tk.LEFT)
+        # === New stock multiplier control buttons ===
+        from combined_utils import reload_stock_multipliers, generate_and_open_stock_multipliers
 
         self.reload_multipliers_button = ttk.Button(
             controls,
