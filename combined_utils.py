@@ -64,15 +64,6 @@ def load_stock_multipliers(logger=None, company_dir=None, pdf_paths=None, curren
         return {}
 
 
-def open_stock_multipliers_file(logger=None, company_dir=None, pdf_paths=None, current_company_name=None):
-    """Open the stock_multipliers.csv file with system default editor"""
-    fpath = ensure_stock_multiplier_file(logger, company_dir, pdf_paths, current_company_name)
-    try:
-        os.startfile(fpath)
-    except Exception as e:
-        if logger:
-            logger.warning(f"⚠️ Could not open {fpath}: {e}")
-
 
 def reload_stock_multipliers(ui_instance):
     """
