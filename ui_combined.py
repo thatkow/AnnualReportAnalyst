@@ -421,15 +421,38 @@ class CombinedUIMixin:
                     c for c in self.combined_columns
                     if c not in ("TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "Key4Coloring")
                 ]
-
                 # Build prompt text
                 text = build_release_date_prompt(company, date_cols)
 
                 # Copy to clipboard
                 self.root.clipboard_clear()
                 self.root.clipboard_append(text)
-                self.root.update()  # keep clipboard when app closes
-                # no confirmation popup
+                self.root.update()
+
+                # ----------------------------------------------------
+                # ALSO create CSV under companies/<COMPANY>/ReleaseDateTemplate.csv
+                # ----------------------------------------------------
+                import csv, os, sys
+                company_folder = self.companies_dir / company
+                company_folder.mkdir(parents=True, exist_ok=True)
+                csv_path = company_folder / "ReleaseDates.csv"
+
+                with csv_path.open("w", encoding="utf-8", newline="") as fh:
+                    writer = csv.writer(fh)
+                    writer.writerow(["Date", "ReleaseDate"])
+                    for d in date_cols:
+                        writer.writerow([d, ""])
+
+                # Open with system default
+                try:
+                    if sys.platform.startswith("win"):
+                        os.startfile(str(csv_path))  # type: ignore[attr-defined]
+                    elif sys.platform == "darwin":
+                        subprocess.run(["open", str(csv_path)], check=False)
+                    else:
+                        subprocess.run(["xdg-open", str(csv_path)], check=False)
+                except Exception:
+                    pass
 
             except Exception as exc:
                 messagebox.showerror("Error", f"Failed to generate ReleaseDate prompt:\n{exc}")
