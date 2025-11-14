@@ -341,14 +341,20 @@ class ScrapeManagerMixin:
                 csv_path = target_dir / f"{category}.csv"
                 already_processed = False
 
-                # New logic: check existence of the file on disk instead of panel presence
+                # Primary check: file exists on disk and has data
                 if csv_path.exists() and self._csv_has_data(csv_path):
                     already_processed = True
                 else:
-                    # Fallback: load via panel if panel exists but file not yet checked
+                    # Fallback: check panel if present (NO csv_path attribute—only load_from_files)
                     panel = self.scrape_panels.get((entry.path, category))
-                    if panel is not None and panel.csv_path.exists() and self._csv_has_data(panel.csv_path):
-                        already_processed = True
+                    if panel is not None:
+                        # Ask panel to refresh its data and rely on disk only
+                        try:
+                            panel.load_from_files()
+                        except Exception:
+                            pass
+                        if csv_path.exists() and self._csv_has_data(csv_path):
+                            already_processed = True
 
                 if already_processed:
                     self.logger.info(
@@ -387,7 +393,7 @@ class ScrapeManagerMixin:
                         text_payload=text_payload,
                     )
                 )
-                if panel is not None and not panel.has_csv_data:
+                if panel is not None:
                     panel.mark_loading()
 
         if prep_errors and not jobs:
