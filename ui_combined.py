@@ -319,8 +319,30 @@ class CombinedUIMixin:
                 def extract_mult(row_df):
                     if row_df.empty:
                         return {}
+
                     row = row_df.iloc[0]
-                    return {col: float(row[col]) if pd.notna(row[col]) and str(row[col]).strip() != "" else 1.0 for col in num_cols}
+
+                    def to_number(val, col):
+                        # If pandas returned a Series (duplicate columns), reduce safely
+                        if isinstance(val, pd.Series):
+                            if val.notna().any():
+                                val = val[val.notna()].iloc[0]
+                            else:
+                                raise ValueError(f"Multiplier for column '{col}' is empty or NaN.")
+
+                        s = str(val).strip()
+                        if s == "":
+                            raise ValueError(f"Multiplier for column '{col}' is blank.")
+
+                        # MUST be numeric
+                        try:
+                            return float(s)
+                        except Exception:
+                            raise ValueError(f"Multiplier for column '{col}' must be a number, got: '{val}'")
+
+                    return {col: to_number(row[col], col) for col in num_cols}
+
+
 
                 share_mult = extract_mult(share_mult_row)
                 stock_mult = extract_mult(stock_mult_row)
