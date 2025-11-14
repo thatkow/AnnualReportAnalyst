@@ -172,16 +172,11 @@ class ScrapeManagerMixin:
             selected_model,
             file_ids,
         )
-        response = client.responses.create(
-            model=selected_model,
-            input=
-            [
-                {
-                    "role": "system",
-                    "content": "You are a financial statement parser.",
-                },
-                {"role": "user", "content": user_entries},
-            ],
+        response = self._submit_openai_request(
+            client,
+            selected_model,
+            user_entries,
+            allow_file_attachments=True,
         )
         self.logger.info("AIScrape response received (model=%s)", selected_model)
         return self._extract_openai_response_text(response)
@@ -217,18 +212,76 @@ class ScrapeManagerMixin:
             selected_model,
             len(cleaned_text),
         )
-        response = client.responses.create(
-            model=selected_model,
-            input=[
-                {
-                    "role": "system",
-                    "content": "You are a financial statement parser.",
-                },
-                {"role": "user", "content": user_entries},
-            ],
+        response = self._submit_openai_request(
+            client,
+            selected_model,
+            user_entries,
+            allow_file_attachments=False,
         )
         self.logger.info("AIScrape text response received (model=%s)", selected_model)
         return self._extract_openai_response_text(response)
+
+    def _submit_openai_request(
+        self,
+        client: Any,
+        model_name: str,
+        user_entries: List[Dict[str, Any]],
+        *,
+        allow_file_attachments: bool,
+    ) -> Any:
+        try:
+            return client.responses.create(
+                model=model_name,
+                input=[
+                    {
+                        "role": "system",
+                        "content": "You are a financial statement parser.",
+                    },
+                    {"role": "user", "content": user_entries},
+                ],
+            )
+        except AttributeError as exc:
+            if allow_file_attachments:
+                raise RuntimeError(
+                    "The installed OpenAI client does not support file uploads via the Responses API. "
+                    "Upgrade the 'openai' package to a version that includes client.responses.create() "
+                    "or switch AIScrape to text upload mode."
+                ) from exc
+            self.logger.warning(
+                "OpenAI client lacks the Responses API; falling back to chat completions for text mode."
+            )
+            return self._submit_openai_chat_completion(client, model_name, user_entries)
+
+    def _submit_openai_chat_completion(
+        self,
+        client: Any,
+        model_name: str,
+        user_entries: List[Dict[str, Any]],
+    ) -> Any:
+        text_parts: List[str] = []
+        for entry in user_entries:
+            if entry.get("type") != "input_text":
+                continue
+            text = str(entry.get("text", "")).strip()
+            if text:
+                text_parts.append(text)
+        if not text_parts:
+            raise ValueError("OpenAI chat completion fallback requires text input content.")
+
+        messages = [
+            {"role": "system", "content": "You are a financial statement parser."},
+            {"role": "user", "content": "\n\n".join(text_parts)},
+        ]
+
+        try:
+            chat_api = client.chat.completions
+        except AttributeError as exc:
+            raise RuntimeError(
+                "The installed OpenAI client does not provide chat.completions.create(); upgrade the "
+                "'openai' package to continue using AIScrape text mode."
+            ) from exc
+
+        return chat_api.create(model=model_name, messages=messages)
 
     def _call_openai_for_job(self, job: ScrapeJob, api_key: str) -> str:
         if job.upload_mode == "text":
