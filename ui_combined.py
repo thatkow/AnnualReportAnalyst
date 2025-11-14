@@ -1583,8 +1583,7 @@ class CombinedUIMixin:
         self.combined_rows = final_rows
         self._update_mapping_buttons()
         if self.combined_save_button is not None:
-            self.combined_save_button.configure(state="normal")
-        messagebox.showinfo("Combined", f"Combined dataset created with {len(final_rows)} rows and {len(columns)} columns.")
+            self.combined_save_button.configure(state="normal")        
 
         # === Sort date columns (and reorder rows accordingly) ===
         import re
