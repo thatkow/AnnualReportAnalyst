@@ -380,8 +380,18 @@ class CombinedUIMixin:
 
                 # Apply Stock Multiplier and Share Multiplier to all "Number of shares" rows
                 share_rows = df[df["ITEM"].str.lower() == "number of shares"]
-                for c in num_cols:
-                    df.loc[share_rows.index, c] = df.loc[share_rows.index, c] * share_mult.get(c, 1.0) * stock_mult.get(c, 1.0)
+                print(share_rows)
+                for c in num_cols:                    
+                    base_val      = df.loc[share_rows.index, c]
+                    share_factor  = share_mult.get(c, 1.0)
+                    stock_factor  = stock_mult.get(c, 1.0)
+
+                    # local vars → clearer intent / debug-friendly
+                    combined_mult = share_factor * stock_factor
+
+                    df.loc[share_rows.index, c] = (
+                        base_val * combined_mult
+                    )
 
                 # Apply Financial / Income multipliers to corresponding TYPE rows (excluding the multiplier rows)
                 for c in num_cols:
@@ -413,7 +423,7 @@ class CombinedUIMixin:
                     return
 
                 # Financial year columns = Date column from the CSV
-                year_cols = list(release_map.keys())
+                year_cols = list(self.combined_rename_names)
 
                 # === Replace factor_lookup with stock price-based lookup (inverted prices) ===
                 from analyst_yahoo import get_stock_data_for_dates
@@ -542,8 +552,13 @@ class CombinedUIMixin:
                 if not share_rows.empty:
                     row = share_rows.iloc[0]
                     for y in year_cols:
-                        val = row.get(y)
-                        share_counts[company_name][y] = float(val) if pd.notna(val) else 1.0
+                        raw_val = row.get(y)
+                        if pd.notna(raw_val):
+                            numeric_val = float(raw_val)
+                            rounded_val = round(numeric_val, 2)
+                            share_counts[company_name][y] = rounded_val
+                        else:
+                            raise ValueError(f"Number of shares for year '{y}' is missing or NaN.")
                 else:
                     share_counts[company_name] = {y: 1.0 for y in year_cols}
 
