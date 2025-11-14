@@ -307,15 +307,23 @@ class CombinedUIMixin:
                 # Construct DataFrame from current table
                 df = pd.DataFrame(self.combined_rows, columns=self.combined_columns).fillna("")
 
+                excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
+                num_cols = [c for c in df.columns if c not in excluded_cols]
+                for c in num_cols:
+                    # only operate on string-like values; leave text columns untouched
+                    df[c] = (
+                        df[c]
+                        .astype(str)
+                        .str.replace(",", "", regex=False)
+                    )
+
+
                 # Extract rows containing multipliers
                 share_mult_row = df[df["CATEGORY"].str.lower() == "shares multiplier"]
                 stock_mult_row = df[df["CATEGORY"].str.lower() == "stock multiplier"]
                 fin_mult_row = df[(df["CATEGORY"].str.lower() == "financial multiplier")]
                 inc_mult_row = df[(df["CATEGORY"].str.lower() == "income multiplier")]
-               
-                excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
-                num_cols = [c for c in df.columns if c not in excluded_cols]
-
+                             
                 def extract_mult(row_df):
                     if row_df.empty:
                         return {}
