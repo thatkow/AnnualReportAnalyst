@@ -829,10 +829,40 @@ class CombinedUIMixin:
             width = self.get_scrape_column_width(name)
             tv.column(cid, width=width, anchor=anchor, stretch=True)
         for row in rows:
-            values = list(row[:len(col_ids)])
-            if len(values) < len(col_ids):
-                values += [""] * (len(col_ids) - len(values))
-            iid = tv.insert("", "end", values=values)
+            raw_values = list(row[:len(col_ids)])
+            if len(raw_values) < len(col_ids):
+                raw_values += [""] * (len(col_ids) - len(raw_values))
+
+            # === NEW: Visual formatting only (commas) ===
+            formatted = []
+            for c_name, val in zip(columns, raw_values):
+                s = str(val).strip()
+
+                # Text columns render unchanged
+                if c_name.lower() in ("type", "category", "subcategory", "item", "note", "key4coloring"):
+                    formatted.append(s)
+                    continue
+
+                # Empty → show empty
+                if s == "":
+                    formatted.append("")
+                    continue
+
+                # Try formatting numbers
+                try:
+                    num = float(s)
+                    if num.is_integer():
+                        formatted.append(f"{int(num):,}")
+                    else:
+                        formatted.append(f"{num:,.2f}")
+                except Exception:
+                    # Non-numeric → render raw
+                    formatted.append(s)
+
+            # Insert *formatted* display values
+            iid = tv.insert("", "end", values=formatted)
+
+            # Apply NOTE coloring based on raw data (unchanged)
             self._apply_note_color_to_combined_item(iid, columns, tv)
 
     def save_combined_to_csv(self) -> None:

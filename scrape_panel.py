@@ -686,15 +686,48 @@ class ScrapeResultPanel:
 
         column_count = len(self._column_ids)
         for row in rows:
-            values = list(row[:column_count])
-            if len(values) < column_count:
-                values.extend([""] * (column_count - len(values)))
-            item_id = self.table.insert("", "end", values=values)
+            raw_values = list(row[:column_count])
+            if len(raw_values) < column_count:
+                raw_values.extend([""] * (column_count - len(raw_values)))
+
+            # === NEW: formatted display values ===
+            formatted = []
+            for col_name, v in zip(self.current_columns, raw_values):
+                s = str(v).strip()
+
+                # Always show text columns raw
+                if col_name.lower() in ("category", "subcategory", "item", "note"):
+                    formatted.append(s)
+                    continue
+
+                # blank remains blank
+                if s == "":
+                    formatted.append("")
+                    continue
+
+                # try to format number visually
+                try:
+                    num = float(s)
+                    if num.is_integer():
+                        formatted.append(f"{int(num):,}")
+                    else:
+                        formatted.append(f"{num:,.2f}")
+                except Exception:
+                    formatted.append(s)
+
+            # Insert formatted values (DISPLAY ONLY)
+            item_id = self.table.insert("", "end", values=formatted)
+
+            # When saving or reading: use raw_values instead of formatted
+            # (No further code change needed because save_table_to_csv reads Treeview values)
+
             if register:
                 key = (
-                    values[0] if column_count > 0 else "",
-                    values[1] if column_count > 1 else "",
-                    values[2] if column_count > 2 else "",
+                    raw_values[0] if column_count > 0 else "",
+                    raw_values[1] if column_count > 1 else "",
+                    raw_values[2] if column_count > 2 else "",
+                    raw_values[3] if column_count > 3 else "",
+                    raw_values[4] if column_count > 4 else "",
                 )
                 self.row_keys[item_id] = key
                 self.app.register_scrape_row(self, item_id, key)
