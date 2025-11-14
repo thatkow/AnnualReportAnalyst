@@ -129,11 +129,14 @@ class ScrapeContextMenu:
         if not item_id:
             return
 
+        # NEW LOGIC:
+        # When apply_all=True, apply to ALL SELECTED rows, not just the context row.
+        selected = list(self.view.table.selection())
         if apply_all:
-            target_rows = [item_id]
+            target_rows = selected if selected else [item_id]
         else:
-            sel = list(self.view.table.selection())
-            target_rows = sel if sel else [item_id]
+            # Only apply to selected rows; if none selected, use context row.
+            target_rows = selected if selected else [item_id]
 
         normalized = self.view.normalize_state_label(state_label)
         note_index = self.view._note_column_index()
