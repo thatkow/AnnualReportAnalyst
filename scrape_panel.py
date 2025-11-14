@@ -351,6 +351,7 @@ class ScrapeResultPanel:
 
         # === New: Flip Sign for selected row ===
         def _flip_sign():
+            """Flip sign for all columns in the clicked row using simple prefix logic."""
             row_id = self._context_item
             if not row_id:
                 return
@@ -358,10 +359,14 @@ class ScrapeResultPanel:
             values = list(self.table.item(row_id, "values"))
             new_vals = []
             for v in values:
-                try:
-                    new_vals.append(str(-1 * float(v)))
-                except Exception:
-                    new_vals.append(v)
+                s = str(v).strip()
+                # --- simple sign toggle ---
+                if s.startswith("-"):
+                    new_vals.append(s[1:])
+                elif s == "":
+                    new_vals.append("")
+                else:
+                    new_vals.append("-" + s)
 
             self.table.item(row_id, values=new_vals)
             self.save_table_to_csv()
@@ -377,17 +382,25 @@ class ScrapeResultPanel:
 
         # === New: Flip Sign option ===
         def _flip_sign():
-            # Multiply all numeric date-column values by -1.0
-            rows = []
+            """Flip sign for ALL rows using simple prefix logic."""
             for item_id in self.table.get_children(""):
+
                 values = list(self.table.item(item_id, "values"))
                 new_vals = []
+
                 for v in values:
-                    try:
-                        new_vals.append(str(-1 * float(v)))
-                    except Exception:
-                        new_vals.append(v)
+                    s = str(v).strip()
+
+                    # --- simple string-based toggle ---
+                    if s.startswith("-"):
+                        new_vals.append(s[1:])
+                    elif s == "":
+                        new_vals.append("")
+                    else:
+                        new_vals.append("-" + s)
+
                 self.table.item(item_id, values=new_vals)
+
             self.save_table_to_csv()
             self.app.reload_scrape_panels()
 
