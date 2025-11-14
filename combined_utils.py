@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 from pathlib import Path
+from typing import Iterable, Optional
 
 
 def get_stock_multiplier_path(logger=None, company_dir=None, current_company_name=None):
@@ -74,20 +75,173 @@ def open_stock_multipliers_file(logger=None, company_dir=None, pdf_paths=None, c
 
 
 def reload_stock_multipliers(ui_instance):
-    """Reload multipliers and refresh Date Columns by PDF table"""
+    """
+    Reload multipliers and refresh any dependent UI.
+
+    This is wired to work with the CombinedUIMixin-based UI:
+      - uses ui_instance.companies_dir
+      - uses ui_instance.company_var.get() as the company name
+      - uses ui_instance.combined_rename_names / combined_dyn_columns as date list
+    """
+    logger = getattr(ui_instance, "logger", None)
+
+    # Resolve company directory (CombinedUIMixin uses 'companies_dir')
+    company_dir = getattr(ui_instance, "companies_dir", None)
+
+    # Resolve current company name
+    current_company_name: Optional[str] = None
+    try:
+        # CombinedUIMixin style
+        if hasattr(ui_instance, "company_var") and ui_instance.company_var is not None:
+            current_company_name = ui_instance.company_var.get()
+    except Exception:
+        current_company_name = None
+
+    # Fallback to any legacy attribute if present
+    if not current_company_name:
+        current_company_name = getattr(ui_instance, "current_company_name", None)
+
+    # Try to get the date columns used for multipliers (from Combined tab)
+    date_cols: Optional[Iterable[str]] = None
+    if hasattr(ui_instance, "combined_rename_names"):
+        date_cols = getattr(ui_instance, "combined_rename_names", None)
+
+    if (not date_cols) and hasattr(ui_instance, "combined_dyn_columns"):
+        try:
+            dyn_cols = getattr(ui_instance, "combined_dyn_columns", [])
+            date_cols = [dc.get("default_name") for dc in dyn_cols if isinstance(dc, dict)]
+        except Exception:
+            date_cols = None
+
     mults = load_stock_multipliers(
-        logger=getattr(ui_instance, "logger", None),
-        company_dir=getattr(ui_instance, "company_dir", None),
-        pdf_paths=getattr(ui_instance, "pdf_paths", None),
-        current_company_name=getattr(ui_instance, "current_company_name", None),
+        logger=logger,
+        company_dir=company_dir,
+        pdf_paths=date_cols,
+        current_company_name=current_company_name,
     )
     ui_instance.stock_multipliers = mults
-    ui_instance._populate_date_matrix_table()
-    logger = getattr(ui_instance, "logger", None)
+
+    # Best-effort UI refresh (support both old and new APIs)
+    if hasattr(ui_instance, "_populate_date_matrix_table"):
+        try:
+            ui_instance._populate_date_matrix_table()
+        except Exception:
+            pass
+    elif hasattr(ui_instance, "refresh_combined_tab"):
+        try:
+            ui_instance.refresh_combined_tab()
+        except Exception:
+            pass
+
     if logger:
-        logger.info("🔁 Reloaded stock multipliers into Date Columns view")
+        logger.info("🔁 Reloaded stock multipliers")
 def generate_and_open_stock_multipliers(logger=None, company_dir=None, date_columns=None, current_company_name=None):
-    ...
+    """
+    Create or extend companies/<company>/stock_multipliers.csv :
+      • If file exists: append missing dates (Stock Multiplier = 1)
+      • If absent: create new file
+      • Always open the file afterwards
+    """
+    import csv, os
+    from datetime import datetime
+
+    # ------------------------------------------------------------------
+    # ALWAYS resolve company stock_multipliers.csv path correctly
+    # => companies/<company>/stock_multipliers.csv
+    # ------------------------------------------------------------------
+    fpath = get_stock_multiplier_path(
+        logger=logger,
+        company_dir=company_dir,
+        current_company_name=current_company_name
+    )
+
+    # Normalize input
+    if not date_columns:
+        date_columns = []
+
+    # Try to sort dates in ascending chronological order
+    try:
+        import re
+        def parse_date_str(s):
+            s = str(s).strip()
+            # Known formats
+            for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d-%m-%Y"):
+                try:
+                    return datetime.strptime(s, fmt)
+                except Exception:
+                    pass
+            # Fallback
+            parts = re.split(r"[./-]", s)
+            nums = [int(p) for p in parts if p.isdigit()]
+            if len(nums) == 3:
+                d,m,y = nums
+                if y < 100:
+                    y += 2000
+                return datetime(y,m,d)
+            return datetime.max
+
+        date_columns = sorted(date_columns, key=parse_date_str)
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ Failed to sort dates: {e}")
+
+    # ------------------------------------------------------------------
+    # CASE A: stock_multipliers.csv EXISTS → merge missing dates
+    # ------------------------------------------------------------------
+    if fpath.exists():
+        existing = {}
+        try:
+            with fpath.open("r", encoding="utf-8", newline="") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    d = row.get("Date", "").strip()
+                    mv = row.get("Stock Multiplier", "").strip()
+                    if d:
+                        existing[d] = mv if mv != "" else "1"
+        except Exception as e:
+            if logger:
+                logger.error(f"❌ Failed to read {fpath}: {e}")
+            existing = {}
+
+        changed = False
+        for d in date_columns:
+            if d not in existing:
+                existing[d] = "1"
+                changed = True
+
+        if changed:
+            try:
+                with fpath.open("w", encoding="utf-8", newline="") as fh:
+                    writer = csv.writer(fh)
+                    writer.writerow(["Date", "Stock Multiplier"])
+                    for d in date_columns:
+                        writer.writerow([d, existing.get(d, "1")])
+            except Exception as e:
+                if logger:
+                    logger.error(f"❌ Unable to rewrite merged multipliers: {e}")
+
+    else:
+        # ------------------------------------------------------------------
+        # CASE B: File does NOT exist → create new stock_multipliers.csv
+        # ------------------------------------------------------------------
+        try:
+            df = pd.DataFrame({"Date": date_columns,
+                               "Stock Multiplier": [1]*len(date_columns)})
+            df.to_csv(fpath, index=False)
+        except Exception as e:
+            if logger:
+                logger.error(f"❌ Failed to create stock_multipliers.csv: {e}")
+            return
+
+    # ------------------------------------------------------------------
+    # Open the file (Windows/macOS/Linux)
+    # ------------------------------------------------------------------
+    try:
+        os.startfile(str(fpath))
+    except Exception as e:
+        if logger:
+            logger.warning(f"⚠️ Could not open {fpath}: {e}")
+
     return
 
 def build_release_date_prompt(company: str, dates: list[str]) -> str:
