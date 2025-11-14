@@ -351,26 +351,34 @@ class ScrapeResultPanel:
 
         # === New: Flip Sign for selected row ===
         def _flip_sign():
-            """Flip sign for all columns in the clicked row using simple prefix logic."""
-            row_id = self._context_item
-            if not row_id:
-                return
+            """
+            Flip sign for all columns in ALL SELECTED rows.
+            Previously only flipped the context (right-clicked) row.
+            """
+            selected = self.table.selection()
+            if not selected:
+                # Fallback: use context row if nothing is selected
+                selected = [self._context_item] if self._context_item else []
 
-            values = list(self.table.item(row_id, "values"))
-            new_vals = []
-            for v in values:
-                s = str(v).strip()
-                # --- simple sign toggle ---
-                if s.startswith("-"):
-                    new_vals.append(s[1:])
-                elif s == "":
-                    new_vals.append("")
-                else:
-                    new_vals.append("-" + s)
+            for item_id in selected:
+                values = list(self.table.item(item_id, "values"))
+                new_vals = []
+                for v in values:
+                    s = str(v).strip()
+                    # --- string-based sign toggle ---
+                    if s.startswith("-"):
+                        new_vals.append(s[1:])
+                    elif s == "":
+                        new_vals.append("")
+                    else:
+                        new_vals.append("-" + s)
 
-            self.table.item(row_id, values=new_vals)
+                self.table.item(item_id, values=new_vals)
+
             self.save_table_to_csv()
             self.load_from_files()
+
+
 
         self._context_menu.add_command(
             label="Flip Sign (row)",
@@ -380,25 +388,37 @@ class ScrapeResultPanel:
         # === New Section Separator ===
         self._context_menu.add_separator()
 
-        # === New: Flip Sign option ===
+        # === New: Flip Sign option ===    
         def _flip_sign():
-            """Flip sign for ALL rows using simple prefix logic."""
-            for item_id in self.table.get_children(""):
+            """
+            Flip sign for selected column OR whole row,
+            but only on SELECTED rows (not entire table).
+            """
+            selected = self.table.selection()
+            if not selected:
+                return
 
+            col = getattr(self, "_flip_column_index", None)
+
+            for item_id in selected:
                 values = list(self.table.item(item_id, "values"))
-                new_vals = []
+                new_vals = values[:]  # copy
 
-                for v in values:
-                    s = str(v).strip()
+                # whole row flip
+                if col is None:
+                    indices = range(len(values))
+                else:
+                    indices = [col] if col < len(values) else []
 
-                    # --- simple string-based toggle ---
+                for i in indices:
+                    s = str(new_vals[i]).strip()
+                    # --- simple sign toggle ---
                     if s.startswith("-"):
-                        new_vals.append(s[1:])
+                        new_vals[i] = s[1:]
                     elif s == "":
-                        new_vals.append("")
+                        new_vals[i] = ""
                     else:
-                        new_vals.append("-" + s)
-
+                        new_vals[i] = "-" + s
                 self.table.item(item_id, values=new_vals)
 
             self.save_table_to_csv()
