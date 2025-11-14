@@ -444,7 +444,6 @@ class CombinedUIMixin:
 
         # === New button: Copy ReleaseDate Prompt ===
         from combined_utils import build_release_date_prompt
-
         def _on_copy_releasedate_prompt():
             try:
                 company = self.company_var.get().strip()
@@ -462,6 +461,7 @@ class CombinedUIMixin:
                     c for c in self.combined_columns
                     if c.upper() not in ("TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "KEY4COLORING")
                 ]
+
                 # Build prompt text
                 text = build_release_date_prompt(company, date_cols)
 
@@ -470,19 +470,48 @@ class CombinedUIMixin:
                 self.root.clipboard_append(text)
                 self.root.update()
 
-                # ----------------------------------------------------
-                # ALSO create CSV under companies/<COMPANY>/ReleaseDateTemplate.csv
-                # ----------------------------------------------------
+                # ------------------------------------------------------------
+                # NEW BEHAVIOUR:
+                # If ReleaseDates.csv exists, append missing dates and open it.
+                # If not, create a new one.
+                # ------------------------------------------------------------
                 import csv, os, sys
                 company_folder = self.companies_dir / company
                 company_folder.mkdir(parents=True, exist_ok=True)
                 csv_path = company_folder / "ReleaseDates.csv"
 
-                with csv_path.open("w", encoding="utf-8", newline="") as fh:
-                    writer = csv.writer(fh)
-                    writer.writerow(["Date", "ReleaseDate"])
+                # Case 1: File exists → merge
+                if csv_path.exists():
+                    existing = {}
+                    with csv_path.open("r", encoding="utf-8", newline="") as fh:
+                        reader = csv.DictReader(fh)
+                        for row in reader:
+                            date_key = row.get("Date", "").strip()
+                            if date_key:
+                                existing[date_key] = row.get("ReleaseDate", "").strip()
+
+                    # Append missing dates
+                    changed = False
                     for d in date_cols:
-                        writer.writerow([d, ""])
+                        if d not in existing:
+                            existing[d] = ""
+                            changed = True
+
+                    # Rewrite ONLY if needed (otherwise leave intact)
+                    if changed:
+                        with csv_path.open("w", encoding="utf-8", newline="") as fh:
+                            writer = csv.writer(fh)
+                            writer.writerow(["Date", "ReleaseDate"])
+                            for dt, rel in existing.items():
+                                writer.writerow([dt, rel])
+
+                else:
+                    # Case 2: Create fresh file
+                    with csv_path.open("w", encoding="utf-8", newline="") as fh:
+                        writer = csv.writer(fh)
+                        writer.writerow(["Date", "ReleaseDate"])
+                        for d in date_cols:
+                            writer.writerow([d, ""])
 
                 # Open with system default
                 try:
