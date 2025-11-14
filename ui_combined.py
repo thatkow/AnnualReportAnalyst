@@ -259,8 +259,27 @@ class CombinedUIMixin:
                 # === Inject Ticker column using company_name ===
                 df["Ticker"] = company_name
 
-                # === Identify year columns ===
-                year_cols = [c for c in df.columns if c[:2].isdigit() or c.startswith("31.")]
+                # === Load ReleaseDates.csv ===
+                # Must contain: Date,ReleaseDate
+                release_csv = self.companies_dir / company_name / "ReleaseDates.csv"
+                release_map = {}   # financialDate → releaseDate
+
+                if release_csv.exists():
+                    import csv
+                    with release_csv.open("r", encoding="utf-8") as fh:
+                        reader = csv.DictReader(fh)
+                        for row in reader:
+                            financial = row.get("Date", "").strip()
+                            rel = row.get("ReleaseDate", "").strip()
+                            if financial:
+                                release_map[financial] = rel
+                else:
+                    messagebox.showerror("Missing ReleaseDates.csv",
+                                         "ReleaseDates.csv is required for stock price lookups.")
+                    return
+
+                # Financial year columns = Date column from the CSV
+                year_cols = list(release_map.keys())
 
                 # === Replace factor_lookup with stock price-based lookup (inverted prices) ===
                 from analyst_yahoo import get_stock_data_for_dates
@@ -268,52 +287,72 @@ class CombinedUIMixin:
                 # Provide optional parameter for lookup label
                 lookup_label = getattr(self, "factor_label", "Stock-adjusted factors")
 
-                # Define date shifts for keys
-                shift_keys = {
-                    "": 0,  # blank entry maps to 1
-                    "Prior month (-30)": -30,
-                    "Prior week (-7)": -7,
-                    "Prior day (-1)": -1,
-                    "On release (0)": 0,
-                    "Next day (+1)": 1,
-                    "Next week (+7)": 7,
-                    "Next month (+30)": 30,
-                }
+                # Shifts used for stock lookups (values only)
+                shift_values = [-30, -7, -1, 0, 1, 7, 30]
 
                 ticker = company_name or "UNKNOWN"
                 print(f"📈 Fetching stock prices for {ticker} (label: {lookup_label})...")
 
-                stock_df = get_stock_data_for_dates(
-                    ticker=ticker,
-                    dates=year_cols,
-                    days=[d for d in shift_keys.values()],
-                    cache_filepath="stock_cache.json"
-                )
+                # === Prepare list of release dates for lookup ===
+                lookup_release_dates = [
+                    rel for rel in release_map.values()
+                    if rel not in ("", None)
+                ]
 
-                factor_lookup = {}
+                if lookup_release_dates:
+                    stock_df = get_stock_data_for_dates(
+                        ticker=ticker,
+                        dates=lookup_release_dates,
+                        days=shift_values,
+                        cache_filepath="stock_cache.json"
+                    )
+                else:
+                    stock_df = None
 
+                # === Rebuild factor_lookup using *financial year* keys ===
+                factor_lookup = {"": {y: 1.0 for y in year_cols}}
 
-                # Blank entry maps every year to factor=1.0
-                factor_lookup[""] = {y: 1.0 for y in year_cols}
+                # Build readable shift labels
+                def shift_label(s):
+                    if s == -30: return "Prior month"
+                    if s == -7:  return "Prior week"
+                    if s == -1:  return "Prior day"
+                    if s == 0:   return "On release"
+                    if s == 1:   return "Next day"
+                    if s == 7:   return "Next week"
+                    if s == 30:  return "Next month"
+                    return f"Shift {s}"
 
-                # Informational log
-                print(f"🟦 Added blank factor_lookup entry for all years: {len(year_cols)} columns mapped to 1.0")
+                # Populate shift price maps
+                for s in shift_values:
+                    label = shift_label(s)
+                    key_label = f"{label} ({s:+d})"
+                    factor_lookup[key_label] = {}
 
-                for key_label, day_offset in shift_keys.items():
-                    if key_label == "":
-                        continue
+                    for financial_date, release_date in release_map.items():
+                        if not release_date:
+                            factor_lookup[key_label][financial_date] = float("nan")
+                            continue
 
-                    subset = stock_df[stock_df["OffsetDays"] == day_offset]
-                    price_map = {}
-                    for _, row in subset.iterrows():
-                        base = row["BaseDate"]
-                        price = row["Price"]
-                        if pd.notna(price) and price > 0:
-                            price_map[base] = 1.0 / float(price)
+                        if stock_df is None:
+                            factor_lookup[key_label][financial_date] = float("nan")
+                            continue
+
+                        subset = stock_df[
+                            (stock_df["BaseDate"] == release_date)
+                            & (stock_df["OffsetDays"] == s)
+                        ]
+
+                        if subset.empty:
+                            factor_lookup[key_label][financial_date] = float("nan")
                         else:
-                            price_map[base] = float("nan")
-
-                    factor_lookup[key_label] = price_map
+                            price = subset.iloc[0]["Price"]
+                            if pd.notna(price) and price > 0:
+                                factor_lookup[key_label][financial_date] = (
+                                    1.0 / float(price)
+                                )
+                            else:
+                                factor_lookup[key_label][financial_date] = float("nan")
 
                 if factor_lookup:
                     print(f"✅ {lookup_label} generated:")
@@ -336,23 +375,25 @@ class CombinedUIMixin:
                 p = stock_df.iloc[0]["Price"]
                 
 
-                # === Build factor_tooltip map (date → ["offset: price"]) ===
+                # === Build tooltips ===
                 factor_tooltip = {}
-                for y in year_cols:
+                for financial_date, release_date in release_map.items():
                     entries = []
-                    for key_label, day_offset in shift_keys.items():
-                        if key_label == "":
-                            continue
-                        # Retrieve 1/price from factor_lookup, invert to display original price
-                        lookup_map = factor_lookup.get(key_label, {})
-                        inv_val = lookup_map.get(y, None)
-                        if inv_val is None or pd.isna(inv_val) or inv_val == 0:
-                            entries.append(f"{day_offset:+d}: NaN")
+
+                    # First line REQUIRED:
+                    entries.append(f"Release Date: {release_date or 'NA'}")
+
+                    for s in shift_values:
+                        label = shift_label(s)
+                        key_label = f"{label} ({s:+d})"
+                        inv = factor_lookup[key_label].get(financial_date, float("nan"))
+
+                        if pd.isna(inv) or inv == 0:
+                            entries.append(f"{label}: NaN")
                         else:
-                            price_val = 1.0 / inv_val
-                            entries.append(f"{day_offset:+d}: {price_val:.3f}")
+                            entries.append(f"{label}: {1.0/inv:.3f}")
                     entries.append(f"Today: {p:.3f}" if p > 0 else "Today: NaN")
-                    factor_tooltip[y] = entries
+                    factor_tooltip[financial_date] = entries
 
                 factor_tooltip_label = "Stock Prices"
                 print(f"🟩 Built factor_tooltip (showing stock prices) with {len(factor_tooltip)} entries.")
@@ -419,7 +460,7 @@ class CombinedUIMixin:
                 # Extract date columns (dynamic columns only)
                 date_cols = [
                     c for c in self.combined_columns
-                    if c not in ("TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "Key4Coloring")
+                    if c.upper() not in ("TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "KEY4COLORING")
                 ]
                 # Build prompt text
                 text = build_release_date_prompt(company, date_cols)
