@@ -16,7 +16,8 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
 from constants import COLUMNS, DEFAULT_OPENAI_MODEL, SCRAPE_EXPECTED_COLUMNS
-
+# === New button: Copy ReleaseDate Prompt ===
+from combined_utils import build_release_date_prompt
 
 COMBINED_BASE_COLUMNS = [
     "TYPE",
@@ -125,6 +126,91 @@ class CombinedUIMixin:
         except Exception:
             _focus_scrape_panel()
 
+
+   
+    def _on_copy_releasedate_prompt(self):
+        try:
+            company = self.company_var.get().strip()
+            if not company:
+                messagebox.showwarning("Company Missing", "Select a company before generating the prompt.")
+                return
+
+            # Need the combined dataset first
+            if not self.combined_columns or not self.combined_rows:
+                messagebox.showwarning("No Combined Data", "Create the combined dataset first.")
+                return
+
+            # Extract date columns (dynamic columns only)
+            date_cols = [
+                c for c in self.combined_columns
+                if c.upper() not in ("TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "KEY4COLORING")
+            ]
+
+            # Build prompt text
+            text = build_release_date_prompt(company, date_cols)
+
+            # Copy to clipboard
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update()
+
+            # ------------------------------------------------------------
+            # NEW BEHAVIOUR:
+            # If ReleaseDates.csv exists, append missing dates and open it.
+            # If not, create a new one.
+            # ------------------------------------------------------------
+            import csv, os, sys
+            company_folder = self.companies_dir / company
+            company_folder.mkdir(parents=True, exist_ok=True)
+            csv_path = company_folder / "ReleaseDates.csv"
+
+            # Case 1: File exists → merge
+            if csv_path.exists():
+                existing = {}
+                with csv_path.open("r", encoding="utf-8", newline="") as fh:
+                    reader = csv.DictReader(fh)
+                    for row in reader:
+                        date_key = row.get("Date", "").strip()
+                        if date_key:
+                            existing[date_key] = row.get("ReleaseDate", "").strip()
+
+                # Append missing dates
+                changed = False
+                for d in date_cols:
+                    if d not in existing:
+                        existing[d] = ""
+                        changed = True
+
+                # Rewrite ONLY if needed (otherwise leave intact)
+                if changed:
+                    with csv_path.open("w", encoding="utf-8", newline="") as fh:
+                        writer = csv.writer(fh)
+                        writer.writerow(["Date", "ReleaseDate"])
+                        for dt, rel in existing.items():
+                            writer.writerow([dt, rel])
+
+            else:
+                # Case 2: Create fresh file
+                with csv_path.open("w", encoding="utf-8", newline="") as fh:
+                    writer = csv.writer(fh)
+                    writer.writerow(["Date", "ReleaseDate"])
+                    for d in date_cols:
+                        writer.writerow([d, ""])
+
+            # Open with system default
+            try:
+                if sys.platform.startswith("win"):
+                    os.startfile(str(csv_path))  # type: ignore[attr-defined]
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", str(csv_path)], check=False)
+                else:
+                    subprocess.run(["xdg-open", str(csv_path)], check=False)
+            except Exception:
+                pass
+
+        except Exception as exc:
+            messagebox.showerror("Error", f"Failed to generate ReleaseDate prompt:\n{exc}")
+
     def build_combined_tab(self, notebook: ttk.Notebook) -> None:
         combined_tab = ttk.Frame(notebook)
         notebook.add(combined_tab, text="Combined")
@@ -157,31 +243,56 @@ class CombinedUIMixin:
 
         # === New stock multiplier control buttons ===
         from combined_utils import reload_stock_multipliers, generate_and_open_stock_multipliers
-
-        self.reload_multipliers_button = ttk.Button(
-            controls,
-            text="Reload Multipliers",
-            command=lambda: reload_stock_multipliers(self),
-        )
-        self.reload_multipliers_button.pack(side=tk.LEFT, padx=(6, 0))
-
+        # 1) Generate Multipliers
         self.generate_multipliers_button = ttk.Button(
             controls, text="Generate Multipliers",
-            command=lambda: generate_and_open_stock_multipliers(logger=getattr(self, "logger", None),
-                                                                company_dir=self.companies_dir,
-                                                                date_columns=self.combined_rename_names,
-                                                                current_company_name=self.company_var.get())
+            command=lambda: generate_and_open_stock_multipliers(
+                logger=getattr(self, "logger", None),
+                company_dir=self.companies_dir,
+                date_columns=self.combined_rename_names,
+                current_company_name=self.company_var.get()
+            )
         )
-        self.generate_multipliers_button.pack(side=tk.LEFT, padx=(6, 0))
-        self.combined_create_button = ttk.Button(controls, text="Create", command=self.create_combined_dataset)
-        self.combined_create_button.pack(side=tk.LEFT)
-        self.mapping_create_button = ttk.Button(controls, text="Create Mapping", command=self.create_mapping_csv)
-        self.mapping_create_button.pack(side=tk.LEFT, padx=(6, 0))
-        self.mapping_open_button = ttk.Button(controls, text="Open Mapping", command=self.open_mapping_csv, state="disabled")
-        self.mapping_open_button.pack(side=tk.LEFT)
+        self.generate_multipliers_button.pack(side=tk.LEFT)
+
+        # 2) Reload Multipliers
+        self.reload_multipliers_button = ttk.Button(
+            controls, text="Reload Multipliers",
+            command=lambda: reload_stock_multipliers(self)
+        )
+        self.reload_multipliers_button.pack(side=tk.LEFT, padx=(6, 20))
+
+        # 3) Create Mapping
+        self.mapping_create_button = ttk.Button(
+            controls, text="Create Mapping", command=self.create_mapping_csv
+        )
+        self.mapping_create_button.pack(side=tk.LEFT)
+
+        # 4) Open Mapping
+        self.mapping_open_button = ttk.Button(
+            controls, text="Open Mapping", command=self.open_mapping_csv, state="disabled"
+        )
+        self.mapping_open_button.pack(side=tk.LEFT, padx=(6, 20))
         self._update_mapping_buttons()
-        self.combined_save_button = ttk.Button(controls, text="Save CSV", command=self.save_combined_to_csv, state="disabled")
-        self.combined_save_button.pack(side=tk.LEFT, padx=(6, 0))
+
+        # 5) Copy ReleaseDate Prompt
+        copy_prompt_btn = ttk.Button(
+            controls, text="Copy ReleaseDate Prompt",
+            command=self._on_copy_releasedate_prompt
+        )
+        copy_prompt_btn.pack(side=tk.LEFT, padx=(0, 20))
+
+        # 6) Generate Table (rename Create)
+        self.combined_create_button = ttk.Button(
+            controls, text="Generate Table", command=self.create_combined_dataset
+        )
+        self.combined_create_button.pack(side=tk.LEFT)
+
+        # 7) Save CSV
+        self.combined_save_button = ttk.Button(
+            controls, text="Save CSV", command=self.save_combined_to_csv, state="disabled"
+        )
+        self.combined_save_button.pack(side=tk.LEFT, padx=(6, 20))
 
         # === New button: Plot Stacked Visuals ===
         from analyst_stackedvisuals import render_stacked_annual_report
@@ -432,100 +543,10 @@ class CombinedUIMixin:
             except Exception as e:
                 messagebox.showerror("Plot Error", f"Failed to plot stacked visuals:\n{e}")
 
-        self.plot_visuals_button = ttk.Button(controls, text="Plot Stacked Visuals", command=_on_plot_stacked_visuals)
-        self.plot_visuals_button.pack(side=tk.LEFT, padx=(6, 0))
-
-        # === New button: Copy ReleaseDate Prompt ===
-        from combined_utils import build_release_date_prompt
-        def _on_copy_releasedate_prompt():
-            try:
-                company = self.company_var.get().strip()
-                if not company:
-                    messagebox.showwarning("Company Missing", "Select a company before generating the prompt.")
-                    return
-
-                # Need the combined dataset first
-                if not self.combined_columns or not self.combined_rows:
-                    messagebox.showwarning("No Combined Data", "Create the combined dataset first.")
-                    return
-
-                # Extract date columns (dynamic columns only)
-                date_cols = [
-                    c for c in self.combined_columns
-                    if c.upper() not in ("TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "KEY4COLORING")
-                ]
-
-                # Build prompt text
-                text = build_release_date_prompt(company, date_cols)
-
-                # Copy to clipboard
-                self.root.clipboard_clear()
-                self.root.clipboard_append(text)
-                self.root.update()
-
-                # ------------------------------------------------------------
-                # NEW BEHAVIOUR:
-                # If ReleaseDates.csv exists, append missing dates and open it.
-                # If not, create a new one.
-                # ------------------------------------------------------------
-                import csv, os, sys
-                company_folder = self.companies_dir / company
-                company_folder.mkdir(parents=True, exist_ok=True)
-                csv_path = company_folder / "ReleaseDates.csv"
-
-                # Case 1: File exists → merge
-                if csv_path.exists():
-                    existing = {}
-                    with csv_path.open("r", encoding="utf-8", newline="") as fh:
-                        reader = csv.DictReader(fh)
-                        for row in reader:
-                            date_key = row.get("Date", "").strip()
-                            if date_key:
-                                existing[date_key] = row.get("ReleaseDate", "").strip()
-
-                    # Append missing dates
-                    changed = False
-                    for d in date_cols:
-                        if d not in existing:
-                            existing[d] = ""
-                            changed = True
-
-                    # Rewrite ONLY if needed (otherwise leave intact)
-                    if changed:
-                        with csv_path.open("w", encoding="utf-8", newline="") as fh:
-                            writer = csv.writer(fh)
-                            writer.writerow(["Date", "ReleaseDate"])
-                            for dt, rel in existing.items():
-                                writer.writerow([dt, rel])
-
-                else:
-                    # Case 2: Create fresh file
-                    with csv_path.open("w", encoding="utf-8", newline="") as fh:
-                        writer = csv.writer(fh)
-                        writer.writerow(["Date", "ReleaseDate"])
-                        for d in date_cols:
-                            writer.writerow([d, ""])
-
-                # Open with system default
-                try:
-                    if sys.platform.startswith("win"):
-                        os.startfile(str(csv_path))  # type: ignore[attr-defined]
-                    elif sys.platform == "darwin":
-                        subprocess.run(["open", str(csv_path)], check=False)
-                    else:
-                        subprocess.run(["xdg-open", str(csv_path)], check=False)
-                except Exception:
-                    pass
-
-            except Exception as exc:
-                messagebox.showerror("Error", f"Failed to generate ReleaseDate prompt:\n{exc}")
-
-        copy_prompt_btn = ttk.Button(
-            controls,
-            text="Copy ReleaseDate Prompt",
-            command=_on_copy_releasedate_prompt,
+        self.plot_visuals_button = ttk.Button(
+            controls, text="Plot Stacked Visuals", command=_on_plot_stacked_visuals
         )
-        copy_prompt_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self.plot_visuals_button.pack(side=tk.LEFT)
 
         table_container = ttk.Frame(combined_tab, padding=(8, 0, 8, 8))
         table_container.pack(fill=tk.BOTH, expand=True)
