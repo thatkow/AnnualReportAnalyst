@@ -9,6 +9,13 @@ import tkinter as tk
 
 from scrape_table_model import ScrapeTableModel
 from scrape_table_view import ScrapeTableView
+import re
+
+# --- helper: detect DD.MM.YYYY date columns ---
+_DATE_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
+def _is_date_col(name: str) -> bool:
+    return bool(_DATE_RE.match(name.strip()))
+
 
 if TYPE_CHECKING:  # pragma: no cover
     from report_app import ReportAppV2
@@ -191,19 +198,24 @@ class ScrapeContextMenu:
 
         for item_id in selected:
             values = list(self.view.table.item(item_id, "values"))
-            new_vals: List[str] = []
-            for v in values:
-                s = str(v).strip()
+            new_vals = values[:]
+
+            for idx, col_name in enumerate(self.view.current_columns):
+                if not _is_date_col(col_name):
+                    continue
+                s = str(new_vals[idx]).strip()
                 if s.startswith("-"):
-                    new_vals.append(s[1:])
+                    new_vals[idx] = s[1:]
                 elif s == "":
-                    new_vals.append("")
+                    new_vals[idx] = ""
                 else:
-                    new_vals.append("-" + s)
+                    new_vals[idx] = "-" + s
+
             self.view.table.item(item_id, values=new_vals)
 
         self.view.panel.save_table_to_csv()
         self.view.panel.load_from_files()
+
 
     def _flip_sign(self) -> None:
         selected = self.view.table.selection()
@@ -215,10 +227,18 @@ class ScrapeContextMenu:
         for item_id in selected:
             values = list(self.view.table.item(item_id, "values"))
             new_vals = values[:]
+
+            # Determine which columns to flip (only date columns)
             if col is None:
-                indices = range(len(values))
+                indices = [
+                    i for i, name in enumerate(self.view.current_columns)
+                    if _is_date_col(name)
+                ]
             else:
-                indices = [col] if col < len(values) else []
+                indices = [col] if (
+                    col < len(values) and _is_date_col(self.view.current_columns[col])
+                ) else []
+
             for idx in indices:
                 s = str(new_vals[idx]).strip()
                 if s.startswith("-"):
@@ -227,6 +247,7 @@ class ScrapeContextMenu:
                     new_vals[idx] = ""
                 else:
                     new_vals[idx] = "-" + s
+
             self.view.table.item(item_id, values=new_vals)
 
         self.view.panel.save_table_to_csv()

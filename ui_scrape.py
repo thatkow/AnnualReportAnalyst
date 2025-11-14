@@ -330,7 +330,7 @@ class ScrapeUIMixin:
                 panel.load_from_files()
                 panel.update_note_coloring()
                 self.scrape_panels[key] = panel
-                if panel.has_csv_data or pages:
+        if panel.model.has_csv_data or pages:
                     if default_entry is None:
                         default_entry = entry
                         default_category = category
