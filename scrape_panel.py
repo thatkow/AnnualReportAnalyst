@@ -672,16 +672,31 @@ class ScrapeResultPanel:
         row_id = self.table.identify_row(event.y)
         if not row_id:
             return
-        # Ensure both selection and focus are set to the clicked row
-        try:
+
+        current_selection = list(self.table.selection())
+
+        # --------------------------------------------------------
+        # MULTI-SELECTION BEHAVIOUR:
+        #  - If right-click on a selected row → preserve selection
+        #  - If right-click outside selection → single-select that row
+        # --------------------------------------------------------
+        if len(current_selection) > 1 and row_id in current_selection:
+            pass  # keep selection
+        else:
             self.table.selection_set(row_id)
+            current_selection = [row_id]
+
+        # Always focus clicked row (for context menu)
+        try:
             self.table.focus(row_id)
         except Exception:
-            self.table.selection_set(row_id)
+            pass
+
+        # Store ONLY the clicked row (never the selection list)
         self._context_item = row_id
-        state_value = self.row_states.get(row_id, "asis")
-        if not state_value:
-            state_value = "asis"
+
+        # Set menu radio button from clicked row
+        state_value = self.row_states.get(row_id, "asis") or "asis"
         self._row_state_var.set(state_value)
         try:
             self._context_menu.tk_popup(event.x_root, event.y_root)
@@ -694,18 +709,50 @@ class ScrapeResultPanel:
         if not item_id:
             return
 
+        # --------------------------------------------------------
+        # Determine which rows we are applying the state to
+        # --------------------------------------------------------
+        if apply_all:
+            # existing global logic below applies
+            target_rows = [item_id]
+        else:
+            # MULTI-SELECTION MODE: apply to all selected rows
+            sel = list(self.table.selection())
+            if sel:
+                target_rows = sel
+            else:
+                target_rows = [item_id]
+
+        normalized = self._normalize_state_label(state_label)
+
+        # --------------------------------------------------------
+        # Local multi-row update (NOT apply_all)
+        # --------------------------------------------------------
+
         normalized = self._normalize_state_label(state_label)
 
         # --- Update NOTE column immediately on current table ---
         note_index = self._note_column_index()
         if note_index is not None:
-            values = list(self.table.item(item_id, "values"))
-            if len(values) <= note_index:
-                values.extend([""] * (note_index + 1 - len(values)))
-            values[note_index] = state_label
-            self.table.item(item_id, values=values)
-            self._apply_note_color_to_item(item_id)
+            for rid in target_rows:
+                values = list(self.table.item(rid, "values"))
+                if len(values) <= note_index:
+                    values.extend([""] * (note_index + 1 - len(values)))
+                values[note_index] = state_label
+                self.table.item(rid, values=values)
+                self._apply_note_color_to_item(rid)
             self.table.update_idletasks()
+
+        # --------------------------------------------------------
+        # Update logical state for all target rows
+        # --------------------------------------------------------
+        for rid in target_rows:
+            self.update_row_state(rid, normalized)
+
+        # Save and exit early if not apply_all
+        if not apply_all:
+            self.save_table_to_csv()
+            return
 
         key = self.row_keys.get(item_id)
 
