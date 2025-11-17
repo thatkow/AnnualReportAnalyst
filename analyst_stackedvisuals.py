@@ -105,6 +105,15 @@ body {{ font-family: sans-serif; margin: 40px; }}
     <label style="margin-left:20px;">
       <input type="checkbox" id="perShareCheckbox" checked /> Per Share
     </label>
+    <!-- Per-ticker raw adjustment inputs (one per ticker, applied per TYPE to latest year) -->
+    <span
+      id="tickerAdjustments"
+      style="margin-left:20px; display:inline-flex; gap:16px;
+             align-items:flex-end; overflow-x:auto; max-width:100%;
+             white-space:nowrap;"
+    >
+      <!-- filled dynamically -->
+    </span>
   </div>
   <div id="plotBars"></div>
 </div>
@@ -125,11 +134,16 @@ const factorTooltipLabel = {json.dumps(factor_tooltip_label)};
 const typeOffsets = {json.dumps(type_offsets)};
 const typeLineStyles = {json.dumps(type_linestyles)};
 
+let adjustedRawData = rawData;   // rawData + synthetic adjustment rows
+let sliderState = {{}};
+
 
 // Add label for dropdown
 const factorLabel = {json.dumps(factor_label)};
 document.addEventListener("DOMContentLoaded", () => {{
   document.querySelector('label b').textContent = factorLabel + ":";
+  initTickerAdjustments();
+  updateAdjustmentLabels();
 }});
 
 // --- Human readable number formatter ---
@@ -174,6 +188,73 @@ rawData.forEach(r => {{
 }});
 
 
+// Initialize raw adjustment state per ticker
+tickers.forEach(t => {{
+  if (sliderState[t] === undefined) sliderState[t] = 0;
+}});
+
+// Build per-ticker RAW number inputs along the top toolbar
+function initTickerAdjustments() {{
+  const wrap = document.getElementById("tickerAdjustments");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+
+  tickers.forEach(ticker => {{
+    if (sliderState[ticker] === undefined) sliderState[ticker] = 0;
+
+    const container = document.createElement("span");
+    container.style.display = "inline-flex";
+    container.style.flexDirection = "column";
+    container.style.alignItems = "flex-start";
+
+    const label = document.createElement("span");
+    label.textContent = ticker;
+    label.style.fontWeight = "bold";
+
+    const row = document.createElement("span");
+    row.style.display = "inline-flex";
+    row.style.alignItems = "center";
+    row.style.gap = "4px";
+
+    const input = document.createElement("input");
+    input.type = "number";
+    // raw value; no min/max, user can type any adjustment
+    input.step = "any";
+    input.value = sliderState[ticker];
+    input.dataset.ticker = ticker;
+    input.style.width = "70px";
+
+    input.addEventListener("input", (ev) => {{
+      const t = ev.target.dataset.ticker;
+      const v = parseFloat(ev.target.value);
+      sliderState[t] = isNaN(v) ? 0 : v;
+      renderBars();
+    }});
+
+    const delta = document.createElement("span");
+    delta.className = "ticker-delta";
+    delta.dataset.ticker = ticker;
+    delta.style.fontFamily = "monospace";
+    delta.style.fontSize = "11px";
+    delta.textContent = "Δ: 0";
+
+    row.appendChild(input);
+    row.appendChild(delta);
+    container.appendChild(label);
+    container.appendChild(row);
+    wrap.appendChild(container);
+  }});
+}}
+
+function updateAdjustmentLabels() {{
+  const labels = document.querySelectorAll(".ticker-delta");
+  labels.forEach(el => {{
+    const ticker = el.dataset.ticker;
+    const raw = sliderState[ticker] || 0;
+    el.textContent = "Δ: " + humanReadable(raw);
+  }});
+}}
+
 const sel = document.getElementById("factorSelector");
 Object.keys(factorLookup).forEach(f => {{
   const opt = document.createElement("option");
@@ -188,7 +269,7 @@ function buildBarTraces(factorName, perShare) {{
   const traces = [];
   for (const ticker of tickers) {{
     for (const typ of types) {{
-      const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
+      const subset = adjustedRawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
       for (const row of subset) {{
         // Mapped consistent colour key
         const color = colorMap[row._CANONICAL_KEY];
@@ -242,7 +323,7 @@ function buildCumsumLines(factorName, perShare) {{
         if (factor === undefined || factor === null || isNaN(factor)) {{
           return NaN;
         }}
-        const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
+        const subset = adjustedRawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
         const sum = subset.reduce((acc, r) => acc + (r[y] || 0) * factor, 0);
         return perShare && shareCounts[ticker]?.[y]
           ? sum / shareCounts[ticker][y]
@@ -287,16 +368,51 @@ function buildCumsumLines(factorName, perShare) {{
 function renderBars() {{
   const factorName = sel.value;
   const perShare = document.getElementById("perShareCheckbox").checked;
+
+  const factorMap = factorLookup[factorName];
+  const latestYear = years[years.length - 1];
+
+  // === Build synthetic adjustment rows per ticker (latest year only) ===
+  // RAW behaviour (Option B): the entered value is applied PER TYPE (no splitting)
+  const syntheticRows = [];
+  for (const ticker of tickers) {{
+    const rawAdj = sliderState[ticker] || 0;
+    if (!rawAdj) continue;
+
+    for (const typ of types) {{
+      const baseRow = rawData.find(r => r.Ticker === ticker && r.TYPE === typ);
+      if (!baseRow) continue;
+
+      const newRow = {{
+        Ticker: ticker,
+        TYPE: typ,
+        CATEGORY: "Adjustment",
+        SUBCATEGORY: "Adjustment",
+        ITEM: "Adjustment",
+        Key4Coloring: baseRow.Key4Coloring,
+        _CANONICAL_KEY: baseRow._CANONICAL_KEY
+      }};
+
+      years.forEach(y => {{
+        newRow[y] = (y === latestYear) ? rawAdj : 0.0;
+      }});
+
+      syntheticRows.push(newRow);
+    }}
+  }}
+
+  // Merge original + synthetic into adjustedRawData for this render
+  adjustedRawData = rawData.concat(syntheticRows);
+
   const barTraces = buildBarTraces(factorName, perShare);
   const cumsumLines = buildCumsumLines(factorName, perShare);
 
   // === Compute per-ticker, per-type cumulative-sum data ===
-  const factorMap = factorLookup[factorName];
   const cumsumMap = {{}};
   for (const ticker of tickers) {{
     for (const typ of types) {{
       const key = ticker + "::" + typ;
-      const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
+      const subset = adjustedRawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
       if (subset.length === 0) continue;
       const vals = years.map(y => {{
         const sum = subset.reduce((acc, r) => acc + (r[y] || 0) * (factorMap[y] || 1), 0);
@@ -345,7 +461,7 @@ function renderBars() {{
     const color = hashColor(ticker + typ);
 
     // Determine latest raw (unfactored) total for ratio
-    const subsetRaw = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
+    const subsetRaw = adjustedRawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
     const latestYear = years[years.length - 1];
     let rawTotal = subsetRaw.reduce((acc, r) => acc + (r[latestYear] || 0), 0);
 
@@ -429,15 +545,17 @@ function renderBars() {{
       linewidth: 4
     }},
     hoverlabel: {{ bgcolor: "white", font: {{ family: "Courier New" }} }},
-    showlegend: false
+    showlegend: false,
+    cliponaxis: false
   }};
 
   Plotly.newPlot("plotBars", traces, layout);
+  // Update Δ labels based on current raw values
+  updateAdjustmentLabels();
 }}
 renderBars();
 sel.addEventListener("change", renderBars);
 document.getElementById("perShareCheckbox").addEventListener("change", renderBars);
-
 function buildShareTraces() {{
   const traces = [];
   for (const ticker of tickers) {{
