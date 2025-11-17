@@ -317,6 +317,11 @@ function renderBars() {{
         continue;
       }}
 
+      // Omit the latest date from boxplot statistics
+      if (filteredVals.length > 1) {{
+        filteredVals.splice(filteredVals.length - 1, 1);
+      }}
+
       cumsumMap[key] = filteredVals;
     }}
   }}
