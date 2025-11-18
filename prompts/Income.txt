@@ -8,104 +8,116 @@ and output them in a normalized CSV format suitable for downstream analysis.
 1. STATEMENT DETECTION
 Locate exactly one table titled:
 - “Income Statement”, OR
-- “Statement of Profit or Loss and Other Comprehensive Income”.
+- “Statement of Profit or Loss and Other Comprehensive Income”, OR
+- “Statement of Comprehensive Income”.
 
-Include all lines from REVENUE through TOTAL COMPREHENSIVE INCOME (or equivalent).
-Continue across all columns or pages if the statement is split.
-Ignore footers, notes, and page headers.
+Include all rows from the first revenue/income line through
+TOTAL COMPREHENSIVE INCOME (or equivalent).
+Include ALL numeric columns across groups/entities.
+
+Ignore page headers, footers, and all note references.
 
 ═══════════════════════════════════════════════════════════════════════════════
 2. SCALE FACTOR DETECTION
-Detect the numeric presentation scale (e.g. “dollars in millions”, “Amounts in thousands”, “in billions”).
+Detect the numeric presentation scale:
 
-Use the following mappings:
 • “in thousands”, “000s”, “Amounts in thousands” → 1,000  
-• “in millions”, “USD millions”, “AUD $ million”, “$M”, “m” → 1,000,000  
+• “in millions”, “$M”, “m”, “USD millions”, “AUD $ million” → 1,000,000  
 • “in billions”, “bn”, “billion” → 1,000,000,000  
-If none found, assume 1.
+If none found → 1.
 
 Do NOT apply the multiplier.  
-Output it as the first line:
-
+Output first line:
     Multiplier: <value>
 
 ═══════════════════════════════════════════════════════════════════════════════
-3. DATE COLUMN DETECTION AND NORMALIZATION
-Detect all date columns from the table header or caption.
+3. DATE COLUMN DETECTION
+You MUST detect **one date for every numeric column**, even if the textual
+dates repeat (e.g., ALX and ATLAX columns for the same year).
 
-Normalize all detected dates to **DD.MM.YYYY** format, regardless of how they appear.  
-Handle examples such as:
-- “30 June 2023” → 30.06.2023  
-- “June 30, 2023” → 30.06.2023  
-- “30/06/23” → 30.06.2023  
-- “2023-06-30” → 30.06.2023  
-- “Dec 31 2024” → 31.12.2024  
+Rules:
+• Each numeric column = one detected date.  
+• Do NOT deduplicate dates during detection.  
+• Normalize dates to DD.MM.YYYY.  
+• Month-year → last day of month  
+• Year alone → 31.12.<year>
 
-If only year or month-year is shown (e.g. “2023”, “Jun 2023”), infer the last day of that month if obvious, otherwise output as `31.12.<year>`.
+Example:
+“Year ended 31 Dec 2019” appearing twice → detect two separate date columns,
+both normalized to 31.12.2019.
 
 ═══════════════════════════════════════════════════════════════════════════════
-4. STRUCTURE
+4. COLUMN SUMMATION RULE (AFTER EXTRACTION)
+After extracting all columns:
+
+• Columns with the same normalized date must be summed together.  
+• Missing/blank = 0  
+• Parentheses → negative  
+• Do not scale values.  
+• Final output contains exactly one column per unique normalized date.
+
+═══════════════════════════════════════════════════════════════════════════════
+5. STRUCTURE
 Output columns:
+
 CATEGORY,SUBCATEGORY,ITEM,NOTE,<date1>,<date2>,...
 
-- CATEGORY = primary section (REVENUE, EXPENSES, OPERATING, TAX, TOTAL, OTHER, SHARES)
-- SUBCATEGORY = subsection (e.g., “Continuing operations”) or blank
-- ITEM = the text of the line item (uppercase, joined if wrapped)
-- NOTE = classification tag
+CATEGORY = REVENUE, EXPENSES, OPERATING, FINANCE, TAX, OTHER, TOTAL, SHARES  
+SUBCATEGORY = subsection name or blank.  
+ITEM = complete uppercase line-item description.
 
 ═══════════════════════════════════════════════════════════════════════════════
-5. CLASSIFICATION RULES
-Assign NOTE as follows:
+6. CLASSIFICATION RULES — ***THE ONLY SOURCE OF THE NOTE FIELD***
+The NOTE column must contain ONLY one of these values:
 
-| Context | NOTE |
-|----------|------|
-| Income, revenue, or gains | **asis** |
-| Expenses, costs, losses | **negated** |
-| Per-share info (EPS, dividends, share counts) | **excluded** |
-| Totals/subtotals (e.g. “Total revenue”, “Total expenses”, “Profit after tax”, “Comprehensive income”) | **excluded** |
-| Non-value commentary rows | **excluded** |
+• asis  
+• negated  
+• excluded  
 
-═══════════════════════════════════════════════════════════════════════════════
-6. VALUE CLEANING RULES
-- Remove commas, spaces, and currency symbols from all numeric values.
-- Convert parentheses `( )` → negative numbers.
-- Dashes (–, —, -) or blanks → 0.
-- Do not apply the multiplier.
-- Numeric cells must contain only digits and an optional leading minus sign.
+NO OTHER TEXT IS PERMITTED IN THE NOTE FIELD.
+
+Classification:
+• Revenue/income/gains → asis  
+• Expenses/costs/losses → negated  
+• All totals/subtotals → excluded  
+• EPS, shares, dividends → excluded  
+• Non-value commentary lines → excluded  
 
 ═══════════════════════════════════════════════════════════════════════════════
-7. OUTPUT FORMAT
-Output exactly in this structure:
+7. ABSOLUTE RULE: IGNORE NOTE NUMBERS FROM THE TABLE
+The source PDF may contain:
+• note numbers (e.g., “2.1.3”, “5.4.2”, “(1)”),  
+• superscripts,  
+• cross-references to notes,  
+• annotation columns.
 
+You MUST NOT copy any such values into the NOTE column.
+
+The ONLY allowed NOTE values are:
+• asis  
+• negated  
+• excluded
+
+If a row contains a notes column, discard it completely.
+
+═══════════════════════════════════════════════════════════════════════════════
+8. VALUE CLEANING RULES
+• Remove commas, spaces, and currency symbols  
+• Parentheses → negative  
+• Dash or blank → 0  
+• Only digits or leading minus sign may remain
+
+═══════════════════════════════════════════════════════════════════════════════
+9. OUTPUT FORMAT
+First line:
 Multiplier: <value>
+
+Then:
 CATEGORY,SUBCATEGORY,ITEM,NOTE,<date1>,<date2>,...
 
-Formatting:
-- All text fields (CATEGORY, SUBCATEGORY, ITEM) in UPPER CASE and enclosed in quotes (" ")
-- One comma between all fields
-- Include every row, even those marked “excluded”
+• CATEGORY, SUBCATEGORY, ITEM in UPPERCASE and wrapped in quotes
+• Comma-separated  
+• Include every line-item row, even those marked excluded  
 
 ═══════════════════════════════════════════════════════════════════════════════
-8. OUTPUT EXAMPLE
-
-Multiplier: 1000000
-CATEGORY,SUBCATEGORY,ITEM,NOTE,30.06.2024,30.06.2023
-"REVENUE","","SALES REVENUE","asis",96345,90567
-"REVENUE","","COST OF GOODS SOLD","negated",50211,47220
-"EXPENSES","","EMPLOYEE EXPENSES","negated",8838,7289
-"EXPENSES","","FINANCE COSTS","negated",1190,1105
-"OPERATING","","OTHER INCOME","asis",305,330
-"TAX","","INCOME TAX EXPENSE","negated",2455,2600
-"TOTAL","","NET PROFIT/(LOSS) AFTER TAX","excluded",2443,2123
-"SHARES","","EARNINGS PER SHARE (BASIC)","excluded",2.43,2.12
-"SHARES","","NUMBER OF SHARES OUTSTANDING","excluded",1345,1332
-
-═══════════════════════════════════════════════════════════════════════════════
-9. FINAL OUTPUT RULES
-- Output only:
-    1️⃣ Multiplier line  
-    2️⃣ CSV header and data rows  
-- No commentary or metadata.  
-- All numeric commas removed.  
-- Every row includes one NOTE value (asis, negated, or excluded).  
-- All dates normalized to DD.MM.YYYY format.
+END OF PROMPT
