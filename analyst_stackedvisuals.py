@@ -140,7 +140,9 @@ const factorTooltip = {json.dumps(factor_tooltip)};
 const factorTooltipLabel = {json.dumps(factor_tooltip_label)};
 const typeOffsets = {json.dumps(type_offsets)};
 const typeLineStyles = {json.dumps(type_linestyles)};
-const yearToggleState = Object.fromEntries(years.map(y => [y, true]));
+const yearToggleState = Object.fromEntries(
+  years.map((y, idx) => [y, idx !== years.length - 1])
+);
 
 let adjustedRawData = rawData;   // rawData + synthetic adjustment rows
 let sliderState = {{}};
