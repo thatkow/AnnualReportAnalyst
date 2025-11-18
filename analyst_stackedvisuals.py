@@ -482,21 +482,9 @@ function renderBars() {{
 
       if (filteredPairs.length === 0) {{
         continue;
-      }}
+      }}   
 
-      // Omit the latest date from boxplot statistics
-      const cleanedPairs = filteredPairs.slice();
-      if (cleanedPairs.length > 1) {{
-        const latestYear = years[years.length - 1];
-        const idx = cleanedPairs.findIndex(p => p.year === latestYear);
-        if (idx !== -1) {{
-          cleanedPairs.splice(idx, 1);
-        }} else {{
-          cleanedPairs.pop();
-        }}
-      }}
-
-      const cleanedVals = cleanedPairs.map(p => p.value);
+      const cleanedVals = filteredPairs.slice().map(p => p.value);
       if (cleanedVals.length === 0) {{
         continue;
       }}
