@@ -313,12 +313,18 @@ class ReviewUIMixin:
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", str(path)])
             else:
-                subprocess.Popen(["xdg-open", str(path)])
-        except Exception:
-            messagebox.showwarning(
-                failure_title,
-                f"Unable to open '{path.name}' with the default application.",
-            )
+                if not os.environ.get("DISPLAY"):
+                    raise RuntimeError("No graphical display available")
+                subprocess.Popen(
+                    ["xdg-open", str(path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except Exception as exc:
+            message = f"Unable to open '{path.name}' with the default application."
+            if isinstance(exc, RuntimeError):
+                message = f"{message}\n{exc}"
+            messagebox.showwarning(failure_title, message)
 
     def toggle_fullscreen_preview(self, entry: PDFEntry, page_index: int) -> None:
         if getattr(self, "fullscreen_preview_window", None) is not None and self.fullscreen_preview_window.winfo_exists():
