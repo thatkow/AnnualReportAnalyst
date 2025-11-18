@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import shutil
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from tkinter import messagebox
+
+import requests
 
 try:
     from openai import OpenAI
@@ -19,6 +22,12 @@ from constants import COLUMNS, DEFAULT_OPENAI_MODEL, SCRAPE_EXPECTED_COLUMNS
 from models import ScrapeJob
 from pdf_utils import normalize_header_row
 
+
+OPENAI_API_BASE_URL = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
+
+
+
+OPENAI_HTTP_TIMEOUT = 120
 
 
 class ScrapeManagerMixin:
@@ -35,6 +44,90 @@ class ScrapeManagerMixin:
     scrape_panels: Dict[Any, Any]
     active_scrape_key: Optional[Any]
     root: Any
+
+    def _create_openai_sdk_client(self, api_key: str) -> Optional[Any]:
+        if OpenAI is None:
+            return None
+        try:
+            return OpenAI(api_key=api_key)
+        except TypeError as exc:
+            if "proxies" in str(exc).lower():
+                if not getattr(self, "_openai_proxy_warning_logged", False):
+                    self.logger.warning(
+                        "OpenAI SDK initialization failed due to incompatible proxy arguments; "
+                        "falling back to direct HTTP requests."
+                    )
+                    setattr(self, "_openai_proxy_warning_logged", True)
+                return None
+            raise
+
+    def _openai_http_request(
+        self,
+        api_key: str,
+        endpoint: str,
+        *,
+        json_payload: Optional[Dict[str, Any]] = None,
+        files: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        base_url = OPENAI_API_BASE_URL.rstrip("/")
+        url = f"{base_url}/{endpoint.lstrip('/')}"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        if json_payload is not None:
+            headers["Content-Type"] = "application/json"
+        response = requests.post(
+            url,
+            headers=headers,
+            json=json_payload,
+            files=files,
+            data=data,
+            timeout=OPENAI_HTTP_TIMEOUT,
+        )
+        if response.status_code >= 400:
+            try:
+                error_detail: Any = response.json()
+            except ValueError:
+                error_detail = response.text
+            raise RuntimeError(
+                f"OpenAI request to '{endpoint}' failed with status {response.status_code}: {error_detail}"
+            )
+        try:
+            return response.json()
+        except ValueError as exc:  # pragma: no cover - network response issue
+            raise RuntimeError(f"OpenAI response for '{endpoint}' was not valid JSON") from exc
+
+    def _upload_pdfs_via_http(self, api_key: str, pdf_paths: List[Path]) -> List[str]:
+        file_ids: List[str] = []
+        for pdf_path in pdf_paths:
+            self.logger.info("AIScrape uploading %s via HTTP fallback", pdf_path)
+            with pdf_path.open("rb") as pdf_file:
+                response_json = self._openai_http_request(
+                    api_key,
+                    "files",
+                    files={"file": (pdf_path.name, pdf_file, "application/pdf")},
+                    data={"purpose": "assistants"},
+                )
+            file_id = response_json.get("id")
+            if not file_id:
+                raise ValueError(f"Failed to upload {pdf_path.name} to OpenAI via HTTP fallback")
+            file_ids.append(str(file_id))
+            self.logger.info(
+                "AIScrape uploaded %s via HTTP fallback as file id %s", pdf_path.name, file_id
+            )
+        return file_ids
+
+    def _submit_openai_response_http(
+        self, api_key: str, model: str, user_entries: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        payload = {
+            "model": model,
+            "input": [
+                {"role": "system", "content": "You are a financial statement parser."},
+                {"role": "user", "content": user_entries},
+            ],
+        }
+        self.logger.info("AIScrape submitting HTTP response request (model=%s)", model)
+        return self._openai_http_request(api_key, "responses", json_payload=payload)
 
     def _get_prompt_text(self, company: str, category: str) -> Optional[str]:
         candidate_paths: List[Path] = []
@@ -143,20 +236,21 @@ class ScrapeManagerMixin:
 
         selected_model = model_name.strip() or DEFAULT_OPENAI_MODEL
 
-        if OpenAI is None:  # pragma: no cover - checked at runtime
-            raise ValueError("OpenAI client is not available")
+        client = self._create_openai_sdk_client(sanitized_key)
 
-        client = OpenAI(api_key=sanitized_key)
         file_ids: List[str] = []
-        for pdf_path in pdf_paths:
-            self.logger.info("AIScrape uploading %s", pdf_path)
-            with pdf_path.open("rb") as pdf_file:
-                uploaded = client.files.create(file=pdf_file, purpose="assistants")
-                file_id = getattr(uploaded, "id", None)
-                if not file_id:
-                    raise ValueError(f"Failed to upload {pdf_path.name} to OpenAI")
-                file_ids.append(str(file_id))
-                self.logger.info("AIScrape uploaded %s as file id %s", pdf_path.name, file_id)
+        if client is not None:
+            for pdf_path in pdf_paths:
+                self.logger.info("AIScrape uploading %s", pdf_path)
+                with pdf_path.open("rb") as pdf_file:
+                    uploaded = client.files.create(file=pdf_file, purpose="assistants")
+                    file_id = getattr(uploaded, "id", None)
+                    if not file_id:
+                        raise ValueError(f"Failed to upload {pdf_path.name} to OpenAI")
+                    file_ids.append(str(file_id))
+                    self.logger.info("AIScrape uploaded %s as file id %s", pdf_path.name, file_id)
+        else:
+            file_ids = self._upload_pdfs_via_http(sanitized_key, pdf_paths)
 
         user_entries: List[Dict[str, Any]] = [
             {"type": "input_text", "text": prompt},
@@ -172,18 +266,24 @@ class ScrapeManagerMixin:
             selected_model,
             file_ids,
         )
-        response = client.responses.create(
-            model=selected_model,
-            input=
-            [
-                {
-                    "role": "system",
-                    "content": "You are a financial statement parser.",
-                },
-                {"role": "user", "content": user_entries},
-            ],
-        )
-        self.logger.info("AIScrape response received (model=%s)", selected_model)
+        if client is not None:
+            response = client.responses.create(
+                model=selected_model,
+                input=
+                [
+                    {
+                        "role": "system",
+                        "content": "You are a financial statement parser.",
+                    },
+                    {"role": "user", "content": user_entries},
+                ],
+            )
+            self.logger.info("AIScrape response received (model=%s)", selected_model)
+        else:
+            response = self._submit_openai_response_http(
+                sanitized_key, selected_model, user_entries
+            )
+            self.logger.info("AIScrape HTTP response received (model=%s)", selected_model)
         return self._extract_openai_response_text(response)
 
     def _call_openai_with_text(
@@ -198,10 +298,7 @@ class ScrapeManagerMixin:
 
         selected_model = model_name.strip() or DEFAULT_OPENAI_MODEL
 
-        if OpenAI is None:  # pragma: no cover - checked at runtime
-            raise ValueError("OpenAI client is not available")
-
-        client = OpenAI(api_key=sanitized_key)
+        client = self._create_openai_sdk_client(sanitized_key)
 
         user_entries: List[Dict[str, Any]] = [
             {"type": "input_text", "text": prompt},
@@ -217,17 +314,23 @@ class ScrapeManagerMixin:
             selected_model,
             len(cleaned_text),
         )
-        response = client.responses.create(
-            model=selected_model,
-            input=[
-                {
-                    "role": "system",
-                    "content": "You are a financial statement parser.",
-                },
-                {"role": "user", "content": user_entries},
-            ],
-        )
-        self.logger.info("AIScrape text response received (model=%s)", selected_model)
+        if client is not None:
+            response = client.responses.create(
+                model=selected_model,
+                input=[
+                    {
+                        "role": "system",
+                        "content": "You are a financial statement parser.",
+                    },
+                    {"role": "user", "content": user_entries},
+                ],
+            )
+            self.logger.info("AIScrape text response received (model=%s)", selected_model)
+        else:
+            response = self._submit_openai_response_http(
+                sanitized_key, selected_model, user_entries
+            )
+            self.logger.info("AIScrape HTTP text response received (model=%s)", selected_model)
         return self._extract_openai_response_text(response)
 
     def _call_openai_for_job(self, job: ScrapeJob, api_key: str) -> str:
@@ -250,42 +353,43 @@ class ScrapeManagerMixin:
         )
 
     def _extract_openai_response_text(self, response: Any) -> str:
-        text_output = getattr(response, "output_text", None)
+        def _get(obj: Any, key: str, default: Any = None) -> Any:
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        text_output = _get(response, "output_text")
         if text_output:
-            combined = str(text_output).strip()
+            if isinstance(text_output, (list, tuple)):
+                combined = "\n".join(str(part).strip() for part in text_output if part).strip()
+            else:
+                combined = str(text_output).strip()
             if combined:
                 return combined
 
-        output_items = getattr(response, "output", None)
+        output_items = _get(response, "output")
         if output_items:
             collected: List[str] = []
             for item in output_items:
-                contents = getattr(item, "content", None)
+                contents = _get(item, "content")
                 if not contents:
                     continue
                 for content in contents:
-                    if getattr(content, "type", None) == "output_text":
-                        collected.append(str(getattr(content, "text", "")))
+                    if _get(content, "type") == "output_text":
+                        collected.append(str(_get(content, "text", "")))
             combined = "\n".join(part.strip() for part in collected if part).strip()
             if combined:
                 return combined
 
-        for choice in getattr(response, "choices", []):
-            message = getattr(choice, "message", None)
-            content = getattr(message, "content", None)
+        for choice in _get(response, "choices", []) or []:
+            message = _get(choice, "message")
+            content = _get(message, "content")
             if isinstance(content, str) and content.strip():
                 return content.strip()
 
         raise ValueError("OpenAI response did not contain any text output")
 
     def scrape_selected_pages(self) -> None:
-        if OpenAI is None:
-            messagebox.showwarning(
-                "OpenAI Required",
-                "Install the 'openai' package to use AIScrape.",
-            )
-            return
-
         if not self.pdf_entries:
             messagebox.showinfo("AIScrape", "Load PDFs before running AIScrape.")
             return
