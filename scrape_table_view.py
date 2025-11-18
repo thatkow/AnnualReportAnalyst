@@ -222,8 +222,6 @@ class ScrapeTableView:
             for tag in existing_tags
             if not tag.startswith("state-") and not tag.startswith("note-color-")
         ]
-        if state:
-            filtered_tags.append(f"state-{state}")
         note_tag = None
         if not note_tags:
             self._apply_note_color_to_item(item_id)
@@ -232,6 +230,8 @@ class ScrapeTableView:
             ]
         if note_tags:
             note_tag = note_tags[-1]
+        if state and note_tag is None:
+            filtered_tags.append(f"state-{state}")
         if note_tag:
             filtered_tags.append(note_tag)
         self.table.item(item_id, tags=filtered_tags)
