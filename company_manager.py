@@ -323,6 +323,26 @@ class CompanyManagerMixin:
         self._set_active_company(safe_name)
         self._open_in_file_manager(raw_dir)
 
+        # Automatically load the new company's PDFs and Combined.csv (if available)
+        folder_exists = raw_dir.exists()
+        if folder_exists:
+            load_pdfs = getattr(self, "load_pdfs", None)
+            if callable(load_pdfs):
+                try:
+                    load_pdfs()
+                except Exception as exc:
+                    messagebox.showwarning(
+                        "Load Company",
+                        f"Created '{safe_name}', but failed to load its PDFs automatically:\n{exc}",
+                    )
+
+            load_combined = getattr(self, "load_company_combined_csv", None)
+            if callable(load_combined):
+                try:
+                    load_combined(safe_name)
+                except Exception as exc:
+                    print(f"⚠️ Unable to load Combined.csv for {safe_name}: {exc}")
+
         if preview_window is not None and preview_window.winfo_exists():
             preview_window.destroy()
         if moved_files:
