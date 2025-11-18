@@ -88,6 +88,12 @@ body {{ font-family: sans-serif; margin: 40px; }}
 .tab-content {{ display: none; }}
 .tab-content.active {{ display: block; }}
 #controls {{ margin: 15px 0; }}
+.year-toggle {{
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 12px;
+}}
 </style>
 </head>
 <body>
@@ -105,6 +111,7 @@ body {{ font-family: sans-serif; margin: 40px; }}
     <label style="margin-left:20px;">
       <input type="checkbox" id="perShareCheckbox" checked /> Per Share
     </label>
+    <div id="yearToggleContainer" style="margin-top:10px;"></div>
     <!-- Per-ticker raw adjustment inputs (one per ticker, applied per TYPE to latest year) -->
     <span
       id="tickerAdjustments"
@@ -133,6 +140,7 @@ const factorTooltip = {json.dumps(factor_tooltip)};
 const factorTooltipLabel = {json.dumps(factor_tooltip_label)};
 const typeOffsets = {json.dumps(type_offsets)};
 const typeLineStyles = {json.dumps(type_linestyles)};
+const yearToggleState = Object.fromEntries(years.map(y => [y, true]));
 
 let adjustedRawData = rawData;   // rawData + synthetic adjustment rows
 let sliderState = {{}};
@@ -143,6 +151,7 @@ const factorLabel = {json.dumps(factor_label)};
 document.addEventListener("DOMContentLoaded", () => {{
   document.querySelector('label b').textContent = factorLabel + ":";
   initTickerAdjustments();
+  initYearCheckboxes();
   updateAdjustmentLabels();
 }});
 
@@ -244,6 +253,45 @@ function initTickerAdjustments() {{
     container.appendChild(row);
     wrap.appendChild(container);
   }});
+}}
+
+function initYearCheckboxes() {{
+  const container = document.getElementById("yearToggleContainer");
+  if (!container) return;
+  container.innerHTML = "";
+
+  const title = document.createElement("div");
+  title.style.fontWeight = "bold";
+  title.style.marginBottom = "4px";
+  title.textContent = "Include Years in Stats:";
+  container.appendChild(title);
+
+  const wrap = document.createElement("div");
+  wrap.style.display = "flex";
+  wrap.style.flexWrap = "wrap";
+  wrap.style.rowGap = "4px";
+  wrap.style.columnGap = "12px";
+
+  years.forEach(year => {{
+    const label = document.createElement("label");
+    label.className = "year-toggle";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = yearToggleState[year];
+    checkbox.dataset.year = year;
+    checkbox.addEventListener("change", (ev) => {{
+      const y = ev.target.dataset.year;
+      yearToggleState[y] = ev.target.checked;
+      renderBars();
+    }});
+    const span = document.createElement("span");
+    span.textContent = year;
+    label.appendChild(checkbox);
+    label.appendChild(span);
+    wrap.appendChild(label);
+  }});
+
+  container.appendChild(wrap);
 }}
 
 function updateAdjustmentLabels() {{
@@ -420,25 +468,40 @@ function renderBars() {{
         return adj;
       }});
       // Exclude NaN-factor years from boxplot stats
-      const filteredVals = [];
+      const filteredPairs = [];
       years.forEach((y, i) => {{
+        if (!yearToggleState[y]) {{
+          return;
+        }}
         const factor = factorMap[y];
         const v = vals[i];
         if (factor !== undefined && factor !== null && !isNaN(factor) && v !== undefined && v !== null && !isNaN(v)) {{
-          filteredVals.push(v);
+          filteredPairs.push({{ year: y, value: v }});
         }}
       }});
 
-      if (filteredVals.length === 0) {{
+      if (filteredPairs.length === 0) {{
         continue;
       }}
 
       // Omit the latest date from boxplot statistics
-      if (filteredVals.length > 1) {{
-        filteredVals.splice(filteredVals.length - 1, 1);
+      const cleanedPairs = filteredPairs.slice();
+      if (cleanedPairs.length > 1) {{
+        const latestYear = years[years.length - 1];
+        const idx = cleanedPairs.findIndex(p => p.year === latestYear);
+        if (idx !== -1) {{
+          cleanedPairs.splice(idx, 1);
+        }} else {{
+          cleanedPairs.pop();
+        }}
       }}
 
-      cumsumMap[key] = filteredVals;
+      const cleanedVals = cleanedPairs.map(p => p.value);
+      if (cleanedVals.length === 0) {{
+        continue;
+      }}
+
+      cumsumMap[key] = cleanedVals;
     }}
   }}
 

@@ -52,14 +52,11 @@ class MainUIMixin:
 
                 if isinstance(result, bool) and result and folder_valid:
                     self.load_pdfs()
-                    # Update Combined tab when company is set manually
-                    self.load_company_combined_csv(after_company)
-                    print(f"📂 Loaded Combined.csv for company: {after_company}")
+                    self.clear_combined_table()
                 elif company_changed and folder_valid:
                     # Some selectors don't return a bool but still update vars
                     self.load_pdfs()
-                    self.load_company_combined_csv(after_company)
-                    print(f"📂 Loaded Combined.csv for company: {after_company}")
+                    self.clear_combined_table()
 
             except Exception as e:
                 messagebox.showerror("Error", f"Error during company selection:\n{e}")

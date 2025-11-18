@@ -829,6 +829,35 @@ class CombinedUIMixin:
             filtered.append(tag)
         tv.item(item_id, tags=filtered)
 
+    def clear_combined_table(self) -> None:
+        """Remove any Combined.csv data from the UI and disable save actions."""
+
+        # Reset in-memory data
+        self.combined_columns = []
+        self.combined_rows = []
+
+        tv = getattr(self, "combined_table", None)
+        if tv is not None:
+            try:
+                for iid in tv.get_children(""):
+                    tv.delete(iid)
+            except Exception:
+                pass
+
+            placeholder = ("placeholder",)
+            try:
+                tv.configure(columns=placeholder, displaycolumns=placeholder, show="headings")
+                tv.heading("placeholder", text="No Combined data loaded")
+                tv.column("placeholder", width=220, anchor=tk.CENTER, stretch=True)
+            except Exception:
+                pass
+
+        if self.combined_save_button is not None:
+            try:
+                self.combined_save_button.configure(state="disabled")
+            except Exception:
+                pass
+
     def _populate_combined_table(self, columns: List[str], rows: List[List[str]]) -> None:
         if self.combined_table is None:
             return
