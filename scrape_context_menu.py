@@ -6,6 +6,7 @@ import sys
 from typing import List, Optional, TYPE_CHECKING
 
 import tkinter as tk
+from tkinter import messagebox, simpledialog
 
 from scrape_table_model import ScrapeTableModel
 from scrape_table_view import ScrapeTableView
@@ -37,9 +38,13 @@ class ScrapeContextMenu:
         self._row_state_var = tk.StringVar(master=self.view.container, value="asis")
         self._context_item: Optional[str] = None
         self._is_propagating = False
+        self._header_context_column: Optional[int] = None
 
         self.menu = tk.Menu(self.view.table, tearoff=False)
         self._build_menu()
+
+        self.header_menu = tk.Menu(self.view.table, tearoff=False)
+        self._build_header_menu()
 
         self.view.table.bind("<Button-3>", self._on_table_right_click)
         if sys.platform == "darwin":
@@ -98,7 +103,17 @@ class ScrapeContextMenu:
             command=self._flip_sign,
         )
 
+    def _build_header_menu(self) -> None:
+        self.header_menu.add_command(
+            label="Sum other column into...",
+            command=self._sum_other_column_into_current,
+        )
+
     def _on_table_right_click(self, event: tk.Event) -> Optional[str]:  # type: ignore[override]
+        region = self.view.table.identify_region(event.x, event.y)
+        if region == "heading":
+            return self._on_header_right_click(event)
+
         row_id = self.view.table.identify_row(event.y)
         if not row_id:
             return None
@@ -255,3 +270,127 @@ class ScrapeContextMenu:
 
         self.view.panel.save_table_to_csv()
         self.app.reload_scrape_panels()
+
+    # ------------------------------------------------------------------
+    # Header menu helpers
+    # ------------------------------------------------------------------
+    def _on_header_right_click(self, event: tk.Event) -> str:
+        column_id = self.view.table.identify_column(event.x)
+        try:
+            index = int(column_id.replace("#", "")) - 1
+        except ValueError:
+            return "break"
+
+        if index < 0 or index >= len(self.view.current_columns):
+            return "break"
+
+        self._header_context_column = index
+        try:
+            self.header_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.header_menu.grab_release()
+        return "break"
+
+    @staticmethod
+    def _parse_numeric(value: str) -> Optional[float]:
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        cleaned = cleaned.replace(",", "").replace("$", "")
+        if cleaned.startswith("(") and cleaned.endswith(")"):
+            cleaned = f"-{cleaned[1:-1]}"
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _format_numeric(value: float) -> str:
+        if value.is_integer():
+            return f"{int(value):,}"
+        return f"{value:,.2f}"
+
+    def _sum_other_column_into_current(self) -> None:
+        target_idx = self._header_context_column
+        self._header_context_column = None
+        if target_idx is None or target_idx >= len(self.view.current_columns):
+            return
+
+        target_name = self.view.current_columns[target_idx]
+        if not _is_date_col(target_name):
+            messagebox.showinfo(
+                "Sum Columns",
+                "The selected column must be a date column.",
+                parent=self.view.panel.frame,
+            )
+            return
+
+        date_columns = [
+            (idx, name)
+            for idx, name in enumerate(self.view.current_columns)
+            if idx != target_idx and _is_date_col(name)
+        ]
+
+        if not date_columns:
+            messagebox.showinfo(
+                "Sum Columns",
+                "No other date columns are available to sum.",
+                parent=self.view.panel.frame,
+            )
+            return
+
+        options = "\n".join(
+            f"{pos + 1}. {name}" for pos, (_, name) in enumerate(date_columns)
+        )
+        selection = simpledialog.askinteger(
+            "Sum Columns",
+            f"Select the column to sum into {target_name}:\n{options}",
+            parent=self.view.panel.frame,
+            minvalue=1,
+            maxvalue=len(date_columns),
+            initialvalue=1,
+        )
+        if selection is None:
+            return
+
+        source_idx = date_columns[selection - 1][0]
+
+        rows = self.view.get_table_rows()
+        updated_rows: List[List[str]] = []
+        for values in rows:
+            row = list(values)
+            while len(row) < len(self.view.current_columns):
+                row.append("")
+            left = self._parse_numeric(row[target_idx]) or 0.0
+            right = self._parse_numeric(row[source_idx]) or 0.0
+            total = left + right
+            if total == 0 and not row[target_idx] and not row[source_idx]:
+                row[target_idx] = ""
+            else:
+                row[target_idx] = self._format_numeric(total)
+            updated_rows.append(row)
+
+        new_columns = (
+            self.view.current_columns[:source_idx]
+            + self.view.current_columns[source_idx + 1 :]
+        )
+
+        trimmed_rows: List[List[str]] = []
+        expected_len = len(new_columns)
+        for row in updated_rows:
+            trimmed = list(row)
+            if source_idx < len(trimmed):
+                del trimmed[source_idx]
+            if len(trimmed) < expected_len:
+                trimmed.extend([""] * (expected_len - len(trimmed)))
+            else:
+                trimmed = trimmed[:expected_len]
+            trimmed_rows.append(trimmed)
+
+        self.view.populate(
+            trimmed_rows,
+            register=self.view.panel.model.has_csv_data,
+            header=new_columns,
+        )
+        self.view.panel.model.has_csv_data = bool(trimmed_rows)
+        self.view.panel.save_table_to_csv()
