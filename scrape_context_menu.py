@@ -97,6 +97,10 @@ class ScrapeContextMenu:
             label="Flip Sign (row)",
             command=self._flip_sign_row,
         )
+        self.menu.add_command(
+            label="Flip Sign (odd date cols)",
+            command=self._flip_sign_odd_date_columns,
+        )
         self.menu.add_separator()
         self.menu.add_command(
             label="Flip Sign",
@@ -230,6 +234,44 @@ class ScrapeContextMenu:
 
             for idx, col_name in enumerate(self.view.current_columns):
                 if not _is_date_col(col_name):
+                    continue
+                s = str(new_vals[idx]).strip()
+                if s.startswith("-"):
+                    new_vals[idx] = s[1:]
+                elif s == "":
+                    new_vals[idx] = ""
+                else:
+                    new_vals[idx] = "-" + s
+
+            self.view.table.item(item_id, values=new_vals)
+
+        self.view.panel.save_table_to_csv()
+        self.view.panel.load_from_files()
+
+    def _flip_sign_odd_date_columns(self) -> None:
+        selected = self.view.table.selection()
+        if not selected:
+            selected = [self._context_item] if self._context_item else []
+        if not selected:
+            return
+
+        date_indices = [
+            idx for idx, name in enumerate(self.view.current_columns)
+            if _is_date_col(name)
+        ]
+        target_indices = [
+            idx for pos, idx in enumerate(date_indices, start=1)
+            if pos % 2 == 1
+        ]
+        if not target_indices:
+            return
+
+        for item_id in selected:
+            values = list(self.view.table.item(item_id, "values"))
+            new_vals = values[:]
+
+            for idx in target_indices:
+                if idx >= len(new_vals):
                     continue
                 s = str(new_vals[idx]).strip()
                 if s.startswith("-"):
