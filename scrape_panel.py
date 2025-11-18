@@ -175,14 +175,6 @@ class ScrapeResultPanel:
             actions_row, text="Open CSV", command=self.open_csv
         )
         self.open_csv_button.pack(side=tk.LEFT)
-        self.view_raw_button = ttk.Button(
-            actions_row, text="View Raw", command=self.view_raw_text
-        )
-        self.view_raw_button.pack(side=tk.LEFT, padx=(6, 0))
-        self.delete_column_button = ttk.Button(
-            actions_row, text="Delete Column", command=self.delete_column
-        )
-        self.delete_column_button.pack(side=tk.LEFT, padx=(6, 0))
 
         self.reload_csv_button = ttk.Button(
             actions_row, text="Reload CSV", command=self.load_from_files
@@ -212,11 +204,6 @@ class ScrapeResultPanel:
             actions_row, text="Browse PDF", command=_browse_pdf_folder
         )
         self.browse_pdf_button.pack(side=tk.LEFT, padx=(6, 0))
-
-        self.delete_row_button = ttk.Button(
-            actions_row, text="Delete Row", command=self._delete_selected_rows
-        )
-        self.delete_row_button.pack(side=tk.LEFT, padx=(6, 0))
 
         self.view = ScrapeTableView(
             self, self.frame, self.app, self.model, auto_scale_tables
@@ -288,16 +275,7 @@ class ScrapeResultPanel:
             return
         self.app.open_file_path(self.model.csv_path)
 
-    def view_raw_text(self) -> None:
-        if not self.model.raw_path.exists():
-            messagebox.showinfo("Raw Response", "Raw response not available yet.")
-            return
-        self.app.show_raw_text_dialog(
-            self.model.raw_path,
-            f"{self.entry.path.name} – {self.category} raw response",
-        )
-
-    def delete_column(self) -> None:
+    def delete_column(self, index: Optional[int] = None) -> None:
         column_count = len(self.view.current_columns)
         if column_count <= 1:
             messagebox.showinfo(
@@ -305,21 +283,34 @@ class ScrapeResultPanel:
             )
             return
 
-        options = "\n".join(
-            f"{idx + 1}. {name}" for idx, name in enumerate(self.view.current_columns)
-        )
-        selection = simpledialog.askinteger(
-            "Delete Column",
-            f"Select the column number to delete:\n{options}",
-            parent=self.frame,
-            minvalue=1,
-            maxvalue=column_count,
-            initialvalue=column_count,
-        )
-        if selection is None:
+        if index is None:
+            options = "\n".join(
+                f"{idx + 1}. {name}"
+                for idx, name in enumerate(self.view.current_columns)
+            )
+            selection = simpledialog.askinteger(
+                "Delete Column",
+                f"Select the column number to delete:\n{options}",
+                parent=self.frame,
+                minvalue=1,
+                maxvalue=column_count,
+                initialvalue=column_count,
+            )
+            if selection is None:
+                return
+            index = selection - 1
+        elif index < 0 or index >= column_count:
             return
 
-        index = selection - 1
+        column_name = self.view.current_columns[index]
+        confirm = messagebox.askyesno(
+            "Delete Column",
+            f"Delete column '{column_name}'?\nThis cannot be undone.",
+            parent=self.frame,
+        )
+        if not confirm:
+            return
+
         new_columns = (
             self.view.current_columns[:index]
             + self.view.current_columns[index + 1 :]
@@ -452,8 +443,6 @@ class ScrapeResultPanel:
             if has_csv or self.model.has_csv_data
             else "disabled"
         )
-        has_raw = self.model.raw_path.exists()
-        self.view_raw_button.configure(state="normal" if has_raw else "disabled")
 
     def _note_column_index(self) -> Optional[int]:
         return self.view._note_column_index()

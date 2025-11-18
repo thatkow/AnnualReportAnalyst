@@ -102,8 +102,18 @@ class ScrapeContextMenu:
             label="Flip Sign",
             command=self._flip_sign,
         )
+        self.menu.add_separator()
+        self.menu.add_command(
+            label="Delete selected row(s)",
+            command=self._delete_rows,
+        )
 
     def _build_header_menu(self) -> None:
+        self.header_menu.add_command(
+            label="Delete column",
+            command=self._delete_current_column,
+        )
+        self.header_menu.add_separator()
         self.header_menu.add_command(
             label="Sum other column into...",
             command=self._sum_other_column_into_current,
@@ -271,6 +281,11 @@ class ScrapeContextMenu:
         self.view.panel.save_table_to_csv()
         self.app.reload_scrape_panels()
 
+    def _delete_rows(self) -> None:
+        if not self.view.table.selection() and self._context_item:
+            self.view.table.selection_set(self._context_item)
+        self.view.panel._delete_selected_rows()
+
     # ------------------------------------------------------------------
     # Header menu helpers
     # ------------------------------------------------------------------
@@ -348,7 +363,7 @@ class ScrapeContextMenu:
             parent=self.view.panel.frame,
             minvalue=1,
             maxvalue=len(date_columns),
-            initialvalue=1,
+            initialvalue=len(date_columns),
         )
         if selection is None:
             return
@@ -394,3 +409,11 @@ class ScrapeContextMenu:
         )
         self.view.panel.model.has_csv_data = bool(trimmed_rows)
         self.view.panel.save_table_to_csv()
+
+    def _delete_current_column(self) -> None:
+        target_idx = self._header_context_column
+        self._header_context_column = None
+        if target_idx is None:
+            return
+
+        self.view.panel.delete_column(index=target_idx)
