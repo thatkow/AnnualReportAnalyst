@@ -16,8 +16,8 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
 from constants import COLUMNS, DEFAULT_OPENAI_MODEL, SCRAPE_EXPECTED_COLUMNS
-# === New button: Copy ReleaseDate Prompt ===
-from combined_utils import build_release_date_prompt
+# === New buttons: Copy ReleaseDate / Stock Multiplier Prompts ===
+from combined_utils import build_release_date_prompt, build_stock_multiplier_prompt
 
 COMBINED_BASE_COLUMNS = [
     "TYPE",
@@ -128,6 +128,13 @@ class CombinedUIMixin:
 
 
    
+    def _get_combined_date_columns(self) -> List[str]:
+        base_cols = {"TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "KEY4COLORING"}
+        return [
+            c for c in (self.combined_columns or [])
+            if isinstance(c, str) and c.upper() not in base_cols
+        ]
+
     def _on_copy_releasedate_prompt(self):
         try:
             company = self.company_var.get().strip()
@@ -140,11 +147,7 @@ class CombinedUIMixin:
                 messagebox.showwarning("No Combined Data", "Create the combined dataset first.")
                 return
 
-            # Extract date columns (dynamic columns only)
-            date_cols = [
-                c for c in self.combined_columns
-                if c.upper() not in ("TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "KEY4COLORING")
-            ]
+            date_cols = self._get_combined_date_columns()
 
             # Build prompt text
             text = build_release_date_prompt(company, date_cols)
@@ -210,6 +213,34 @@ class CombinedUIMixin:
 
         except Exception as exc:
             messagebox.showerror("Error", f"Failed to generate ReleaseDate prompt:\n{exc}")
+
+    def _on_copy_stock_multiplier_prompt(self) -> None:
+        try:
+            company = self.company_var.get().strip()
+            if not company:
+                messagebox.showwarning("Company Missing", "Select a company before generating the prompt.")
+                return
+
+            if not self.combined_columns or not self.combined_rows:
+                messagebox.showwarning("No Combined Data", "Create the combined dataset first.")
+                return
+
+            date_cols = self._get_combined_date_columns()
+
+            app_root = Path(getattr(self, "app_root", Path(__file__).resolve().parent))
+            template_path = app_root / "prompts" / "Stock_Multipliers.txt"
+            text = build_stock_multiplier_prompt(company, date_cols, template_path)
+
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update()
+
+            messagebox.showinfo("Stock Multipliers", "Prompt copied to clipboard.")
+
+        except FileNotFoundError as exc:
+            messagebox.showerror("Stock Multipliers", str(exc))
+        except Exception as exc:
+            messagebox.showerror("Stock Multipliers", f"Failed to generate stock multiplier prompt:\n{exc}")
 
     def build_combined_tab(self, notebook: ttk.Notebook) -> None:
         combined_tab = ttk.Frame(notebook)
@@ -281,6 +312,13 @@ class CombinedUIMixin:
             command=self._on_copy_releasedate_prompt
         )
         copy_prompt_btn.pack(side=tk.LEFT, padx=(0, 20))
+
+        # 5b) Copy Stock Multiplier Prompt
+        copy_stock_prompt_btn = ttk.Button(
+            controls, text="Copy Stock Multiplier Prompt",
+            command=self._on_copy_stock_multiplier_prompt
+        )
+        copy_stock_prompt_btn.pack(side=tk.LEFT, padx=(0, 20))
 
         # 6) Generate Table (rename Create)
         self.combined_create_button = ttk.Button(

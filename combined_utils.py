@@ -235,6 +235,44 @@ def generate_and_open_stock_multipliers(logger=None, company_dir=None, date_colu
 
     return
 
+def _sort_dates(dates: list[str]) -> list[str]:
+    """Return unique date strings sorted chronologically when possible."""
+
+    unique: list[str] = []
+    for d in dates:
+        s = str(d).strip()
+        if not s:
+            continue
+        if s not in unique:
+            unique.append(s)
+
+    if not unique:
+        return []
+
+    try:
+        import re
+        from datetime import datetime
+
+        def parse_date(value: str) -> datetime:
+            for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d-%m-%Y"):
+                try:
+                    return datetime.strptime(value, fmt)
+                except Exception:
+                    continue
+            parts = re.split(r"[./-]", value)
+            nums = [int(p) for p in parts if p.isdigit()]
+            if len(nums) == 3:
+                day, month, year = nums
+                if year < 100:
+                    year += 2000
+                return datetime(year, month, day)
+            return datetime.max
+
+        return sorted(unique, key=parse_date)
+    except Exception:
+        return sorted(unique)
+
+
 def build_release_date_prompt(company: str, dates: list[str]) -> str:
     """
     Build the ReleaseDate research prompt for clipboard use.
@@ -247,7 +285,7 @@ def build_release_date_prompt(company: str, dates: list[str]) -> str:
 
     # Build CSV
     rows = ["Date,ReleaseDate"]
-    for d in dates:
+    for d in _sort_dates(dates):
         if isinstance(d, str) and d.strip():
             rows.append(f"{d.strip()},")
     csv_block = "\n".join(rows)
@@ -298,6 +336,41 @@ CSV:
 """.strip()
 
     return template
+
+
+def build_stock_multiplier_prompt(
+    company: str,
+    dates: list[str],
+    template_path: Optional[Path] = None,
+) -> str:
+    """Fill the Stock Multiplier template with the company and date table."""
+
+    if template_path is None:
+        template_path = Path(__file__).resolve().parent / "prompts" / "Stock_Multipliers.txt"
+    else:
+        template_path = Path(template_path)
+
+    if not template_path.exists():
+        raise FileNotFoundError(f"Stock multiplier prompt template not found: {template_path}")
+
+    template_text = template_path.read_text(encoding="utf-8").strip()
+
+    sorted_dates = _sort_dates(dates)
+    table_lines = ["Date\tStock Multiplier"]
+    for d in sorted_dates:
+        table_lines.append(f"{d}\t")
+    if len(table_lines) == 1:
+        table_lines.append("<add at least one Date column>\t")
+    table_block = "\n".join(table_lines)
+
+    replacements = {
+        "{{COMPANY_NAME}}": (company or "<Company>").strip() or "<Company>",
+        "{{DATE_TABLE}}": table_block,
+    }
+    for placeholder, value in replacements.items():
+        template_text = template_text.replace(placeholder, value)
+
+    return template_text
     """Force-create a new stock_multipliers.csv using all date columns and open it."""
     fpath = get_stock_multiplier_path(logger, company_dir, current_company_name)
     if not date_columns:
