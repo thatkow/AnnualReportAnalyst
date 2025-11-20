@@ -424,13 +424,13 @@ function buildCumsumLines(factorName, perShare) {{
           );
         }}),
         hoverinfo: "text",
-        customdata: years.map(y => {
+        customdata: years.map(y => {{
           const pdfName = pdfSources[y];
           const pdfPath = (pdfName && ticker)
             ? encodeURI(`companies/${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
             : "";
           return [y, pdfPath];
-        }),
+        }}),
         showlegend: false
       }});
     }}
@@ -627,7 +627,7 @@ function renderBars() {{
 
     Plotly.newPlot("plotBars", traces, layout);
     const barsDiv = document.getElementById("plotBars");
-    barsDiv.on("plotly_click", evt => {
+    barsDiv.on("plotly_click", evt => {{
       const point = evt?.points?.[0];
       if (!point) return;
       const clickCount = evt.event?.detail || 0;
@@ -635,7 +635,7 @@ function renderBars() {{
       const pdfPath = point.customdata?.[1];
       if (!pdfPath) return;
       window.open(pdfPath, "_blank");
-    });
+    }});
     // Update Δ labels based on current raw values
     updateAdjustmentLabels();
   }}
