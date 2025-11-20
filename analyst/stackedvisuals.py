@@ -634,7 +634,7 @@ function renderBars() {{
       if (clickCount < 2) return;
       const pdfPath = point.customdata?.[1];
       if (!pdfPath) return;
-      window.open(pdfPath, "_blank");
+      window.open(pdfPath, "_blank", "noopener,noreferrer");
     }});
     // Update Δ labels based on current raw values
     updateAdjustmentLabels();
