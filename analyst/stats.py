@@ -7,6 +7,7 @@ import pandas as pd
 from matplotlib.patches import Patch
 
 from analyst.data import Company
+from analyst import analyst_yahoo
 
 
 # ------------------------------------------------------------
@@ -119,7 +120,8 @@ def compute_adjusted_values(ticker, df):
         "ticker": ticker,
         "subcats": subcat_labels,
         "financial": build_group("Financial"),
-        "income":    build_group("Income")
+        "income":    build_group("Income"),
+        "dates": date_cols,
     }
 
 
@@ -129,12 +131,37 @@ def get_release_dates(df):
     return [str(release[c]) for c in date_cols[:7]]
 
 
+def get_latest_stock_price(ticker: str) -> float | None:
+    """Fetch the most recent closing stock price for the given ticker.
+
+    Returns ``None`` if the data cannot be retrieved.
+    """
+
+    try:
+        prices = analyst_yahoo.get_stock_prices(ticker, years=1)
+        if prices.empty:
+            print(f"⚠️ No recent stock prices found for {ticker}.")
+            return None
+        latest = float(prices["Price"].iloc[-1])
+        return latest
+    except Exception as exc:  # pragma: no cover - network dependent
+        print(f"⚠️ Failed to fetch latest stock price for {ticker}: {exc}")
+        return None
+
+
 # ------------------------------------------------------------
 # Interlaced Ticker-Colored Boxplots
 # ------------------------------------------------------------
 
 def render_interlaced_boxplots(
-    ticker1, groups1, ticker2, groups2, price_labels
+    ticker1,
+    groups1,
+    ticker2,
+    groups2,
+    price_labels,
+    *,
+    xlabel: str,
+    hlines: list[tuple[float, str, str]] | None = None,
 ):
     """
     7 groups per ticker → 14 interlaced boxplots
@@ -168,11 +195,49 @@ def render_interlaced_boxplots(
         ]
     )
 
+    if hlines:
+        for value, color, label in hlines:
+            if value is None or np.isnan(value):
+                continue
+            ax.axhline(value, color=color, linestyle="--", linewidth=1.5, label=label)
+
+    # Combine legend entries if horizontal lines added
+    if hlines:
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(handles, labels)
+
+    ax.set_xlabel(xlabel)
     plt.xticks(rotation=45, ha='right')
     plt.title(f"Interlaced Boxplots — {ticker1.upper()} vs {ticker2.upper()}")
     plt.tight_layout()
 
     return fig
+
+
+def compute_normalized_latest(groups, dates: Sequence[str], latest_price: float | None):
+    """Calculate normalized cumulative sum for the latest available date column."""
+
+    if latest_price is None or latest_price == 0 or pd.isna(latest_price):
+        return None
+
+    # Identify the latest date index using day-first parsing
+    parsed_dates = [
+        pd.to_datetime(value, format="%d.%m.%Y", dayfirst=True, errors="coerce")
+        for value in dates
+    ]
+    if not parsed_dates or all(pd.isna(d) for d in parsed_dates):
+        latest_idx = 0
+    else:
+        latest_idx = int(np.nanargmax(parsed_dates))
+
+    latest_total = np.nansum(
+        [grp[latest_idx] for grp in groups if len(grp) > latest_idx]
+    )
+
+    if np.isnan(latest_total):
+        return None
+
+    return latest_total / latest_price
 
 
 @dataclass
@@ -203,6 +268,9 @@ def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
     adjusted_a = compute_adjusted_values(company_a.ticker, company_a.combined)
     adjusted_b = compute_adjusted_values(company_b.ticker, company_b.combined)
 
+    latest_price_a = get_latest_stock_price(company_a.ticker)
+    latest_price_b = get_latest_stock_price(company_b.ticker)
+
     shared_price_labels = [
         label for label in adjusted_a["subcats"] if label in adjusted_b["subcats"]
     ]
@@ -213,20 +281,56 @@ def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
         index_lookup = {label: i for i, label in enumerate(available_labels)}
         return [groups[index_lookup[label]] for label in target_labels]
 
+    fin_groups_a = filter_groups(
+        adjusted_a["financial"], adjusted_a["subcats"], shared_price_labels
+    )
+    fin_groups_b = filter_groups(
+        adjusted_b["financial"], adjusted_b["subcats"], shared_price_labels
+    )
+    inc_groups_a = filter_groups(
+        adjusted_a["income"], adjusted_a["subcats"], shared_price_labels
+    )
+    inc_groups_b = filter_groups(
+        adjusted_b["income"], adjusted_b["subcats"], shared_price_labels
+    )
+
+    fin_line_a = compute_normalized_latest(
+        fin_groups_a, adjusted_a["dates"], latest_price_a
+    )
+    fin_line_b = compute_normalized_latest(
+        fin_groups_b, adjusted_b["dates"], latest_price_b
+    )
+    inc_line_a = compute_normalized_latest(
+        inc_groups_a, adjusted_a["dates"], latest_price_a
+    )
+    inc_line_b = compute_normalized_latest(
+        inc_groups_b, adjusted_b["dates"], latest_price_b
+    )
+
     fig_fin = render_interlaced_boxplots(
         company_a.ticker,
-        filter_groups(adjusted_a["financial"], adjusted_a["subcats"], shared_price_labels),
+        fin_groups_a,
         company_b.ticker,
-        filter_groups(adjusted_b["financial"], adjusted_b["subcats"], shared_price_labels),
+        fin_groups_b,
         shared_price_labels,
+        xlabel="Balance Sheet",
+        hlines=[
+            (fin_line_a, plt.cm.tab10(0), f"{company_a.ticker.upper()} latest norm."),
+            (fin_line_b, plt.cm.tab10(1), f"{company_b.ticker.upper()} latest norm."),
+        ],
     )
 
     fig_inc = render_interlaced_boxplots(
         company_a.ticker,
-        filter_groups(adjusted_a["income"], adjusted_a["subcats"], shared_price_labels),
+        inc_groups_a,
         company_b.ticker,
-        filter_groups(adjusted_b["income"], adjusted_b["subcats"], shared_price_labels),
+        inc_groups_b,
         shared_price_labels,
+        xlabel="Income Statement",
+        hlines=[
+            (inc_line_a, plt.cm.tab10(0), f"{company_a.ticker.upper()} latest norm."),
+            (inc_line_b, plt.cm.tab10(1), f"{company_b.ticker.upper()} latest norm."),
+        ],
     )
 
     return FinancialBoxplots(fig_fin=fig_fin, fig_inc=fig_inc)
