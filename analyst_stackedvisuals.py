@@ -13,6 +13,7 @@ def render_stacked_annual_report(
     factor_tooltip: dict | None = None,
     factor_tooltip_label: str = "Stock Factors",
     share_counts: dict | None = None,
+    pdf_sources: dict | None = None,
     out_path: str = "stacked_annual_report.html",
 ):
     """
@@ -23,6 +24,8 @@ def render_stacked_annual_report(
 
     if share_counts is None:
         raise ValueError("❌ 'share_counts' must be provided explicitly.")
+
+    pdf_sources = pdf_sources or {}
 
     # Identify years and categorical fields
     year_cols = [c for c in df.columns if c[:2].isdigit() or c.startswith("31.")]
@@ -138,6 +141,7 @@ const shareCounts = {json.dumps(share_counts)};
 const factorLookup = {json.dumps(factor_lookup)};
 const factorTooltip = {json.dumps(factor_tooltip)};
 const factorTooltipLabel = {json.dumps(factor_tooltip_label)};
+const pdfSources = {json.dumps(pdf_sources)};
 const typeOffsets = {json.dumps(type_offsets)};
 const typeLineStyles = {json.dumps(type_linestyles)};
 const yearToggleState = Object.fromEntries(
@@ -398,12 +402,20 @@ function buildCumsumLines(factorName, perShare) {{
           const tooltipFormatted = tooltipArr.length
             ? `<br><b>${{factorTooltipLabel}}:</b><br>` + tooltipArr.join("<br>")
             : "";
+          const pdfName = pdfSources[y];
+          const pdfPath = (pdfName && ticker)
+            ? encodeURI(`companies/${ticker}/openapiscrape/${pdfName}/PDF_FOLDER/${typ}.pdf`)
+            : "";
+          const pdfLink = pdfPath
+            ? `<br><a href="${pdfPath}" target="_blank">Open PDF</a>`
+            : "";
           return (
             "TICKER:" + ticker +
             "<br>YEAR:" + y +
             "<br>TYPE:" + typ +
             tooltipFormatted +
-            "<br>TOTAL:" + fmt(perYearTotals[i], perShare)
+            "<br>TOTAL:" + fmt(perYearTotals[i], perShare) +
+            pdfLink
           );
         }}),
         hoverinfo: "text",

@@ -76,6 +76,27 @@ def _release_date_map(df_all: pd.DataFrame, num_cols: list[str], company: Compan
     return release_map
 
 
+def _pdf_source_map(df_all: pd.DataFrame, num_cols: list[str]) -> Dict[str, str]:
+    """Map each financial date column to the base PDF source name (sans extension)."""
+
+    pdf_rows = df_all[
+        (df_all["TYPE"].str.lower() == "meta")
+        & (df_all["CATEGORY"].str.lower() == "pdf source")
+    ]
+
+    if pdf_rows.empty:
+        return {}
+
+    pdf_map: Dict[str, str] = {}
+    row = pdf_rows.iloc[0]
+    for col in num_cols:
+        val = str(row.get(col, "")).strip()
+        if val:
+            pdf_map[col] = Path(val).stem
+
+    return pdf_map
+
+
 def plot_stacked_financials(company: Company, *, out_path: str | Path | None = None) -> Path:
     """Plot stacked visuals for a company's combined dataset."""
 
@@ -138,6 +159,7 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
             price_rows[year] = pd.to_numeric(price_rows[year], errors="coerce") * factor
 
     release_map = _release_date_map(df_all, num_cols, company)
+    pdf_map = _pdf_source_map(df_all, num_cols)
 
     year_cols = [c for c in df.columns if c not in excluded_cols]
 
@@ -196,6 +218,7 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
         factor_tooltip=factor_tooltip,
         factor_tooltip_label="Prices",
         share_counts=share_counts,
+        pdf_sources=pdf_map,
         out_path=out_path,
     )
 
