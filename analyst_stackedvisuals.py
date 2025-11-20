@@ -406,8 +406,8 @@ function buildCumsumLines(factorName, perShare) {{
           const pdfPath = (pdfName && ticker)
             ? encodeURI(`companies/${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
             : "";
-          const pdfLink = pdfPath
-            ? `<br><a href="${{pdfPath}}" target="_blank">Open PDF</a>`
+          const pdfHint = pdfPath
+            ? "<br><i>Double-click point to open PDF</i>"
             : "";
           return (
             "TICKER:" + ticker +
@@ -415,11 +415,17 @@ function buildCumsumLines(factorName, perShare) {{
             "<br>TYPE:" + typ +
             tooltipFormatted +
             "<br>TOTAL:" + fmt(perYearTotals[i], perShare) +
-            pdfLink
+            pdfHint
           );
         }}),
         hoverinfo: "text",
-        customdata: years.map(y => [y]),
+        customdata: years.map(y => {
+          const pdfName = pdfSources[y];
+          const pdfPath = (pdfName && ticker)
+            ? encodeURI(`companies/${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
+            : "";
+          return [y, pdfPath];
+        }),
         showlegend: false
       }});
     }}
@@ -614,10 +620,20 @@ function renderBars() {{
     cliponaxis: false
   }};
 
-  Plotly.newPlot("plotBars", traces, layout);
-  // Update Δ labels based on current raw values
-  updateAdjustmentLabels();
-}}
+    Plotly.newPlot("plotBars", traces, layout);
+    const barsDiv = document.getElementById("plotBars");
+    barsDiv.on("plotly_click", evt => {
+      const point = evt?.points?.[0];
+      if (!point) return;
+      const clickCount = evt.event?.detail || 0;
+      if (clickCount < 2) return;
+      const pdfPath = point.customdata?.[1];
+      if (!pdfPath) return;
+      window.open(pdfPath, "_blank");
+    });
+    // Update Δ labels based on current raw values
+    updateAdjustmentLabels();
+  }}
 renderBars();
 sel.addEventListener("change", renderBars);
 document.getElementById("perShareCheckbox").addEventListener("change", renderBars);
