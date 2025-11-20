@@ -92,15 +92,33 @@ def plot_stacked_visuals(
         lambda x: -1.0 * x if pd.notna(x) else x
     )
 
-    company_path = Path(companies_dir) / ticker
-    release_csv = company_path / "ReleaseDates.csv"
+    release_rows = df_all[
+        (df_all["TYPE"].str.lower() == "meta")
+        & (df_all["CATEGORY"].str.lower() == "releasedate")
+    ]
     release_map: Dict[str, str] = {}
-    if release_csv.exists():
-        release_map = pd.read_csv(release_csv).set_index("Date")["ReleaseDate"].fillna("").to_dict()
-    else:
-        raise FileNotFoundError(
-            f"ReleaseDates.csv not found for {ticker} at {release_csv}."
-        )
+    if not release_rows.empty:
+        row = release_rows.iloc[0]
+        for col in num_cols:
+            val = str(row.get(col, "")).strip()
+            if val:
+                release_map[col] = val
+
+    # Fallback to legacy ReleaseDates.csv if the combined table lacks release dates
+    if not release_map:
+        company_path = Path(companies_dir) / ticker
+        release_csv = company_path / "ReleaseDates.csv"
+        if release_csv.exists():
+            release_map = (
+                pd.read_csv(release_csv)
+                .set_index("Date")["ReleaseDate"]
+                .fillna("")
+                .to_dict()
+            )
+        else:
+            raise ValueError(
+                "Release dates are missing from the combined table and ReleaseDates.csv."
+            )
 
     year_cols = [c for c in df.columns if c not in excluded_cols]
 

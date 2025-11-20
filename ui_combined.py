@@ -1527,9 +1527,11 @@ class CombinedUIMixin:
             self.logger.error(f"❌ Failed to append 'Stock Multiplier' row to PDF summary: {e}")
             raise
 
-        # === Append Stock Prices rows (one per offset) ===
+        # === Append Release Dates row and Stock Prices rows (one per offset) ===
         stock_price_rows: List[List[str]] = []
         release_map: Dict[str, str] = {}
+        release_row: List[str] = ["Meta", "ReleaseDate", "", "", "excluded", ""] + ["" for _ in dyn_cols]
+
         release_csv = self.companies_dir / company_name / "ReleaseDates.csv"
         if release_csv.exists():
             with release_csv.open("r", encoding="utf-8") as fh:
@@ -1539,6 +1541,11 @@ class CombinedUIMixin:
                     rel_val = str(row.get("ReleaseDate", "")).strip()
                     if date_key:
                         release_map[date_key] = rel_val
+
+        # Populate the release row using the current date columns
+        for dc_idx, dc in enumerate(dyn_cols):
+            date_label = dc.get("default_name", "").strip()
+            release_row[len(COMBINED_BASE_COLUMNS) + dc_idx] = release_map.get(date_label, "")
 
         stock_prices_path = self.companies_dir / company_name / "StockPrices.csv"
         if stock_prices_path.exists():
@@ -1607,7 +1614,7 @@ class CombinedUIMixin:
                 key4_value = item_clean
             rows_out.append([assigned_type, cat, sub, item, note_val, key4_value] + values_for_row)
 
-        final_rows = [pdf_summary] + multiplier_rows + [share_row] + stock_price_rows + rows_out
+        final_rows = [pdf_summary] + multiplier_rows + [share_row, release_row] + stock_price_rows + rows_out
         self._populate_combined_table(columns, final_rows)
         self.combined_columns = columns
         self.combined_rows = final_rows
