@@ -404,10 +404,10 @@ function buildCumsumLines(factorName, perShare) {{
             : "";
           const pdfName = pdfSources[y];
           const pdfPath = (pdfName && ticker)
-            ? encodeURI(`companies/${ticker}/openapiscrape/${pdfName}/PDF_FOLDER/${typ}.pdf`)
+            ? encodeURI(`companies/${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
             : "";
           const pdfLink = pdfPath
-            ? `<br><a href="${pdfPath}" target="_blank">Open PDF</a>`
+            ? `<br><a href="${{pdfPath}}" target="_blank">Open PDF</a>`
             : "";
           return (
             "TICKER:" + ticker +
