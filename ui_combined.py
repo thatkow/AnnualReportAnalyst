@@ -10,14 +10,21 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+import pandas as pd
 
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
 from constants import COLUMNS, DEFAULT_OPENAI_MODEL, SCRAPE_EXPECTED_COLUMNS
 # === New buttons: Copy ReleaseDate / Stock Multiplier Prompts ===
-from combined_utils import build_release_date_prompt, build_stock_multiplier_prompt
+from combined_utils import (
+    _sort_dates,
+    build_release_date_prompt,
+    build_stock_multiplier_prompt,
+    generate_and_open_stock_multipliers,
+)
 
 COMBINED_BASE_COLUMNS = [
     "TYPE",
@@ -37,9 +44,7 @@ class CombinedUIMixin:
     combined_date_tree: Optional[ttk.Treeview]
     combined_table: Optional[ttk.Treeview]
     combined_create_button: Optional[ttk.Button]
-    combined_save_button: Optional[ttk.Button]
     mapping_create_button: Optional[ttk.Button]
-    mapping_open_button: Optional[ttk.Button]
     combined_columns: List[str]
     combined_rows: List[List[str]]
     combined_dyn_columns: List[Dict[str, Any]]
@@ -128,12 +133,31 @@ class CombinedUIMixin:
 
 
    
-    def _get_combined_date_columns(self) -> List[str]:
-        base_cols = {"TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "KEY4COLORING"}
-        return [
-            c for c in (self.combined_columns or [])
-            if isinstance(c, str) and c.upper() not in base_cols
-        ]
+    def _get_pdf_table_dates(self) -> List[str]:
+        """Return sorted date columns sourced from the Date Columns by PDF table."""
+
+        dyn_cols = list(getattr(self, "combined_dyn_columns", []) or [])
+        if not dyn_cols:
+            dyn_cols, _, _ = self._build_date_matrix_data()
+            self.combined_dyn_columns = dyn_cols
+
+        rename_names = list(getattr(self, "combined_rename_names", []) or [])
+        if len(rename_names) != len(dyn_cols):
+            rename_names = [
+                dc.get("default_name") or f"date{idx + 1}"
+                for idx, dc in enumerate(dyn_cols)
+            ]
+            self.combined_rename_names = rename_names
+
+        candidates = [name for name in rename_names if isinstance(name, str) and name.strip()]
+        if not candidates:
+            candidates = [
+                dc.get("default_name", "")
+                for dc in dyn_cols
+                if isinstance(dc, dict)
+            ]
+
+        return _sort_dates([c for c in candidates if isinstance(c, str) and c.strip()])
 
     def _on_copy_releasedate_prompt(self):
         try:
@@ -147,7 +171,7 @@ class CombinedUIMixin:
                 messagebox.showwarning("No Combined Data", "Create the combined dataset first.")
                 return
 
-            date_cols = self._get_combined_date_columns()
+            date_cols = self._get_pdf_table_dates()
 
             # Build prompt text
             text = build_release_date_prompt(company, date_cols)
@@ -216,16 +240,140 @@ class CombinedUIMixin:
 
     def _on_copy_stock_multiplier_prompt(self) -> None:
         try:
+            self._generate_multipliers_with_prompt()
+
+        except FileNotFoundError as exc:
+            messagebox.showerror("Stock Multipliers", str(exc))
+        except Exception as exc:
+            messagebox.showerror("Stock Multipliers", f"Failed to generate stock multiplier prompt:\n{exc}")
+
+    def _on_get_stock_prices(self) -> None:
+        try:
             company = self.company_var.get().strip()
             if not company:
-                messagebox.showwarning("Company Missing", "Select a company before generating the prompt.")
+                messagebox.showwarning("Company Missing", "Select a company before fetching stock prices.")
                 return
 
-            if not self.combined_columns or not self.combined_rows:
-                messagebox.showwarning("No Combined Data", "Create the combined dataset first.")
+            # Load release dates
+            release_csv = self.companies_dir / company / "ReleaseDates.csv"
+            if not release_csv.exists():
+                messagebox.showerror(
+                    "ReleaseDates.csv missing",
+                    "Generate the release dates first using the Copy ReleaseDate Prompt button.",
+                )
                 return
 
-            date_cols = self._get_combined_date_columns()
+            release_dates: List[str] = []
+            with release_csv.open("r", encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    rel = str(row.get("ReleaseDate", "")).strip()
+                    if rel:
+                        release_dates.append(rel)
+
+            release_dates = _sort_dates(list(set(release_dates)))
+            if not release_dates:
+                messagebox.showwarning("No Release Dates", "Fill in ReleaseDates.csv before fetching stock prices.")
+                return
+
+            shift_values = [-30, -7, -1, 0, 1, 7, 30]
+
+            from analyst_yahoo import get_stock_data_for_dates
+
+            cache_path = self.companies_dir / company / "stock_cache.json"
+            stock_df = get_stock_data_for_dates(
+                ticker=company,
+                dates=release_dates,
+                days=shift_values,
+                cache_filepath=str(cache_path),
+            )
+
+            if stock_df is None or stock_df.empty:
+                messagebox.showwarning("No Prices", "No stock prices were retrieved for the selected company.")
+                return
+
+            offsets = [str(v) for v in shift_values]
+            price_lookup: Dict[str, Dict[str, float]] = {}
+            for _, row in stock_df.iterrows():
+                release = str(row.get("BaseDate", "")).strip()
+                offset_key = str(int(row.get("OffsetDays", 0)))
+                price = row.get("Price")
+                if not release:
+                    continue
+                if release not in price_lookup:
+                    price_lookup[release] = {k: "" for k in offsets}  # type: ignore[assignment]
+                if price_lookup[release].get(offset_key) in ("", None, float("nan")):
+                    price_lookup[release][offset_key] = "" if pd.isna(price) else round(float(price), 4)
+
+            # Merge with existing CSV if present
+            csv_path = self.companies_dir / company / "StockPrices.csv"
+            if csv_path.exists():
+                with csv_path.open("r", encoding="utf-8", newline="") as fh:
+                    reader = csv.DictReader(fh)
+                    existing_cols = [c for c in (reader.fieldnames or []) if c != "ReleaseDate"]
+                    for col in existing_cols:
+                        if col not in offsets:
+                            offsets.append(col)
+                    for row in reader:
+                        release = str(row.get("ReleaseDate", "")).strip()
+                        if not release:
+                            continue
+                        if release not in price_lookup:
+                            price_lookup[release] = {k: "" for k in offsets}  # type: ignore[assignment]
+                        for off in existing_cols:
+                            if off == "ReleaseDate":
+                                continue
+                            val = row.get(off, "")
+                            if val not in ("", None):
+                                price_lookup[release][off] = val
+
+            # Ensure all release dates exist
+            for rel in release_dates:
+                price_lookup.setdefault(rel, {k: "" for k in offsets})
+
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            with csv_path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh)
+                header = ["ReleaseDate"] + offsets
+                writer.writerow(header)
+                for rel in _sort_dates(list(price_lookup.keys())):
+                    row_vals = price_lookup.get(rel, {})
+                    writer.writerow([rel] + [row_vals.get(off, "") for off in offsets])
+
+            try:
+                if sys.platform.startswith("win"):
+                    os.startfile(str(csv_path))  # type: ignore[attr-defined]
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", str(csv_path)], check=False)
+                else:
+                    subprocess.run(["xdg-open", str(csv_path)], check=False)
+            except Exception:
+                pass
+
+        except Exception as exc:
+            messagebox.showerror("Stock Prices", f"Failed to fetch stock prices:\n{exc}")
+
+    def _generate_multipliers_with_prompt(self) -> None:
+        company = self.company_var.get().strip()
+        if not company:
+            messagebox.showwarning("Company Missing", "Select a company before generating stock multipliers.")
+            return
+
+        date_cols = self._get_pdf_table_dates()
+        if not date_cols:
+            messagebox.showwarning(
+                "No Dates",
+                "No date columns were found in the Date Columns by PDF table.",
+            )
+            return
+
+        try:
+            generate_and_open_stock_multipliers(
+                logger=getattr(self, "logger", None),
+                company_dir=self.companies_dir,
+                date_columns=date_cols,
+                current_company_name=company,
+            )
 
             app_root = Path(getattr(self, "app_root", Path(__file__).resolve().parent))
             template_path = app_root / "prompts" / "Stock_Multipliers.txt"
@@ -235,12 +383,13 @@ class CombinedUIMixin:
             self.root.clipboard_append(text)
             self.root.update()
 
-            messagebox.showinfo("Stock Multipliers", "Prompt copied to clipboard.")
-
         except FileNotFoundError as exc:
             messagebox.showerror("Stock Multipliers", str(exc))
         except Exception as exc:
-            messagebox.showerror("Stock Multipliers", f"Failed to generate stock multiplier prompt:\n{exc}")
+            messagebox.showerror(
+                "Stock Multipliers",
+                f"Failed to generate stock multipliers and prompt:\n{exc}",
+            )
 
     def build_combined_tab(self, notebook: ttk.Notebook) -> None:
         combined_tab = ttk.Frame(notebook)
@@ -273,64 +422,37 @@ class CombinedUIMixin:
 
 
         # === New stock multiplier control buttons ===
-        from combined_utils import reload_stock_multipliers, generate_and_open_stock_multipliers
         # 1) Generate Multipliers
         self.generate_multipliers_button = ttk.Button(
             controls, text="Generate Multipliers",
-            command=lambda: generate_and_open_stock_multipliers(
-                logger=getattr(self, "logger", None),
-                company_dir=self.companies_dir,
-                date_columns=self.combined_rename_names,
-                current_company_name=self.company_var.get()
-            )
+            command=self._generate_multipliers_with_prompt,
         )
         self.generate_multipliers_button.pack(side=tk.LEFT)
 
-        # 2) Reload Multipliers
-        self.reload_multipliers_button = ttk.Button(
-            controls, text="Reload Multipliers",
-            command=lambda: reload_stock_multipliers(self)
-        )
-        self.reload_multipliers_button.pack(side=tk.LEFT, padx=(6, 20))
-
-        # 3) Create Mapping
+        # 2) Create Mapping
         self.mapping_create_button = ttk.Button(
             controls, text="Create Mapping", command=self.create_mapping_csv
         )
         self.mapping_create_button.pack(side=tk.LEFT)
 
-        # 4) Open Mapping
-        self.mapping_open_button = ttk.Button(
-            controls, text="Open Mapping", command=self.open_mapping_csv, state="disabled"
-        )
-        self.mapping_open_button.pack(side=tk.LEFT, padx=(6, 20))
-        self._update_mapping_buttons()
-
-        # 5) Copy ReleaseDate Prompt
+        # 3) Copy ReleaseDate Prompt
         copy_prompt_btn = ttk.Button(
             controls, text="Copy ReleaseDate Prompt",
             command=self._on_copy_releasedate_prompt
         )
         copy_prompt_btn.pack(side=tk.LEFT, padx=(0, 20))
 
-        # 5b) Copy Stock Multiplier Prompt
-        copy_stock_prompt_btn = ttk.Button(
-            controls, text="Copy Stock Multiplier Prompt",
-            command=self._on_copy_stock_multiplier_prompt
+        # 4) Get stock prices
+        self.get_stock_prices_button = ttk.Button(
+            controls, text="Get stock prices", command=self._on_get_stock_prices
         )
-        copy_stock_prompt_btn.pack(side=tk.LEFT, padx=(0, 20))
+        self.get_stock_prices_button.pack(side=tk.LEFT)
 
-        # 6) Generate Table (rename Create)
+        # 5) Generate Table (rename Create)
         self.combined_create_button = ttk.Button(
             controls, text="Generate Table", command=self.create_combined_dataset
         )
         self.combined_create_button.pack(side=tk.LEFT)
-
-        # 7) Save CSV
-        self.combined_save_button = ttk.Button(
-            controls, text="Save CSV", command=self.save_combined_to_csv, state="disabled"
-        )
-        self.combined_save_button.pack(side=tk.LEFT, padx=(6, 20))
 
         # === New button: Plot Stacked Visuals ===
         from analyst_stackedvisuals import render_stacked_annual_report
@@ -343,25 +465,24 @@ class CombinedUIMixin:
                     return
 
                 # Construct DataFrame from current table
-                df = pd.DataFrame(self.combined_rows, columns=self.combined_columns).fillna("")
+                df_all = pd.DataFrame(self.combined_rows, columns=self.combined_columns).fillna("")
 
                 excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
-                num_cols = [c for c in df.columns if c not in excluded_cols]
+                num_cols = [c for c in df_all.columns if c not in excluded_cols]
                 for c in num_cols:
                     # only operate on string-like values; leave text columns untouched
-                    df[c] = (
-                        df[c]
+                    df_all[c] = (
+                        df_all[c]
                         .astype(str)
                         .str.replace(",", "", regex=False)
                     )
 
-
                 # Extract rows containing multipliers
-                share_mult_row = df[df["CATEGORY"].str.lower() == "shares multiplier"]
-                stock_mult_row = df[df["CATEGORY"].str.lower() == "stock multiplier"]
-                fin_mult_row = df[(df["CATEGORY"].str.lower() == "financial multiplier")]
-                inc_mult_row = df[(df["CATEGORY"].str.lower() == "income multiplier")]
-                             
+                share_mult_row = df_all[df_all["CATEGORY"].str.lower() == "shares multiplier"]
+                stock_mult_row = df_all[df_all["CATEGORY"].str.lower() == "stock multiplier"]
+                fin_mult_row = df_all[(df_all["CATEGORY"].str.lower() == "financial multiplier")]
+                inc_mult_row = df_all[(df_all["CATEGORY"].str.lower() == "income multiplier")]
+
                 def extract_mult(row_df):
                     if row_df.empty:
                         return {}
@@ -389,7 +510,6 @@ class CombinedUIMixin:
                     return {col: to_number(row[col], col) for col in num_cols}
 
 
-
                 share_mult = extract_mult(share_mult_row)
                 stock_mult = extract_mult(stock_mult_row)
                 fin_mult = extract_mult(fin_mult_row)
@@ -397,12 +517,18 @@ class CombinedUIMixin:
 
                 # Determine company/ticker name
                 company_name = self.company_var.get().strip()
-                df["Ticker"] = company_name
+                df_all["Ticker"] = company_name
+
+                # Preserve stock price rows before filtering
+                price_rows = df_all[
+                    (df_all["TYPE"].str.lower() == "stock")
+                    & (df_all["CATEGORY"].str.lower() == "prices")
+                ]
 
                 # Remove NOTE=exclude
-                df = df[df["NOTE"].str.lower() != "excluded"].copy()
+                df = df_all[df_all["NOTE"].str.lower() != "excluded"].copy()
 
-                # Negate NOTE=negated                
+                # Negate NOTE=negated
                 for c in num_cols:
                     df[c] = pd.to_numeric(df[c], errors="coerce")
                 neg_idx = df["NOTE"].str.lower() == "negated"
@@ -414,12 +540,12 @@ class CombinedUIMixin:
                 from pathlib import Path
                 import csv
 
-                company_dir = self.companies_dir / company_name       
+                company_dir = self.companies_dir / company_name
 
                 # Apply Stock Multiplier and Share Multiplier to all "Number of shares" rows
                 share_rows = df[df["ITEM"].str.lower() == "number of shares"]
                 print(share_rows)
-                for c in num_cols:                    
+                for c in num_cols:
                     base_val      = df.loc[share_rows.index, c]
                     share_factor  = share_mult.get(c, 1.0)
                     stock_factor  = stock_mult.get(c, 1.0)
@@ -442,147 +568,60 @@ class CombinedUIMixin:
                 df["Ticker"] = company_name
 
                 # === Load ReleaseDates.csv ===
-                # Must contain: Date,ReleaseDate
                 release_csv = self.companies_dir / company_name / "ReleaseDates.csv"
-                release_map = {}   # financialDate → releaseDate
+                release_map: Dict[str, str] = {}
 
                 if release_csv.exists():
-                    import csv
                     with release_csv.open("r", encoding="utf-8") as fh:
                         reader = csv.DictReader(fh)
                         for row in reader:
-                            financial = row.get("Date", "").strip()
-                            rel = row.get("ReleaseDate", "").strip()
+                            financial = str(row.get("Date", "")).strip()
+                            rel = str(row.get("ReleaseDate", "")).strip()
                             if financial:
                                 release_map[financial] = rel
                 else:
-                    messagebox.showerror("Missing ReleaseDates.csv",
-                                         "ReleaseDates.csv is required for stock price lookups.")
+                    messagebox.showerror(
+                        "Missing ReleaseDates.csv",
+                        "ReleaseDates.csv is required for stock price lookups.",
+                    )
                     return
 
-                # Financial year columns = Date column from the CSV
                 year_cols = list(self.combined_rename_names)
 
-                # === Replace factor_lookup with stock price-based lookup (inverted prices) ===
-                from analyst_yahoo import get_stock_data_for_dates
-
-                # Provide optional parameter for lookup label
-                lookup_label = getattr(self, "factor_label", "Stock-adjusted factors")
-
-                # Shifts used for stock lookups (values only)
-                shift_values = [-30, -7, -1, 0, 1, 7, 30]
-
-                ticker = company_name or "UNKNOWN"
-                print(f"📈 Fetching stock prices for {ticker} (label: {lookup_label})...")
-
-                # === Prepare list of release dates for lookup ===
-                lookup_release_dates = [
-                    rel for rel in release_map.values()
-                    if rel not in ("", None)
-                ]
-
-                if lookup_release_dates:
-                    stock_df = get_stock_data_for_dates(
-                        ticker=ticker,
-                        dates=lookup_release_dates,
-                        days=shift_values,
-                        cache_filepath="stock_cache.json"
-                    )
-                else:
-                    stock_df = None
-
-                # === Rebuild factor_lookup using *financial year* keys ===
-                factor_lookup = {"": {y: 1.0 for y in year_cols}}
-
-                # Build readable shift labels
-                def shift_label(s):
-                    if s == -30: return "Prior month"
-                    if s == -7:  return "Prior week"
-                    if s == -1:  return "Prior day"
-                    if s == 0:   return "On release"
-                    if s == 1:   return "Next day"
-                    if s == 7:   return "Next week"
-                    if s == 30:  return "Next month"
-                    return f"Shift {s}"
-
-                # Populate shift price maps
-                for s in shift_values:
-                    label = shift_label(s)
-                    key_label = f"{label} ({s:+d})"
-                    factor_lookup[key_label] = {}
-
-                    for financial_date, release_date in release_map.items():
-                        if not release_date:
-                            factor_lookup[key_label][financial_date] = float("nan")
-                            continue
-
-                        if stock_df is None:
-                            factor_lookup[key_label][financial_date] = float("nan")
-                            continue
-
-                        subset = stock_df[
-                            (stock_df["BaseDate"] == release_date)
-                            & (stock_df["OffsetDays"] == s)
-                        ]
-
-                        if subset.empty:
-                            factor_lookup[key_label][financial_date] = float("nan")
+                # === Build factor_lookup from precomputed stock prices ===
+                factor_lookup: Dict[str, Dict[str, float]] = {"": {y: 1.0 for y in year_cols}}
+                for _, prow in price_rows.iterrows():
+                    label = str(prow.get("SUBCATEGORY", "")).strip() or "Price"
+                    factor_lookup[label] = {}
+                    for y in year_cols:
+                        price_val = pd.to_numeric(prow.get(y, ""), errors="coerce")
+                        if pd.isna(price_val) or price_val <= 0:
+                            factor_lookup[label][y] = float("nan")
                         else:
-                            price = subset.iloc[0]["Price"]
-                            if pd.notna(price) and price > 0:
-                                factor_lookup[key_label][financial_date] = (
-                                    1.0 / float(price)
-                                )
-                            else:
-                                factor_lookup[key_label][financial_date] = float("nan")
+                            factor_lookup[label][y] = 1.0 / float(price_val)
 
                 if factor_lookup:
-                    print(f"✅ {lookup_label} generated:")
-                    for k, v in factor_lookup.items():
-                        ex = list(v.items())[:2]
-                        print(f"  {k}: sample {ex}")
+                    print(f"✅ Loaded stock price factors from Combined table ({len(factor_lookup) - 1} price shifts)")
                 else:
-                    print("⚠️ Stock price lookup returned no data; continuing without adjustment.")
-
-                # today's price (OffsetDays == 0)
-                from datetime import datetime
-
-                today = datetime.now().strftime("%d.%m.%Y")
-                stock_df = get_stock_data_for_dates(
-                    ticker=ticker,
-                    dates=[today],
-                    days=[0],
-                    cache_filepath="stock_cache.json"
-                )
-                p = stock_df.iloc[0]["Price"]
-                
+                    print("⚠️ No stock price factors found; continuing without adjustment.")
 
                 # === Build tooltips ===
-                factor_tooltip = {}
-                for financial_date, release_date in release_map.items():
-                    entries = []
-
-                    # First line REQUIRED:
-                    entries.append(f"Release Date: {release_date or 'NA'}")
-
-                    for s in shift_values:
-                        label = shift_label(s)
-                        key_label = f"{label} ({s:+d})"
-                        inv = factor_lookup[key_label].get(financial_date, float("nan"))
-
+                factor_tooltip: Dict[str, List[str]] = {}
+                for financial_date in year_cols:
+                    release_date = release_map.get(financial_date, "")
+                    entries = [f"Release Date: {release_date or 'NA'}"]
+                    for label, lookup in factor_lookup.items():
+                        if label == "":
+                            continue
+                        inv = lookup.get(financial_date, float("nan"))
                         if pd.isna(inv) or inv == 0:
                             entries.append(f"{label}: NaN")
                         else:
                             entries.append(f"{label}: {1.0/inv:.3f}")
-                    entries.append(f"Today: {p:.3f}" if p > 0 else "Today: NaN")
                     factor_tooltip[financial_date] = entries
-
-                factor_tooltip_label = "Stock Prices"
-                print(f"🟩 Built factor_tooltip (showing stock prices) with {len(factor_tooltip)} entries.")
 
                 factor_tooltip_label = "Prices"
                 print(f"🟩 Built factor_tooltip with {len(factor_tooltip)} entries.")
-
                 # === Extract share counts from 'Number of shares' rows ===
                 share_counts = {}
                 share_rows = df[df["ITEM"].str.lower().str.contains("number of shares", na=False)]
@@ -625,7 +664,6 @@ class CombinedUIMixin:
 
             except Exception as e:
                 messagebox.showerror("Plot Error", f"Failed to plot stacked visuals:\n{e}")
-
         self.plot_visuals_button = ttk.Button(
             controls, text="Plot Stacked Visuals", command=_on_plot_stacked_visuals
         )
@@ -890,11 +928,6 @@ class CombinedUIMixin:
             except Exception:
                 pass
 
-        if self.combined_save_button is not None:
-            try:
-                self.combined_save_button.configure(state="disabled")
-            except Exception:
-                pass
 
     def _populate_combined_table(self, columns: List[str], rows: List[List[str]]) -> None:
         if self.combined_table is None:
@@ -955,9 +988,10 @@ class CombinedUIMixin:
             # Apply NOTE coloring based on raw data (unchanged)
             self._apply_note_color_to_combined_item(iid, columns, tv)
 
-    def save_combined_to_csv(self) -> None:
+    def save_combined_to_csv(self, quiet: bool = False) -> None:
         if not self.combined_columns or not self.combined_rows:
-            messagebox.showinfo("Save Combined", "No combined data to save. Click 'Create' first.")
+            if not quiet:
+                messagebox.showinfo("Save Combined", "No combined data to save. Click 'Create' first.")
             return
         company = self.company_var.get().strip()
         target_dir: Optional[Path] = None
@@ -975,7 +1009,8 @@ class CombinedUIMixin:
                 writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
                 writer.writerow(self.combined_columns)
                 writer.writerows(self.combined_rows)
-            messagebox.showinfo("Save Combined", f"Saved combined CSV to:\n{out_path}")
+            if not quiet:
+                messagebox.showinfo("Save Combined", f"Saved combined CSV to:\n{out_path}")
         except Exception as exc:
             messagebox.showerror("Save Combined", f"Failed to save combined CSV: {exc}")
 
@@ -1026,21 +1061,7 @@ class CombinedUIMixin:
         return lookup
 
     def _update_mapping_buttons(self) -> None:
-        button = getattr(self, "mapping_open_button", None)
-        if button is None:
-            return
-        company_name = self.company_var.get().strip()
-        exists = False
-        if company_name:
-            try:
-                paths = self._get_mapping_json_paths(company_name)
-                exists = any(path.exists() for path in paths.values())
-            except Exception:
-                exists = False
-        try:
-            button.configure(state="normal" if exists else "disabled")
-        except Exception:
-            pass
+        return
 
     def open_mapping_csv(self) -> None:
         company_name = self.company_var.get().strip()
@@ -1201,6 +1222,74 @@ class CombinedUIMixin:
             )
             return
 
+        def _open_paths(paths: Iterable[Path]) -> None:
+            for path in paths:
+                try:
+                    if sys.platform.startswith("win"):
+                        os.startfile(str(path))  # type: ignore[attr-defined]
+                    elif sys.platform == "darwin":
+                        subprocess.run(["open", str(path)], check=False)
+                    else:
+                        subprocess.run(["xdg-open", str(path)], check=False)
+                except Exception:
+                    continue
+
+        def _prompt_mapping_action(existing_paths: List[Path]) -> str:
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Mapping")
+            dialog.resizable(False, False)
+
+            ttk.Label(
+                dialog,
+                text=(
+                    "Mapping files already exist. Choose an action:\n"
+                    "\n• Rerun generation\n• Open existing files\n• Cancel"
+                ),
+                justify=tk.LEFT,
+                padding=(12, 10),
+                wraplength=360,
+            ).pack(fill=tk.X)
+
+            files_frame = ttk.Frame(dialog, padding=(12, 0, 12, 8))
+            files_frame.pack(fill=tk.BOTH, expand=True)
+            ttk.Label(files_frame, text="Existing files:", justify=tk.LEFT).pack(anchor=tk.W)
+            files_list = tk.Text(files_frame, height=4, width=50)
+            files_list.pack(fill=tk.BOTH, expand=True)
+            files_list.insert("1.0", "\n".join(str(p) for p in existing_paths))
+            files_list.configure(state="disabled")
+
+            choice: Dict[str, str] = {"value": "cancel"}
+
+            def set_choice(value: str) -> None:
+                choice["value"] = value
+                dialog.destroy()
+
+            btn_frame = ttk.Frame(dialog, padding=(12, 4, 12, 12))
+            btn_frame.pack(fill=tk.X)
+            ttk.Button(btn_frame, text="Rerun Generation", command=lambda: set_choice("rerun")).pack(
+                side=tk.LEFT, padx=(0, 6)
+            )
+            ttk.Button(btn_frame, text="Open Existing", command=lambda: set_choice("open")).pack(
+                side=tk.LEFT, padx=(0, 6)
+            )
+            ttk.Button(btn_frame, text="Cancel", command=lambda: set_choice("cancel")).pack(side=tk.LEFT)
+
+            dialog.transient(self.root)
+            dialog.grab_set()
+            dialog.wait_window()
+            return choice["value"]
+
+        paths = self._get_mapping_json_paths(company_name)
+        existing = [p for p in paths.values() if p.exists()]
+        if existing:
+            action = _prompt_mapping_action(existing)
+            if action == "open":
+                _open_paths(existing)
+                self._update_mapping_buttons()
+                return
+            if action != "rerun":
+                return
+
         logger = getattr(self, "logger", None)
         if logger is not None:
             summary = {typ: len(items) for typ, items in items_for_prompt.items()}
@@ -1219,13 +1308,6 @@ class CombinedUIMixin:
         progress_bar = ttk.Progressbar(progress_win, mode="indeterminate", length=260)
         progress_bar.pack(padx=16, pady=(0, 16))
         progress_bar.start(10)
-        try:
-            progress_win.transient(self.root)
-            progress_win.grab_set()
-            progress_win.lift()
-        except Exception:
-            pass
-        progress_win.protocol("WM_DELETE_WINDOW", lambda: None)
 
         def close_progress() -> None:
             try:
@@ -1236,6 +1318,13 @@ class CombinedUIMixin:
                 progress_win.destroy()
             except Exception:
                 pass
+
+        try:
+            progress_win.transient(self.root)
+            progress_win.lift()
+        except Exception:
+            pass
+        progress_win.protocol("WM_DELETE_WINDOW", close_progress)
 
         model_name = DEFAULT_OPENAI_MODEL or "gpt-5"
 
@@ -1622,6 +1711,49 @@ class CombinedUIMixin:
             self.logger.error(f"❌ Failed to append 'Stock Multiplier' row to PDF summary: {e}")
             raise
 
+        # === Append Stock Prices rows (one per offset) ===
+        stock_price_rows: List[List[str]] = []
+        release_map: Dict[str, str] = {}
+        release_csv = self.companies_dir / company_name / "ReleaseDates.csv"
+        if release_csv.exists():
+            with release_csv.open("r", encoding="utf-8") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    date_key = str(row.get("Date", "")).strip()
+                    rel_val = str(row.get("ReleaseDate", "")).strip()
+                    if date_key:
+                        release_map[date_key] = rel_val
+
+        stock_prices_path = self.companies_dir / company_name / "StockPrices.csv"
+        if stock_prices_path.exists():
+            with stock_prices_path.open("r", encoding="utf-8", newline="") as fh:
+                reader = csv.DictReader(fh)
+                offsets = [c for c in (reader.fieldnames or []) if c and c != "ReleaseDate"]
+                default_offsets = ["-30", "-7", "-1", "0", "1", "7", "30"]
+                # Preserve requested order
+                for off in default_offsets:
+                    if off not in offsets:
+                        offsets.append(off)
+
+                price_table: Dict[str, Dict[str, str]] = {}
+                for row in reader:
+                    rel = str(row.get("ReleaseDate", "")).strip()
+                    if not rel:
+                        continue
+                    price_table[rel] = {k: row.get(k, "") for k in offsets}
+
+                for offset in offsets:
+                    price_row = ["Stock", "Prices", offset, "", "excluded", ""]
+                    for dc in dyn_cols:
+                        fin_date = dc.get("default_name", "").strip()
+                        rel_date = release_map.get(fin_date, "")
+                        val = price_table.get(rel_date, {}).get(offset, "")
+                        price_row.append(val)
+                    stock_price_rows.append(price_row)
+
+        if stock_price_rows:
+            self.logger.info(f"🧾 Added {len(stock_price_rows)} Stock Prices rows from {stock_prices_path}")
+
         def key_sort(k: Tuple[str, str, str]) -> Tuple[str, str, str]:
             return (k[0] or "", k[1] or "", k[2] or "")
 
@@ -1659,14 +1791,11 @@ class CombinedUIMixin:
                 key4_value = item_clean
             rows_out.append([assigned_type, cat, sub, item, note_val, key4_value] + values_for_row)
 
-        final_rows = [pdf_summary] + multiplier_rows + [share_row] + rows_out
+        final_rows = [pdf_summary] + multiplier_rows + [share_row] + stock_price_rows + rows_out
         self._populate_combined_table(columns, final_rows)
         self.combined_columns = columns
         self.combined_rows = final_rows
         self._update_mapping_buttons()
-        if self.combined_save_button is not None:
-            self.combined_save_button.configure(state="normal")        
-
         # === Sort date columns (and reorder rows accordingly) ===
         import re
         from datetime import datetime
@@ -1703,6 +1832,9 @@ class CombinedUIMixin:
         self.combined_rows = reordered_rows
         self._populate_combined_table(sorted_columns, reordered_rows)
 
+        # Auto-save Combined.csv when the table is generated
+        self.save_combined_to_csv()
+
 
     # === New: Load Combined.csv for a specific company ===
     def load_company_combined_csv(self, company_name: str) -> None:
@@ -1735,9 +1867,6 @@ class CombinedUIMixin:
 
             self._populate_combined_table(columns, rows)
             self._update_mapping_buttons()
-
-            if self.combined_save_button is not None:
-                self.combined_save_button.configure(state="normal")
 
             print(f"✅ Loaded Combined.csv for {company_name} ({len(rows)} rows, {len(columns)} columns)")
 
