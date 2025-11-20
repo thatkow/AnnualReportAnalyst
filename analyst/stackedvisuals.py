@@ -15,11 +15,14 @@ def render_stacked_annual_report(
     share_counts: dict | None = None,
     pdf_sources: dict | None = None,
     out_path: str = "stacked_annual_report.html",
+    today_stock_price: float | None = None,
 ):
     """
     Generates an interactive two-tab HTML report:
       1. Financial stacked bars (per-share toggle)
       2. Normalized share counts
+
+    If provided, `today_stock_price` is displayed above the charts for quick context.
     """
 
     if share_counts is None:
@@ -101,6 +104,7 @@ body {{ font-family: sans-serif; margin: 40px; }}
 </head>
 <body>
 <h2>{title}</h2>
+<div id="priceBanner" style="margin-bottom:10px; color:#333;"></div>
 
 <div id="tabs">
   <div id="tabBars" class="tab active">Financial Values</div>
@@ -144,6 +148,7 @@ const factorTooltipLabel = {json.dumps(factor_tooltip_label)};
 const pdfSources = {json.dumps(pdf_sources)};
 const typeOffsets = {json.dumps(type_offsets)};
 const typeLineStyles = {json.dumps(type_linestyles)};
+const latestPrice = {json.dumps(today_stock_price)};
 const yearToggleState = Object.fromEntries(
   years.map((y, idx) => [y, idx !== years.length - 1])
 );
@@ -159,6 +164,7 @@ document.addEventListener("DOMContentLoaded", () => {{
   initTickerAdjustments();
   initYearCheckboxes();
   updateAdjustmentLabels();
+  updatePriceBanner();
 }});
 
 // --- Human readable number formatter ---
@@ -174,6 +180,20 @@ function humanReadable(val) {{
 
 function fmt(val, perShare) {{
   return humanReadable(val);
+}}
+
+function updatePriceBanner() {{
+  const banner = document.getElementById("priceBanner");
+  if (!banner) return;
+
+  const numericPrice = Number(latestPrice);
+  if (latestPrice === null || Number.isNaN(numericPrice)) {{
+    banner.style.display = "none";
+    return;
+  }}
+
+  banner.style.display = "block";
+  banner.textContent = `Latest price: ${{fmt(numericPrice, false)}}`;
 }}
 
 function hashColor(str) {{

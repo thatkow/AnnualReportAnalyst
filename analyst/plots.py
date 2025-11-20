@@ -6,7 +6,8 @@ from typing import Dict
 import pandas as pd
 
 from analyst.data import Company
-from analyst_stackedvisuals import render_stacked_annual_report
+from analyst.stackedvisuals import render_stacked_annual_report
+from analyst.yahoo import get_latest_stock_price
 
 # Base, non-date columns present in the combined dataset
 COMBINED_BASE_COLUMNS = [
@@ -211,6 +212,12 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
     visuals_dir.mkdir(parents=True, exist_ok=True)
     out_path = visuals_dir / Path(out_path).name
 
+    latest_stock_price = None
+    try:
+        latest_stock_price = get_latest_stock_price(ticker)
+    except Exception as exc:  # pragma: no cover - network/3rd party dependency
+        print(f"⚠️ Could not fetch latest stock price for {ticker}: {exc}")
+
     render_stacked_annual_report(
         df_plot,
         title=f"Financial/Income for {ticker}",
@@ -221,6 +228,7 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
         share_counts=share_counts,
         pdf_sources=pdf_map,
         out_path=out_path,
+        today_stock_price=latest_stock_price,
     )
 
     return out_path

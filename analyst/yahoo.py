@@ -6,6 +6,30 @@ import json
 import warnings
 
 
+def get_latest_stock_price(ticker: str) -> float:
+    """Return the most recent closing price for a ticker using Yahoo Finance."""
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=FutureWarning)
+        data = yf.Ticker(ticker).history(period="1d")
+
+    if data.empty:
+        raise ValueError(f"No recent price data found for ticker {ticker}")
+
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = [" ".join(col).strip() for col in data.columns]
+
+    close_candidates = [col for col in data.columns if "Close" in str(col)]
+    if not close_candidates:
+        raise ValueError(f"No closing price column found for ticker {ticker}")
+
+    close_series = pd.to_numeric(data[close_candidates[0]], errors="coerce").dropna()
+    if close_series.empty:
+        raise ValueError(f"Latest closing price for ticker {ticker} is missing")
+
+    return float(close_series.iloc[-1])
+
+
 def get_stock_prices(ticker, years=5, interval="1d"):
     """
     Retrieve historical stock prices for a given ticker symbol.
