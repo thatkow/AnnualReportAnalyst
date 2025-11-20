@@ -310,13 +310,18 @@ function updateAdjustmentLabels() {{
 }}
 
 const sel = document.getElementById("factorSelector");
+const blankOpt = document.createElement("option");
+blankOpt.value = "";
+blankOpt.textContent = "";
+sel.appendChild(blankOpt);
 Object.keys(factorLookup).forEach(f => {{
+  if (f === "") return;
   const opt = document.createElement("option");
   opt.value = f;
   opt.textContent = f;
   sel.appendChild(opt);
 }});
-sel.value = Object.keys(factorLookup)[0];
+sel.value = "";
 
 function buildBarTraces(factorName, perShare) {{
   const factorMap = factorLookup[factorName];

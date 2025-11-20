@@ -215,7 +215,7 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
         df_plot,
         title=f"Financial/Income for {ticker}",
         factor_lookup=factor_lookup,
-        factor_label="",
+        factor_label="Release Date Shift",
         factor_tooltip=factor_tooltip,
         factor_tooltip_label="Prices",
         share_counts=share_counts,
