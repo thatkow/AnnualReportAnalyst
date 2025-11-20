@@ -1,241 +1,178 @@
-from __future__ import annotations
-
-import json
-from pathlib import Path
-
 import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
 
-from analyst.data import Company
-from analyst.plots import COMBINED_BASE_COLUMNS, _extract_multiplier, _release_date_map
+
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
+
+def clean_numeric(dfblock):
+    out = dfblock.copy().astype(str)
+    out = out.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+    out = out.applymap(lambda x: x.replace(",", "") if isinstance(x, str) else x)
+    out = out.replace({"": "0", " ": "0"})
+    return out.apply(pd.to_numeric, errors="coerce").fillna(0)
 
 
-def _prepare_company_financials(company: Company):
-    ticker = company.ticker
-    df_all = company.combined.copy().fillna("")
+def compute_adjusted_values(ticker, df):
+    df = df.copy()
+    date_cols = [c for c in df.columns if c[0].isdigit()]
 
-    excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
-    num_cols = [c for c in df_all.columns if c not in excluded_cols]
-    for col in num_cols:
-        df_all[col] = df_all[col].astype(str).str.replace(",", "", regex=False)
+    # --- Extract Stock/Prices divisor rows ---
+    stock_rows = df[(df["TYPE"] == "Stock") & (df["CATEGORY"] == "Prices")].copy()
+    stock_rows[date_cols] = clean_numeric(stock_rows[date_cols])
+    divisors = stock_rows[date_cols].astype(float)
 
-    share_mult = _extract_multiplier(
-        df_all[df_all["CATEGORY"].str.lower() == "shares multiplier"], num_cols
-    )
-    stock_mult = _extract_multiplier(
-        df_all[df_all["CATEGORY"].str.lower() == "stock multiplier"], num_cols
-    )
-    fin_mult = _extract_multiplier(
-        df_all[df_all["CATEGORY"].str.lower() == "financial multiplier"], num_cols
-    )
-    inc_mult = _extract_multiplier(
-        df_all[df_all["CATEGORY"].str.lower() == "income multiplier"], num_cols
-    )
+    # Use SUBCATEGORY for labeling
+    subcat_labels = stock_rows["SUBCATEGORY"].astype(str).tolist()
 
-    df_all["Ticker"] = ticker
+    # --- Clean numeric for financial, income, shares + multipliers ---
+    allowed = ["Income", "Financial", "Shares"]
+    mult_names = [
+        "Financial Multiplier", "Income Multiplier",
+        "Shares Multiplier", "Stock Multiplier"
+    ]
 
-    df = df_all[df_all["NOTE"].str.lower() != "excluded"].copy()
-    for col in num_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df_clean = df.copy()
+    for c in date_cols:
+        mask = (
+            (df_clean["TYPE"].isin(allowed)) |
+            (df_clean["CATEGORY"].isin(mult_names))
+        ) & (df_clean["NOTE"] != "excluded")
 
-    neg_idx = df["NOTE"].str.lower() == "negated"
-    df.loc[neg_idx, num_cols] = df.loc[neg_idx, num_cols].map(
-        lambda x: -1.0 * x if pd.notna(x) else x
-    )
+        df_clean.loc[mask, c] = clean_numeric(df_clean.loc[mask, [c]])[c]
 
-    def _apply_row_multiplier(mask: pd.Series, factors: dict[str, float]) -> None:
-        for year in num_cols:
-            factor = factors.get(year, 1.0)
-            if factor == 1.0:
-                continue
-            df.loc[mask, year] = df.loc[mask, year] * factor
+    # --- Extract multipliers ---
+    fin_mult    = df_clean[df_clean["CATEGORY"]=="Financial Multiplier"][date_cols].iloc[0].astype(float)
+    inc_mult    = df_clean[df_clean["CATEGORY"]=="Income Multiplier"][date_cols].iloc[0].astype(float)
+    shares_mult = df_clean[df_clean["CATEGORY"]=="Shares Multiplier"][date_cols].iloc[0].astype(float)
+    stock_mult  = df_clean[df_clean["CATEGORY"]=="Stock Multiplier"][date_cols].iloc[0].astype(float)
+    share_count = df_clean[df_clean["NOTE"]=="share_count"][date_cols].iloc[0].astype(float)
 
-    _apply_row_multiplier(df["TYPE"].str.lower() == "financial", fin_mult)
-    _apply_row_multiplier(df["TYPE"].str.lower() == "income", inc_mult)
-    _apply_row_multiplier(df["TYPE"].str.lower() == "shares", share_mult)
-
-    price_rows = df_all[
-        (df_all["TYPE"].str.lower() == "stock")
-        & (df_all["CATEGORY"].str.lower() == "prices")
+    # --- Filter usable rows ---
+    df2 = df_clean[
+        (~df_clean["CATEGORY"].isin(mult_names)) &
+        (df_clean["NOTE"]!="share_count") &
+        (df_clean["NOTE"]!="excluded")
     ].copy()
-    for year in num_cols:
-        factor = stock_mult.get(year, 1.0)
-        if factor == 1.0:
-            price_rows[year] = pd.to_numeric(price_rows[year], errors="coerce")
-        else:
-            price_rows[year] = pd.to_numeric(price_rows[year], errors="coerce") * factor
 
-    release_map = _release_date_map(df_all, num_cols, company)
-    year_cols = [c for c in df.columns if c not in excluded_cols]
+    df2.loc[df2["NOTE"]=="negated", date_cols] *= -1
 
-    share_counts: dict[str, dict[str, float]] = {ticker: {}}
-    share_rows = df[df["ITEM"].str.lower().str.contains("number of shares", na=False)]
-    if not share_rows.empty:
-        row = share_rows.iloc[0]
-        for year in year_cols:
-            raw_val = row.get(year)
-            if pd.notna(raw_val):
-                share_counts[ticker][year] = float(raw_val)
-            else:
-                raise ValueError(
-                    f"Number of shares for year '{year}' is missing or NaN."
-                )
-    else:
-        share_counts[ticker] = {year: 1.0 for year in year_cols}
+    # --- Compute adjusted base values ---
+    denom = (share_count * shares_mult * stock_mult).replace(0, float("nan"))
+    final_df = pd.DataFrame(columns=date_cols)
 
-    df_plot = df[~df["ITEM"].str.lower().str.contains("number of shares", na=False)].copy()
+    for idx, row in df2.iterrows():
+        mult = fin_mult if row["TYPE"] == "Financial" else inc_mult
+        final_df.loc[idx] = (row[date_cols].astype(float) * mult) / denom
+
+    # --- Build grouped values for Financial or Income ---
+    def build_group(type_name):
+        sub_idx = df2[df2["TYPE"] == type_name].index
+        grouped = []
+
+        # 7 divisors → 7 groups
+        for _, divisor_row in divisors.iterrows():
+            divided = final_df.loc[sub_idx].divide(
+                divisor_row.replace(0, float("nan")),
+                axis=1
+            )
+            sums = divided.sum(skipna=True)
+            grouped.append(sums.values)
+
+        return grouped
 
     return {
-        "df": df_plot,
-        "price_rows": price_rows,
-        "release_map": release_map,
-        "share_counts": share_counts,
-        "year_cols": year_cols,
+        "ticker": ticker,
+        "subcats": subcat_labels,
+        "financial": build_group("Financial"),
+        "income":    build_group("Income")
     }
 
 
-def render_release_date_boxplots(
-    company: Company, *, out_path: str | Path | None = None
-) -> Path:
-    """Render cumulative release-date box plots grouped by release differential.
+def get_release_dates(df):
+    date_cols = [c for c in df.columns if c[0].isdigit()]
+    release = df[df["CATEGORY"] == "ReleaseDate"].iloc[0]
+    return [str(release[c]) for c in date_cols[:7]]
 
-    Values are scaled by multipliers, normalised per share, negations are
-    applied, and excluded/share-count rows are ignored. Cumulative sums across
-    release dates are plotted, and additional series show those cumulative
-    values divided by each release's share price.
+
+# ------------------------------------------------------------
+# Interlaced Ticker-Colored Boxplots
+# ------------------------------------------------------------
+
+def render_interlaced_boxplots(
+    ticker1, groups1, ticker2, groups2, releasedate_labels
+):
+    """
+    7 groups per ticker → 14 interlaced boxplots
     """
 
-    prep = _prepare_company_financials(company)
-    df_plot: pd.DataFrame = prep["df"]
-    price_rows: pd.DataFrame = prep["price_rows"]
-    release_map: dict[str, str] = prep["release_map"]
-    share_counts: dict[str, dict[str, float]] = prep["share_counts"]
-    year_cols: list[str] = prep["year_cols"]
+    inter_groups = []
+    inter_colors = []
+    inter_labels = []
 
-    ticker = company.ticker
-    out_path = (
-        Path(out_path)
-        if out_path
-        else company.visuals_dir / f"ReleaseDateBoxes_{ticker}.html"
+    for i in range(7):
+        # XRO (ticker1)
+        inter_groups.append(groups1[i])
+        inter_colors.append(plt.cm.tab10(0))
+        inter_labels.append(releasedate_labels[i])
+
+        # SEK (ticker2)
+        inter_groups.append(groups2[i])
+        inter_colors.append(plt.cm.tab10(1))
+        inter_labels.append(releasedate_labels[i])
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+    bp = ax.boxplot(inter_groups, labels=inter_labels, patch_artist=True)
+
+    for patch, color in zip(bp['boxes'], inter_colors):
+        patch.set_facecolor(color)
+
+    plt.xticks(rotation=45, ha='right')
+    plt.title(f"Interlaced Boxplots — {ticker1.upper()} vs {ticker2.upper()}")
+    plt.tight_layout()
+
+    return fig
+
+
+# ------------------------------------------------------------
+# Equivalent of: int main()
+# ------------------------------------------------------------
+
+def main():
+    print("Loading data...")
+
+    # Example - both tickers point to the same CSV (demo)
+    df_xro = pd.read_csv("/mnt/data/Combined.csv")
+    df_sek = pd.read_csv("/mnt/data/Combined.csv")
+
+    print("Computing adjusted values...")
+    r_xro = compute_adjusted_values("xro", df_xro)
+    r_sek = compute_adjusted_values("sek", df_sek)
+
+    print("Extracting ReleaseDate labels...")
+    release_labels = get_release_dates(df_xro)
+
+    print("Rendering Financial plot...")
+    fig_fin = render_interlaced_boxplots(
+        "xro", r_xro["financial"],
+        "sek", r_sek["financial"],
+        release_labels
     )
+    fig_fin.show()
 
-    base_release_values: dict[str, list[float]] = {}
+    print("Rendering Income plot...")
+    fig_inc = render_interlaced_boxplots(
+        "xro", r_xro["income"],
+        "sek", r_sek["income"],
+        release_labels
+    )
+    fig_inc.show()
 
-    filtered = df_plot[
-        (df_plot["NOTE"].str.lower() != "share_count")
-        & (df_plot["TYPE"].str.lower() != "stock")
-    ].copy()
+    print("Done.")
 
-    for _, row in filtered.iterrows():
-        running_total = 0.0
-        for year in year_cols:
-            value = row.get(year)
-            if pd.isna(value):
-                continue
-            shares = share_counts.get(ticker, {}).get(year)
-            if shares in (None, 0):
-                continue
-            running_total += float(value) / float(shares)
-            release_key = str(release_map.get(year, "Unknown")) or "Unknown"
-            base_release_values.setdefault(release_key, []).append(running_total)
 
-    price_scaled_values: dict[str, dict[str, list[float]]] = {}
-    for _, row in price_rows.iterrows():
-        price_label = str(row.get("SUBCATEGORY", "")).strip() or "Share Price"
-        price_scaled_values.setdefault(price_label, {})
-        for year in year_cols:
-            price_val = pd.to_numeric(row.get(year, ""), errors="coerce")
-            if pd.isna(price_val) or price_val == 0:
-                continue
-            release_key = str(release_map.get(year, "Unknown")) or "Unknown"
-            base_vals = base_release_values.get(release_key, [])
-            if not base_vals:
-                continue
-            scaled_list = price_scaled_values[price_label].setdefault(release_key, [])
-            scaled_list.extend([val / float(price_val) for val in base_vals])
-
-    visuals_dir = out_path.expanduser().resolve().parent
-    visuals_dir.mkdir(parents=True, exist_ok=True)
-    out_path = visuals_dir / out_path.name
-
-    base_records = [
-        {"release": release, "value": value}
-        for release, values in base_release_values.items()
-        for value in values
-    ]
-
-    price_records = [
-        {
-            "series": f"Price scaled ({label})",
-            "release": release,
-            "value": value,
-        }
-        for label, release_map_values in price_scaled_values.items()
-        for release, values in release_map_values.items()
-        for value in values
-    ]
-
-    html = f"""<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-  <meta charset=\"utf-8\" />
-  <title>Release Date Box Plots - {ticker}</title>
-  <script src=\"https://cdn.plot.ly/plotly-2.31.1.min.js\"></script>
-</head>
-<body>
-  <h2>Release Date Differential Box Plots - {ticker}</h2>
-  <div id=\"plot\"></div>
-  <script>
-    const baseData = {json.dumps(base_records)};
-    const priceData = {json.dumps(price_records)};
-
-    const traces = [];
-
-    if (baseData.length) {{
-      traces.push({{
-        type: 'box',
-        name: 'Cumulative per share',
-        x: baseData.map(d => d.release),
-        y: baseData.map(d => d.value),
-        boxpoints: 'outliers',
-        jitter: 0.4,
-        pointpos: -1.8,
-        marker: {{ size: 6 }}
-      }});
-    }}
-
-    const priceGrouped = new Map();
-    priceData.forEach(rec => {{
-      if (!priceGrouped.has(rec.series)) priceGrouped.set(rec.series, []);
-      priceGrouped.get(rec.series).push(rec);
-    }});
-
-    priceGrouped.forEach((items, series) => {{
-      traces.push({{
-        type: 'box',
-        name: series,
-        x: items.map(d => d.release),
-        y: items.map(d => d.value),
-        boxpoints: 'outliers',
-        jitter: 0.4,
-        pointpos: -1.8,
-        marker: {{ size: 6 }}
-      }});
-    }});
-
-    const layout = {{
-      boxmode: 'group',
-      xaxis: {{ title: 'Release Date Differential' }},
-      yaxis: {{ title: 'Cumulative Value (per share)' }},
-      legend: {{ orientation: 'h' }},
-      margin: {{ t: 40 }}
-    }};
-
-    Plotly.newPlot('plot', traces, layout);
-  </script>
-</body>
-</html>
-"""
-
-    out_path.write_text(html, encoding="utf-8")
-    return out_path
-
+# Python entry point
+if __name__ == "__main__":
+    main()
