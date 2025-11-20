@@ -5,6 +5,7 @@ from typing import Dict
 
 import pandas as pd
 
+from analyst.data import Company
 from analyst_stackedvisuals import render_stacked_annual_report
 
 # Base, non-date columns present in the combined dataset
@@ -45,24 +46,42 @@ def _extract_multiplier(row_df: pd.DataFrame, num_cols: list[str]) -> Dict[str, 
     return {col: to_number(row[col], col) for col in num_cols}
 
 
-def plot_stacked_visuals(
-    combined_df: pd.DataFrame,
-    ticker: str,
-    out_path: str | Path,
-    *,
-    companies_dir: str | Path = "companies",
-) -> Path:
-    """Plot stacked visuals for a combined dataset.
+def _release_date_map(df_all: pd.DataFrame, num_cols: list[str], company: Company) -> Dict[str, str]:
+    release_rows = df_all[
+        (df_all["TYPE"].str.lower() == "meta")
+        & (df_all["CATEGORY"].str.lower() == "releasedate")
+    ]
+    release_map: Dict[str, str] = {}
+    if not release_rows.empty:
+        row = release_rows.iloc[0]
+        for col in num_cols:
+            val = str(row.get(col, "")).strip()
+            if val:
+                release_map[col] = val
 
-    Args:
-        combined_df: DataFrame containing the full combined table.
-        ticker: Company ticker/name used for labeling and locating release dates.
-        out_path: Destination HTML path for the rendered visuals.
-        companies_dir: Base directory where company folders reside.
+    # Fallback to legacy ReleaseDates.csv if the combined table lacks release dates
+    if not release_map:
+        release_csv = company.release_dates_csv
+        if release_csv.exists():
+            release_map = (
+                pd.read_csv(release_csv)
+                .set_index("Date")["ReleaseDate"]
+                .fillna("")
+                .to_dict()
+            )
+        else:
+            raise ValueError(
+                "Release dates are missing from the combined table and ReleaseDates.csv."
+            )
+    return release_map
 
-    Returns:
-        Path to the rendered HTML file.
-    """
+
+def plot_stacked_financials(company: Company, *, out_path: str | Path | None = None) -> Path:
+    """Plot stacked visuals for a company's combined dataset."""
+
+    combined_df = company.combined
+    ticker = company.ticker
+    out_path = Path(out_path) if out_path else company.default_visuals_path()
 
     if combined_df.empty:
         raise ValueError("Combined dataframe is empty; generate data first.")
@@ -101,33 +120,7 @@ def plot_stacked_visuals(
         lambda x: -1.0 * x if pd.notna(x) else x
     )
 
-    release_rows = df_all[
-        (df_all["TYPE"].str.lower() == "meta")
-        & (df_all["CATEGORY"].str.lower() == "releasedate")
-    ]
-    release_map: Dict[str, str] = {}
-    if not release_rows.empty:
-        row = release_rows.iloc[0]
-        for col in num_cols:
-            val = str(row.get(col, "")).strip()
-            if val:
-                release_map[col] = val
-
-    # Fallback to legacy ReleaseDates.csv if the combined table lacks release dates
-    if not release_map:
-        company_path = Path(companies_dir) / ticker
-        release_csv = company_path / "ReleaseDates.csv"
-        if release_csv.exists():
-            release_map = (
-                pd.read_csv(release_csv)
-                .set_index("Date")["ReleaseDate"]
-                .fillna("")
-                .to_dict()
-            )
-        else:
-            raise ValueError(
-                "Release dates are missing from the combined table and ReleaseDates.csv."
-            )
+    release_map = _release_date_map(df_all, num_cols, company)
 
     year_cols = [c for c in df.columns if c not in excluded_cols]
 
@@ -190,3 +183,7 @@ def plot_stacked_visuals(
     )
 
     return out_path
+
+
+# Backwards compatibility
+plot_stacked_visuals = plot_stacked_financials

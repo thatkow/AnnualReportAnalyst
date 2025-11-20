@@ -461,22 +461,19 @@ class CombinedUIMixin:
                     messagebox.showwarning("No Data", "No combined data loaded or generated.")
                     return
 
-                from analyst import plot_stacked_visuals
+                from analyst.data import Company
+                from analyst.plots import plot_stacked_financials
 
                 company_name = self.company_var.get().strip()
                 df_all = pd.DataFrame(
                     self.combined_rows, columns=self.combined_columns
                 ).fillna("")
 
-                visuals_dir = Path("companies") / "visuals"
-                out_path = visuals_dir / f"ARVisuals_{company_name}.html"
-
-                plot_stacked_visuals(
-                    df_all,
-                    company_name,
-                    out_path,
-                    companies_dir=self.companies_dir,
+                company = Company.from_combined(
+                    company_name, df_all, companies_dir=self.companies_dir
                 )
+
+                plot_stacked_financials(company)
 
             except Exception as e:
                 messagebox.showerror("Plot Error", f"Failed to plot stacked visuals:\n{e}")
