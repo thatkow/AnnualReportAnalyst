@@ -10,7 +10,13 @@ def get_stock_prices(ticker, years=5, interval="1d"):
     """
     Retrieve historical stock prices for a given ticker symbol.
     """
-    df = yf.download(ticker, period=f"{years}y", interval=interval, progress=False)
+    df = yf.download(
+        ticker,
+        period=f"{years}y",
+        interval=interval,
+        progress=False,
+        auto_adjust=False,
+    )
     if df.empty:
         raise ValueError(f"No data found for ticker {ticker}")
     df = df.reset_index()[['Date', 'Close']].rename(columns={'Close': 'Price'})

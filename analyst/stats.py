@@ -142,8 +142,17 @@ def get_latest_stock_price(ticker: str) -> float | None:
         if prices.empty:
             print(f"⚠️ No recent stock prices found for {ticker}.")
             return None
-        latest = float(prices["Price"].iloc[-1])
-        return latest
+        latest_value = prices["Price"].iloc[-1]
+
+        # ``float`` on a single-element Series is deprecated, so coerce safely
+        latest_numeric = pd.to_numeric(latest_value, errors="coerce")
+        if isinstance(latest_numeric, pd.Series):
+            latest_numeric = latest_numeric.iloc[0]
+
+        if pd.isna(latest_numeric):
+            return None
+
+        return float(latest_numeric)
     except Exception as exc:  # pragma: no cover - network dependent
         print(f"⚠️ Failed to fetch latest stock price for {ticker}: {exc}")
         return None
