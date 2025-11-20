@@ -1,0 +1,165 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict
+
+import pandas as pd
+
+from constants import COMBINED_BASE_COLUMNS
+from analyst_stackedvisuals import render_stacked_annual_report
+
+
+def _extract_multiplier(row_df: pd.DataFrame, num_cols: list[str]) -> Dict[str, float]:
+    if row_df.empty:
+        return {}
+
+    row = row_df.iloc[0]
+
+    def to_number(val, col):
+        if isinstance(val, pd.Series):
+            if val.notna().any():
+                val = val[val.notna()].iloc[0]
+            else:
+                raise ValueError(f"Multiplier for column '{col}' is empty or NaN.")
+
+        s = str(val).strip()
+        if s == "":
+            raise ValueError(f"Multiplier for column '{col}' is blank.")
+
+        try:
+            return float(s)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise ValueError(
+                f"Multiplier for column '{col}' must be a number, got: '{val}'"
+            ) from exc
+
+    return {col: to_number(row[col], col) for col in num_cols}
+
+
+def plot_stacked_visuals(
+    combined_df: pd.DataFrame,
+    ticker: str,
+    out_path: str | Path,
+    *,
+    companies_dir: str | Path = "companies",
+) -> Path:
+    """Plot stacked visuals for a combined dataset.
+
+    Args:
+        combined_df: DataFrame containing the full combined table.
+        ticker: Company ticker/name used for labeling and locating release dates.
+        out_path: Destination HTML path for the rendered visuals.
+        companies_dir: Base directory where company folders reside.
+
+    Returns:
+        Path to the rendered HTML file.
+    """
+
+    if combined_df.empty:
+        raise ValueError("Combined dataframe is empty; generate data first.")
+
+    df_all = combined_df.copy().fillna("")
+    excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
+    num_cols = [c for c in df_all.columns if c not in excluded_cols]
+    for col in num_cols:
+        df_all[col] = df_all[col].astype(str).str.replace(",", "", regex=False)
+
+    share_mult = _extract_multiplier(
+        df_all[df_all["CATEGORY"].str.lower() == "shares multiplier"], num_cols
+    )
+    stock_mult = _extract_multiplier(
+        df_all[df_all["CATEGORY"].str.lower() == "stock multiplier"], num_cols
+    )
+    fin_mult = _extract_multiplier(
+        df_all[df_all["CATEGORY"].str.lower() == "financial multiplier"], num_cols
+    )
+    inc_mult = _extract_multiplier(
+        df_all[df_all["CATEGORY"].str.lower() == "income multiplier"], num_cols
+    )
+
+    df_all["Ticker"] = ticker
+
+    price_rows = df_all[
+        (df_all["TYPE"].str.lower() == "stock")
+        & (df_all["CATEGORY"].str.lower() == "prices")
+    ]
+
+    df = df_all[df_all["NOTE"].str.lower() != "excluded"].copy()
+    for col in num_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    neg_idx = df["NOTE"].str.lower() == "negated"
+    df.loc[neg_idx, num_cols] = df.loc[neg_idx, num_cols].applymap(
+        lambda x: -1.0 * x if pd.notna(x) else x
+    )
+
+    company_path = Path(companies_dir) / ticker
+    release_csv = company_path / "ReleaseDates.csv"
+    release_map: Dict[str, str] = {}
+    if release_csv.exists():
+        release_map = pd.read_csv(release_csv).set_index("Date")["ReleaseDate"].fillna("").to_dict()
+    else:
+        raise FileNotFoundError(
+            f"ReleaseDates.csv not found for {ticker} at {release_csv}."
+        )
+
+    year_cols = [c for c in df.columns if c not in excluded_cols]
+
+    factor_lookup: Dict[str, Dict[str, float]] = {"": {y: 1.0 for y in year_cols}}
+    for _, prow in price_rows.iterrows():
+        label = str(prow.get("SUBCATEGORY", "")).strip() or "Price"
+        factor_lookup[label] = {}
+        for year in year_cols:
+            price_val = pd.to_numeric(prow.get(year, ""), errors="coerce")
+            if pd.isna(price_val) or price_val <= 0:
+                factor_lookup[label][year] = float("nan")
+            else:
+                factor_lookup[label][year] = 1.0 / float(price_val)
+
+    factor_tooltip: Dict[str, list[str]] = {}
+    for financial_date in year_cols:
+        release_date = release_map.get(financial_date, "")
+        entries = [f"Release Date: {release_date or 'NA'}"]
+        for label, lookup in factor_lookup.items():
+            if label == "":
+                continue
+            inv = lookup.get(financial_date, float("nan"))
+            if pd.isna(inv) or inv == 0:
+                entries.append(f"{label}: NaN")
+            else:
+                entries.append(f"{label}: {1.0 / inv:.3f}")
+        factor_tooltip[financial_date] = entries
+
+    df["Ticker"] = ticker
+
+    share_counts: Dict[str, Dict[str, float]] = {ticker: {}}
+    share_rows = df[df["ITEM"].str.lower().str.contains("number of shares", na=False)]
+    if not share_rows.empty:
+        row = share_rows.iloc[0]
+        for year in year_cols:
+            raw_val = row.get(year)
+            if pd.notna(raw_val):
+                numeric_val = float(raw_val)
+                share_counts[ticker][year] = round(numeric_val, 2)
+            else:
+                raise ValueError(f"Number of shares for year '{year}' is missing or NaN.")
+    else:
+        share_counts[ticker] = {year: 1.0 for year in year_cols}
+
+    df_plot = df[~df["ITEM"].str.lower().str.contains("number of shares", na=False)].copy()
+
+    visuals_dir = Path(out_path).expanduser().resolve().parent
+    visuals_dir.mkdir(parents=True, exist_ok=True)
+    out_path = visuals_dir / Path(out_path).name
+
+    render_stacked_annual_report(
+        df_plot,
+        title=f"Financial/Income for {ticker}",
+        factor_lookup=factor_lookup,
+        factor_label="Value Per Stock Price Dollar",
+        factor_tooltip=factor_tooltip,
+        factor_tooltip_label="Prices",
+        share_counts=share_counts,
+        out_path=out_path,
+    )
+
+    return out_path

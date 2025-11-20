@@ -455,211 +455,27 @@ class CombinedUIMixin:
         self.combined_create_button.pack(side=tk.LEFT)
 
         # === New button: Plot Stacked Visuals ===
-        from analyst_stackedvisuals import render_stacked_annual_report
-        import pandas as pd
-
         def _on_plot_stacked_visuals():
             try:
                 if not self.combined_rows:
                     messagebox.showwarning("No Data", "No combined data loaded or generated.")
                     return
 
-                # Construct DataFrame from current table
-                df_all = pd.DataFrame(self.combined_rows, columns=self.combined_columns).fillna("")
+                from analyst import plot_stacked_visuals
 
-                excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
-                num_cols = [c for c in df_all.columns if c not in excluded_cols]
-                for c in num_cols:
-                    # only operate on string-like values; leave text columns untouched
-                    df_all[c] = (
-                        df_all[c]
-                        .astype(str)
-                        .str.replace(",", "", regex=False)
-                    )
-
-                # Extract rows containing multipliers
-                share_mult_row = df_all[df_all["CATEGORY"].str.lower() == "shares multiplier"]
-                stock_mult_row = df_all[df_all["CATEGORY"].str.lower() == "stock multiplier"]
-                fin_mult_row = df_all[(df_all["CATEGORY"].str.lower() == "financial multiplier")]
-                inc_mult_row = df_all[(df_all["CATEGORY"].str.lower() == "income multiplier")]
-
-                def extract_mult(row_df):
-                    if row_df.empty:
-                        return {}
-
-                    row = row_df.iloc[0]
-
-                    def to_number(val, col):
-                        # If pandas returned a Series (duplicate columns), reduce safely
-                        if isinstance(val, pd.Series):
-                            if val.notna().any():
-                                val = val[val.notna()].iloc[0]
-                            else:
-                                raise ValueError(f"Multiplier for column '{col}' is empty or NaN.")
-
-                        s = str(val).strip()
-                        if s == "":
-                            raise ValueError(f"Multiplier for column '{col}' is blank.")
-
-                        # MUST be numeric
-                        try:
-                            return float(s)
-                        except Exception:
-                            raise ValueError(f"Multiplier for column '{col}' must be a number, got: '{val}'")
-
-                    return {col: to_number(row[col], col) for col in num_cols}
-
-
-                share_mult = extract_mult(share_mult_row)
-                stock_mult = extract_mult(stock_mult_row)
-                fin_mult = extract_mult(fin_mult_row)
-                inc_mult = extract_mult(inc_mult_row)
-
-                # Determine company/ticker name
                 company_name = self.company_var.get().strip()
-                df_all["Ticker"] = company_name
+                df_all = pd.DataFrame(
+                    self.combined_rows, columns=self.combined_columns
+                ).fillna("")
 
-                # Preserve stock price rows before filtering
-                price_rows = df_all[
-                    (df_all["TYPE"].str.lower() == "stock")
-                    & (df_all["CATEGORY"].str.lower() == "prices")
-                ]
-
-                # Remove NOTE=exclude
-                df = df_all[df_all["NOTE"].str.lower() != "excluded"].copy()
-
-                # Negate NOTE=negated
-                for c in num_cols:
-                    df[c] = pd.to_numeric(df[c], errors="coerce")
-                neg_idx = df["NOTE"].str.lower() == "negated"
-                df.loc[neg_idx, num_cols] = df.loc[neg_idx, num_cols].applymap(
-                    lambda x: -1.0 * x if pd.notna(x) else x
-                )
-
-                # === Load multipliers ===
-                from pathlib import Path
-                import csv
-
-                company_dir = self.companies_dir / company_name
-
-                # Apply Stock Multiplier and Share Multiplier to all "Number of shares" rows
-                share_rows = df[df["ITEM"].str.lower() == "number of shares"]
-                print(share_rows)
-                for c in num_cols:
-                    base_val      = df.loc[share_rows.index, c]
-                    share_factor  = share_mult.get(c, 1.0)
-                    stock_factor  = stock_mult.get(c, 1.0)
-
-                    # local vars → clearer intent / debug-friendly
-                    combined_mult = share_factor * stock_factor
-
-                    df.loc[share_rows.index, c] = (
-                        base_val * combined_mult
-                    )
-
-                # Apply Financial / Income multipliers to corresponding TYPE rows (excluding the multiplier rows)
-                for c in num_cols:
-                    df.loc[(df["TYPE"].str.lower() == "financial") & (df["ITEM"].str.lower() != "financial multiplier"), c] *= fin_mult.get(c, 1.0)
-                    df.loc[(df["TYPE"].str.lower() == "income") & (df["ITEM"].str.lower() != "income multiplier"), c] *= inc_mult.get(c, 1.0)
-
-                self.logger.info("✅ Applied share, stock, and type multipliers before plotting.")
-
-                # === Inject Ticker column using company_name ===
-                df["Ticker"] = company_name
-
-                # === Load ReleaseDates.csv ===
-                release_csv = self.companies_dir / company_name / "ReleaseDates.csv"
-                release_map: Dict[str, str] = {}
-
-                if release_csv.exists():
-                    with release_csv.open("r", encoding="utf-8") as fh:
-                        reader = csv.DictReader(fh)
-                        for row in reader:
-                            financial = str(row.get("Date", "")).strip()
-                            rel = str(row.get("ReleaseDate", "")).strip()
-                            if financial:
-                                release_map[financial] = rel
-                else:
-                    messagebox.showerror(
-                        "Missing ReleaseDates.csv",
-                        "ReleaseDates.csv is required for stock price lookups.",
-                    )
-                    return
-
-                year_cols = list(self.combined_rename_names)
-
-                # === Build factor_lookup from precomputed stock prices ===
-                factor_lookup: Dict[str, Dict[str, float]] = {"": {y: 1.0 for y in year_cols}}
-                for _, prow in price_rows.iterrows():
-                    label = str(prow.get("SUBCATEGORY", "")).strip() or "Price"
-                    factor_lookup[label] = {}
-                    for y in year_cols:
-                        price_val = pd.to_numeric(prow.get(y, ""), errors="coerce")
-                        if pd.isna(price_val) or price_val <= 0:
-                            factor_lookup[label][y] = float("nan")
-                        else:
-                            factor_lookup[label][y] = 1.0 / float(price_val)
-
-                if factor_lookup:
-                    print(f"✅ Loaded stock price factors from Combined table ({len(factor_lookup) - 1} price shifts)")
-                else:
-                    print("⚠️ No stock price factors found; continuing without adjustment.")
-
-                # === Build tooltips ===
-                factor_tooltip: Dict[str, List[str]] = {}
-                for financial_date in year_cols:
-                    release_date = release_map.get(financial_date, "")
-                    entries = [f"Release Date: {release_date or 'NA'}"]
-                    for label, lookup in factor_lookup.items():
-                        if label == "":
-                            continue
-                        inv = lookup.get(financial_date, float("nan"))
-                        if pd.isna(inv) or inv == 0:
-                            entries.append(f"{label}: NaN")
-                        else:
-                            entries.append(f"{label}: {1.0/inv:.3f}")
-                    factor_tooltip[financial_date] = entries
-
-                factor_tooltip_label = "Prices"
-                print(f"🟩 Built factor_tooltip with {len(factor_tooltip)} entries.")
-                # === Extract share counts from 'Number of shares' rows ===
-                share_counts = {}
-                share_rows = df[df["ITEM"].str.lower().str.contains("number of shares", na=False)]
-                share_counts[company_name] = {}
-                if not share_rows.empty:
-                    row = share_rows.iloc[0]
-                    for y in year_cols:
-                        raw_val = row.get(y)
-                        if pd.notna(raw_val):
-                            numeric_val = float(raw_val)
-                            rounded_val = round(numeric_val, 2)
-                            share_counts[company_name][y] = rounded_val
-                        else:
-                            raise ValueError(f"Number of shares for year '{y}' is missing or NaN.")
-                else:
-                    share_counts[company_name] = {y: 1.0 for y in year_cols}
-
-                # === Remove 'Number of shares' rows for plotting ===
-                df_plot = df[~df["ITEM"].str.lower().str.contains("number of shares", na=False)].copy()
-
-                # === Output directory ===
-                from pathlib import Path
                 visuals_dir = Path("companies") / "visuals"
-                visuals_dir.mkdir(parents=True, exist_ok=True)
-
                 out_path = visuals_dir / f"ARVisuals_{company_name}.html"
 
-                # === Call the stacked visuals plotter ===
-                render_stacked_annual_report(
-                    df_plot,
-                    title=f"Financial/Income for {company_name}",
-                    factor_lookup=factor_lookup,
-                    factor_label="Value Per Stock Price Dollar",
-                    factor_tooltip=factor_tooltip,
-                    factor_tooltip_label=factor_tooltip_label,
-                    share_counts=share_counts,
-                    out_path=out_path,
-                    
+                plot_stacked_visuals(
+                    df_all,
+                    company_name,
+                    out_path,
+                    companies_dir=self.companies_dir,
                 )
 
             except Exception as e:
