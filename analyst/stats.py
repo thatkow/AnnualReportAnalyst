@@ -119,6 +119,7 @@ def compute_adjusted_values(ticker, df):
     return {
         "ticker": ticker,
         "subcats": subcat_labels,
+        "divisors": [row.values for _, row in divisors.iterrows()],
         "financial": build_group("Financial"),
         "income":    build_group("Income"),
         "dates": date_cols,
@@ -216,8 +217,18 @@ def render_interlaced_boxplots(
     return fig
 
 
-def compute_normalized_latest(groups, dates: Sequence[str], latest_price: float | None):
-    """Calculate normalized cumulative sum for the latest available date column."""
+def compute_normalized_latest(
+    groups: Sequence[Sequence[float]],
+    divisors: Sequence[Sequence[float]],
+    dates: Sequence[str],
+    latest_price: float | None,
+):
+    """Calculate normalized cumulative sum for the latest available date column.
+
+    This mirrors the adjusted value calculation but swaps the stock price divisor
+    for the latest fetched price so the reference line aligns with current
+    pricing.
+    """
 
     if latest_price is None or latest_price == 0 or pd.isna(latest_price):
         return None
@@ -232,9 +243,15 @@ def compute_normalized_latest(groups, dates: Sequence[str], latest_price: float 
     else:
         latest_idx = int(np.nanargmax(parsed_dates))
 
-    latest_total = np.nansum(
-        [grp[latest_idx] for grp in groups if len(grp) > latest_idx]
-    )
+    latest_totals: list[float] = []
+    for grp, divisor in zip(groups, divisors):
+        if len(grp) <= latest_idx or len(divisor) <= latest_idx:
+            continue
+
+        base_value = grp[latest_idx] * divisor[latest_idx]
+        latest_totals.append(base_value)
+
+    latest_total = np.nansum(latest_totals)
 
     if np.isnan(latest_total):
         return None
@@ -303,12 +320,19 @@ def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
         inc_groups = filter_groups(
             adjusted["income"], adjusted["subcats"], shared_price_labels
         )
+        shared_divisors = filter_groups(
+            adjusted["divisors"], adjusted["subcats"], shared_price_labels
+        )
 
         fin_ticker_groups.append((company.ticker, fin_groups, color))
         inc_ticker_groups.append((company.ticker, inc_groups, color))
 
-        fin_line = compute_normalized_latest(fin_groups, adjusted["dates"], price)
-        inc_line = compute_normalized_latest(inc_groups, adjusted["dates"], price)
+        fin_line = compute_normalized_latest(
+            fin_groups, shared_divisors, adjusted["dates"], price
+        )
+        inc_line = compute_normalized_latest(
+            inc_groups, shared_divisors, adjusted["dates"], price
+        )
 
         fin_hlines.append(
             (fin_line, color, f"{company.ticker.upper()} latest norm.")
