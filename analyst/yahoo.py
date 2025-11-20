@@ -17,8 +17,20 @@ def get_stock_prices(ticker, years=5, interval="1d"):
         progress=False,
         auto_adjust=False,
     )
+
     if df.empty:
-        raise ValueError(f"No data found for ticker {ticker}")
+        fallback_ticker = f"{ticker}.MX"
+        print(f"⚠️ No data found for {ticker}; retrying with {fallback_ticker}")
+        df = yf.download(
+            fallback_ticker,
+            period=f"{years}y",
+            interval=interval,
+            progress=False,
+            auto_adjust=False,
+        )
+
+    if df.empty:
+        raise ValueError(f"No data found for ticker {ticker} or fallback {fallback_ticker}")
     df = df.reset_index()[['Date', 'Close']].rename(columns={'Close': 'Price'})
     return df
 
@@ -70,6 +82,20 @@ def get_stock_data_for_dates(
                 interval="1d",
                 auto_adjust=False,
             )
+
+        if df_full.empty:
+            fallback_ticker = f"{ticker}.MX"
+            print(f"⚠️ No data found for {ticker}; retrying with {fallback_ticker}")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=FutureWarning)
+                df_full = yf.download(
+                    fallback_ticker,
+                    start=start_date,
+                    end=end_date,
+                    progress=False,
+                    interval="1d",
+                    auto_adjust=False,
+                )
 
         if df_full.empty:
             print(f"⚠️ No data found for {ticker} in {start_date}–{end_date}. Marking all as NA.")
