@@ -96,11 +96,12 @@ def _prepare_company_financials(company: Company):
 def render_release_date_boxplots(
     company: Company, *, out_path: str | Path | None = None
 ) -> Path:
-    """Render box plots grouped by release date differential.
+    """Render cumulative release-date box plots grouped by release differential.
 
-    Values are normalised per share, and corresponding release-date share
-    prices are shown alongside the financial series to mirror the
-    stacked-visuals context.
+    Values are scaled by multipliers, normalised per share, negations are
+    applied, and excluded/share-count rows are ignored. Cumulative sums across
+    release dates are plotted, and additional series show those cumulative
+    values divided by each release's share price.
     """
 
     prep = _prepare_company_financials(company)
@@ -117,10 +118,15 @@ def render_release_date_boxplots(
         else company.visuals_dir / f"ReleaseDateBoxes_{ticker}.html"
     )
 
-    records: list[dict[str, object]] = []
+    base_release_values: dict[str, list[float]] = {}
 
-    for _, row in df_plot.iterrows():
-        series_label = f"{row.get('TYPE', '')}: {row.get('ITEM', '')}".strip()
+    filtered = df_plot[
+        (df_plot["NOTE"].str.lower() != "share_count")
+        & (df_plot["TYPE"].str.lower() != "stock")
+    ].copy()
+
+    for _, row in filtered.iterrows():
+        running_total = 0.0
         for year in year_cols:
             value = row.get(year)
             if pd.isna(value):
@@ -128,33 +134,45 @@ def render_release_date_boxplots(
             shares = share_counts.get(ticker, {}).get(year)
             if shares in (None, 0):
                 continue
+            running_total += float(value) / float(shares)
             release_key = str(release_map.get(year, "Unknown")) or "Unknown"
-            records.append(
-                {
-                    "release": release_key,
-                    "series": series_label,
-                    "value": float(value) / float(shares),
-                }
-            )
+            base_release_values.setdefault(release_key, []).append(running_total)
 
+    price_scaled_values: dict[str, dict[str, list[float]]] = {}
     for _, row in price_rows.iterrows():
         price_label = str(row.get("SUBCATEGORY", "")).strip() or "Share Price"
+        price_scaled_values.setdefault(price_label, {})
         for year in year_cols:
             price_val = pd.to_numeric(row.get(year, ""), errors="coerce")
-            if pd.isna(price_val):
+            if pd.isna(price_val) or price_val == 0:
                 continue
             release_key = str(release_map.get(year, "Unknown")) or "Unknown"
-            records.append(
-                {
-                    "release": release_key,
-                    "series": f"Price ({price_label})",
-                    "value": float(price_val),
-                }
-            )
+            base_vals = base_release_values.get(release_key, [])
+            if not base_vals:
+                continue
+            scaled_list = price_scaled_values[price_label].setdefault(release_key, [])
+            scaled_list.extend([val / float(price_val) for val in base_vals])
 
     visuals_dir = out_path.expanduser().resolve().parent
     visuals_dir.mkdir(parents=True, exist_ok=True)
     out_path = visuals_dir / out_path.name
+
+    base_records = [
+        {"release": release, "value": value}
+        for release, values in base_release_values.items()
+        for value in values
+    ]
+
+    price_records = [
+        {
+            "series": f"Price scaled ({label})",
+            "release": release,
+            "value": value,
+        }
+        for label, release_map_values in price_scaled_values.items()
+        for release, values in release_map_values.items()
+        for value in values
+    ]
 
     html = f"""<!DOCTYPE html>
 <html lang=\"en\">
@@ -167,23 +185,36 @@ def render_release_date_boxplots(
   <h2>Release Date Differential Box Plots - {ticker}</h2>
   <div id=\"plot\"></div>
   <script>
-    const rawData = {json.dumps(records)};
-    const grouped = new Map();
-
-    rawData.forEach(rec => {{
-      const key = `${{rec.release}}|${{rec.series}}`;
-      if (!grouped.has(key)) grouped.set(key, []);
-      grouped.get(key).push(rec.value);
-    }});
+    const baseData = {json.dumps(base_records)};
+    const priceData = {json.dumps(price_records)};
 
     const traces = [];
-    grouped.forEach((values, key) => {{
-      const [release, series] = key.split('|');
+
+    if (baseData.length) {{
+      traces.push({{
+        type: 'box',
+        name: 'Cumulative per share',
+        x: baseData.map(d => d.release),
+        y: baseData.map(d => d.value),
+        boxpoints: 'outliers',
+        jitter: 0.4,
+        pointpos: -1.8,
+        marker: {{ size: 6 }}
+      }});
+    }}
+
+    const priceGrouped = new Map();
+    priceData.forEach(rec => {{
+      if (!priceGrouped.has(rec.series)) priceGrouped.set(rec.series, []);
+      priceGrouped.get(rec.series).push(rec);
+    }});
+
+    priceGrouped.forEach((items, series) => {{
       traces.push({{
         type: 'box',
         name: series,
-        x: Array(values.length).fill(release),
-        y: values,
+        x: items.map(d => d.release),
+        y: items.map(d => d.value),
         boxpoints: 'outliers',
         jitter: 0.4,
         pointpos: -1.8,
@@ -194,7 +225,7 @@ def render_release_date_boxplots(
     const layout = {{
       boxmode: 'group',
       xaxis: {{ title: 'Release Date Differential' }},
-      yaxis: {{ title: 'Value (per share)' }},
+      yaxis: {{ title: 'Cumulative Value (per share)' }},
       legend: {{ orientation: 'h' }},
       margin: {{ t: 40 }}
     }};
