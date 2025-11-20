@@ -17,7 +17,12 @@ from tkinter import messagebox, simpledialog, ttk
 
 from constants import COLUMNS, DEFAULT_OPENAI_MODEL, SCRAPE_EXPECTED_COLUMNS
 # === New buttons: Copy ReleaseDate / Stock Multiplier Prompts ===
-from combined_utils import build_release_date_prompt, build_stock_multiplier_prompt
+from combined_utils import (
+    _sort_dates,
+    build_release_date_prompt,
+    build_stock_multiplier_prompt,
+    generate_and_open_stock_multipliers,
+)
 
 COMBINED_BASE_COLUMNS = [
     "TYPE",
@@ -37,9 +42,7 @@ class CombinedUIMixin:
     combined_date_tree: Optional[ttk.Treeview]
     combined_table: Optional[ttk.Treeview]
     combined_create_button: Optional[ttk.Button]
-    combined_save_button: Optional[ttk.Button]
     mapping_create_button: Optional[ttk.Button]
-    mapping_open_button: Optional[ttk.Button]
     combined_columns: List[str]
     combined_rows: List[List[str]]
     combined_dyn_columns: List[Dict[str, Any]]
@@ -128,12 +131,31 @@ class CombinedUIMixin:
 
 
    
-    def _get_combined_date_columns(self) -> List[str]:
-        base_cols = {"TYPE", "CATEGORY", "SUBCATEGORY", "ITEM", "NOTE", "KEY4COLORING"}
-        return [
-            c for c in (self.combined_columns or [])
-            if isinstance(c, str) and c.upper() not in base_cols
-        ]
+    def _get_pdf_table_dates(self) -> List[str]:
+        """Return sorted date columns sourced from the Date Columns by PDF table."""
+
+        dyn_cols = list(getattr(self, "combined_dyn_columns", []) or [])
+        if not dyn_cols:
+            dyn_cols, _, _ = self._build_date_matrix_data()
+            self.combined_dyn_columns = dyn_cols
+
+        rename_names = list(getattr(self, "combined_rename_names", []) or [])
+        if len(rename_names) != len(dyn_cols):
+            rename_names = [
+                dc.get("default_name") or f"date{idx + 1}"
+                for idx, dc in enumerate(dyn_cols)
+            ]
+            self.combined_rename_names = rename_names
+
+        candidates = [name for name in rename_names if isinstance(name, str) and name.strip()]
+        if not candidates:
+            candidates = [
+                dc.get("default_name", "")
+                for dc in dyn_cols
+                if isinstance(dc, dict)
+            ]
+
+        return _sort_dates([c for c in candidates if isinstance(c, str) and c.strip()])
 
     def _on_copy_releasedate_prompt(self):
         try:
@@ -147,7 +169,7 @@ class CombinedUIMixin:
                 messagebox.showwarning("No Combined Data", "Create the combined dataset first.")
                 return
 
-            date_cols = self._get_combined_date_columns()
+            date_cols = self._get_pdf_table_dates()
 
             # Build prompt text
             text = build_release_date_prompt(company, date_cols)
@@ -216,16 +238,34 @@ class CombinedUIMixin:
 
     def _on_copy_stock_multiplier_prompt(self) -> None:
         try:
-            company = self.company_var.get().strip()
-            if not company:
-                messagebox.showwarning("Company Missing", "Select a company before generating the prompt.")
-                return
+            self._generate_multipliers_with_prompt()
 
-            if not self.combined_columns or not self.combined_rows:
-                messagebox.showwarning("No Combined Data", "Create the combined dataset first.")
-                return
+        except FileNotFoundError as exc:
+            messagebox.showerror("Stock Multipliers", str(exc))
+        except Exception as exc:
+            messagebox.showerror("Stock Multipliers", f"Failed to generate stock multiplier prompt:\n{exc}")
 
-            date_cols = self._get_combined_date_columns()
+    def _generate_multipliers_with_prompt(self) -> None:
+        company = self.company_var.get().strip()
+        if not company:
+            messagebox.showwarning("Company Missing", "Select a company before generating stock multipliers.")
+            return
+
+        date_cols = self._get_pdf_table_dates()
+        if not date_cols:
+            messagebox.showwarning(
+                "No Dates",
+                "No date columns were found in the Date Columns by PDF table.",
+            )
+            return
+
+        try:
+            generate_and_open_stock_multipliers(
+                logger=getattr(self, "logger", None),
+                company_dir=self.companies_dir,
+                date_columns=date_cols,
+                current_company_name=company,
+            )
 
             app_root = Path(getattr(self, "app_root", Path(__file__).resolve().parent))
             template_path = app_root / "prompts" / "Stock_Multipliers.txt"
@@ -235,12 +275,18 @@ class CombinedUIMixin:
             self.root.clipboard_append(text)
             self.root.update()
 
-            messagebox.showinfo("Stock Multipliers", "Prompt copied to clipboard.")
+            messagebox.showinfo(
+                "Stock Multipliers",
+                "stock_multipliers.csv opened and prompt copied to clipboard.",
+            )
 
         except FileNotFoundError as exc:
             messagebox.showerror("Stock Multipliers", str(exc))
         except Exception as exc:
-            messagebox.showerror("Stock Multipliers", f"Failed to generate stock multiplier prompt:\n{exc}")
+            messagebox.showerror(
+                "Stock Multipliers",
+                f"Failed to generate stock multipliers and prompt:\n{exc}",
+            )
 
     def build_combined_tab(self, notebook: ttk.Notebook) -> None:
         combined_tab = ttk.Frame(notebook)
@@ -273,64 +319,31 @@ class CombinedUIMixin:
 
 
         # === New stock multiplier control buttons ===
-        from combined_utils import reload_stock_multipliers, generate_and_open_stock_multipliers
         # 1) Generate Multipliers
         self.generate_multipliers_button = ttk.Button(
             controls, text="Generate Multipliers",
-            command=lambda: generate_and_open_stock_multipliers(
-                logger=getattr(self, "logger", None),
-                company_dir=self.companies_dir,
-                date_columns=self.combined_rename_names,
-                current_company_name=self.company_var.get()
-            )
+            command=self._generate_multipliers_with_prompt,
         )
         self.generate_multipliers_button.pack(side=tk.LEFT)
 
-        # 2) Reload Multipliers
-        self.reload_multipliers_button = ttk.Button(
-            controls, text="Reload Multipliers",
-            command=lambda: reload_stock_multipliers(self)
-        )
-        self.reload_multipliers_button.pack(side=tk.LEFT, padx=(6, 20))
-
-        # 3) Create Mapping
+        # 2) Create Mapping
         self.mapping_create_button = ttk.Button(
             controls, text="Create Mapping", command=self.create_mapping_csv
         )
         self.mapping_create_button.pack(side=tk.LEFT)
 
-        # 4) Open Mapping
-        self.mapping_open_button = ttk.Button(
-            controls, text="Open Mapping", command=self.open_mapping_csv, state="disabled"
-        )
-        self.mapping_open_button.pack(side=tk.LEFT, padx=(6, 20))
-        self._update_mapping_buttons()
-
-        # 5) Copy ReleaseDate Prompt
+        # 3) Copy ReleaseDate Prompt
         copy_prompt_btn = ttk.Button(
             controls, text="Copy ReleaseDate Prompt",
             command=self._on_copy_releasedate_prompt
         )
         copy_prompt_btn.pack(side=tk.LEFT, padx=(0, 20))
 
-        # 5b) Copy Stock Multiplier Prompt
-        copy_stock_prompt_btn = ttk.Button(
-            controls, text="Copy Stock Multiplier Prompt",
-            command=self._on_copy_stock_multiplier_prompt
-        )
-        copy_stock_prompt_btn.pack(side=tk.LEFT, padx=(0, 20))
-
-        # 6) Generate Table (rename Create)
+        # 4) Generate Table (rename Create)
         self.combined_create_button = ttk.Button(
             controls, text="Generate Table", command=self.create_combined_dataset
         )
         self.combined_create_button.pack(side=tk.LEFT)
-
-        # 7) Save CSV
-        self.combined_save_button = ttk.Button(
-            controls, text="Save CSV", command=self.save_combined_to_csv, state="disabled"
-        )
-        self.combined_save_button.pack(side=tk.LEFT, padx=(6, 20))
 
         # === New button: Plot Stacked Visuals ===
         from analyst_stackedvisuals import render_stacked_annual_report
@@ -890,11 +903,6 @@ class CombinedUIMixin:
             except Exception:
                 pass
 
-        if self.combined_save_button is not None:
-            try:
-                self.combined_save_button.configure(state="disabled")
-            except Exception:
-                pass
 
     def _populate_combined_table(self, columns: List[str], rows: List[List[str]]) -> None:
         if self.combined_table is None:
@@ -955,9 +963,10 @@ class CombinedUIMixin:
             # Apply NOTE coloring based on raw data (unchanged)
             self._apply_note_color_to_combined_item(iid, columns, tv)
 
-    def save_combined_to_csv(self) -> None:
+    def save_combined_to_csv(self, quiet: bool = False) -> None:
         if not self.combined_columns or not self.combined_rows:
-            messagebox.showinfo("Save Combined", "No combined data to save. Click 'Create' first.")
+            if not quiet:
+                messagebox.showinfo("Save Combined", "No combined data to save. Click 'Create' first.")
             return
         company = self.company_var.get().strip()
         target_dir: Optional[Path] = None
@@ -975,7 +984,8 @@ class CombinedUIMixin:
                 writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
                 writer.writerow(self.combined_columns)
                 writer.writerows(self.combined_rows)
-            messagebox.showinfo("Save Combined", f"Saved combined CSV to:\n{out_path}")
+            if not quiet:
+                messagebox.showinfo("Save Combined", f"Saved combined CSV to:\n{out_path}")
         except Exception as exc:
             messagebox.showerror("Save Combined", f"Failed to save combined CSV: {exc}")
 
@@ -1026,21 +1036,7 @@ class CombinedUIMixin:
         return lookup
 
     def _update_mapping_buttons(self) -> None:
-        button = getattr(self, "mapping_open_button", None)
-        if button is None:
-            return
-        company_name = self.company_var.get().strip()
-        exists = False
-        if company_name:
-            try:
-                paths = self._get_mapping_json_paths(company_name)
-                exists = any(path.exists() for path in paths.values())
-            except Exception:
-                exists = False
-        try:
-            button.configure(state="normal" if exists else "disabled")
-        except Exception:
-            pass
+        return
 
     def open_mapping_csv(self) -> None:
         company_name = self.company_var.get().strip()
@@ -1201,6 +1197,27 @@ class CombinedUIMixin:
             )
             return
 
+        paths = self._get_mapping_json_paths(company_name)
+        existing = [p for p in paths.values() if p.exists()]
+        if existing:
+            for path in existing:
+                try:
+                    if sys.platform.startswith("win"):
+                        os.startfile(str(path))  # type: ignore[attr-defined]
+                    elif sys.platform == "darwin":
+                        subprocess.run(["open", str(path)], check=False)
+                    else:
+                        subprocess.run(["xdg-open", str(path)], check=False)
+                except Exception:
+                    continue
+
+            proceed = messagebox.askyesno(
+                "Mapping",
+                "Mapping files already exist. Do you want to rerun generation?",
+            )
+            if not proceed:
+                return
+
         logger = getattr(self, "logger", None)
         if logger is not None:
             summary = {typ: len(items) for typ, items in items_for_prompt.items()}
@@ -1221,11 +1238,10 @@ class CombinedUIMixin:
         progress_bar.start(10)
         try:
             progress_win.transient(self.root)
-            progress_win.grab_set()
             progress_win.lift()
         except Exception:
             pass
-        progress_win.protocol("WM_DELETE_WINDOW", lambda: None)
+        progress_win.protocol("WM_DELETE_WINDOW", close_progress)
 
         def close_progress() -> None:
             try:
@@ -1664,9 +1680,6 @@ class CombinedUIMixin:
         self.combined_columns = columns
         self.combined_rows = final_rows
         self._update_mapping_buttons()
-        if self.combined_save_button is not None:
-            self.combined_save_button.configure(state="normal")        
-
         # === Sort date columns (and reorder rows accordingly) ===
         import re
         from datetime import datetime
@@ -1703,6 +1716,9 @@ class CombinedUIMixin:
         self.combined_rows = reordered_rows
         self._populate_combined_table(sorted_columns, reordered_rows)
 
+        # Auto-save Combined.csv when the table is generated
+        self.save_combined_to_csv()
+
 
     # === New: Load Combined.csv for a specific company ===
     def load_company_combined_csv(self, company_name: str) -> None:
@@ -1735,9 +1751,6 @@ class CombinedUIMixin:
 
             self._populate_combined_table(columns, rows)
             self._update_mapping_buttons()
-
-            if self.combined_save_button is not None:
-                self.combined_save_button.configure(state="normal")
 
             print(f"✅ Loaded Combined.csv for {company_name} ({len(rows)} rows, {len(columns)} columns)")
 
