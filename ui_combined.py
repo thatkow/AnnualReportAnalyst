@@ -278,7 +278,7 @@ class CombinedUIMixin:
 
             shift_values = [-30, -7, -1, 0, 1, 7, 30]
 
-            from analyst_yahoo import get_stock_data_for_dates
+            from analyst.yahoo import get_stock_data_for_dates
 
             cache_path = self.companies_dir / company / "stock_cache.json"
             stock_df = get_stock_data_for_dates(

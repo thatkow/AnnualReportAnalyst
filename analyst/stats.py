@@ -7,7 +7,7 @@ import pandas as pd
 from matplotlib.patches import Patch
 
 from analyst.data import Company
-from analyst import analyst_yahoo
+from . import yahoo
 
 
 # ------------------------------------------------------------
@@ -138,7 +138,7 @@ def get_latest_stock_price(ticker: str) -> float | None:
     """
 
     try:
-        prices = analyst_yahoo.get_stock_prices(ticker, years=1)
+        prices = yahoo.get_stock_prices(ticker, years=1)
         if prices.empty:
             print(f"⚠️ No recent stock prices found for {ticker}.")
             return None
