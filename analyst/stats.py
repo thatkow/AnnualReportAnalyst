@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Iterable, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,6 +12,32 @@ from analyst.data import Company
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
+
+def ensure_interactive_backend() -> str:
+    """Switch to an interactive backend when possible to allow ``Figure.show()``."""
+
+    backend = plt.get_backend()
+    if "agg" not in backend.lower():
+        return backend
+
+    for candidate in ("TkAgg", "Qt5Agg", "QtAgg", "MacOSX"):
+        try:
+            plt.switch_backend(candidate)
+            return candidate
+        except Exception:
+            continue
+
+    return backend
+
+
+def sort_release_dates(dates: Iterable[str]):
+    return sorted(
+        dates,
+        key=lambda value: pd.to_datetime(
+            value, format="%d.%m.%Y", dayfirst=True, errors="coerce"
+        ),
+    )
+
 
 def clean_numeric(dfblock):
     out = dfblock.copy().astype(str)
@@ -156,6 +182,13 @@ class FinancialBoxplots:
     fig_fin: plt.Figure
     fig_inc: plt.Figure
 
+    def show(self, *, block=True):
+        """Display both figures using the active Matplotlib backend."""
+
+        self.fig_fin.show()
+        self.fig_inc.show()
+        plt.show(block=block)
+
 
 def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
     """Generate interlaced boxplots for the first two provided companies."""
@@ -165,18 +198,18 @@ def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
 
     company_a, company_b = companies[0], companies[1]
 
-    release_dates = sorted(
+    ensure_interactive_backend()
+
+    release_dates = sort_release_dates(
         set(
             get_release_dates(company_a.combined)
             + get_release_dates(company_b.combined)
-        ),
-        key=pd.to_datetime,
+        )
     )
     if len(release_dates) < 7:
-        release_dates = sorted(
+        release_dates = sort_release_dates(
             get_release_dates(company_a.combined)
-            + get_release_dates(company_b.combined),
-            key=pd.to_datetime,
+            + get_release_dates(company_b.combined)
         )
     release_labels = release_dates[:7]
     adjusted_a = compute_adjusted_values(company_a.ticker, company_a.combined)
@@ -214,11 +247,8 @@ def main():
     companies = import_companies(tickers)
     figures = financials_boxplots(companies)
 
-    print("Showing Financial plot...")
-    figures.fig_fin.show()
-
-    print("Showing Income plot...")
-    figures.fig_inc.show()
+    print("Showing plots...")
+    figures.show(block=False)
 
     print("Done.")
 
