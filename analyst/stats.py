@@ -138,12 +138,11 @@ def get_latest_stock_price(ticker: str) -> float | None:
     Returns ``None`` if the data cannot be retrieved.
     """
 
-    try:
-        prices = yahoo.get_stock_prices(ticker, years=1)
-        if prices.empty:
-            print(f"⚠️ No recent stock prices found for {ticker}.")
+    def _extract_latest(df: pd.DataFrame) -> float | None:
+        if df.empty:
             return None
-        latest_value = prices["Price"].iloc[-1]
+
+        latest_value = df["Price"].iloc[-1]
 
         # ``float`` on a single-element Series is deprecated, so coerce safely
         latest_numeric = pd.to_numeric(latest_value, errors="coerce")
@@ -154,6 +153,16 @@ def get_latest_stock_price(ticker: str) -> float | None:
             return None
 
         return float(latest_numeric)
+
+    try:
+        prices = yahoo.get_stock_prices(ticker, years=1)
+        latest = _extract_latest(prices)
+        if latest is not None:
+            return latest
+
+        print(f"⚠️ No recent stock prices found for {ticker}; trying Stooq fallback.")
+        fallback_prices = yahoo.get_stooq_prices(ticker)
+        return _extract_latest(fallback_prices)
     except Exception as exc:  # pragma: no cover - network dependent
         print(f"⚠️ Failed to fetch latest stock price for {ticker}: {exc}")
         return None
