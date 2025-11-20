@@ -251,7 +251,7 @@ def compute_normalized_latest(
         base_value = grp[latest_idx] * divisor[latest_idx]
         latest_totals.append(base_value)
 
-    latest_total = np.nansum(latest_totals)
+    latest_total = latest_totals[len(latest_totals) - 1]  # Sum over all subcategories
 
     if np.isnan(latest_total):
         return None
