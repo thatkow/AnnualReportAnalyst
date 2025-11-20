@@ -177,7 +177,8 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
     factor_tooltip: Dict[str, list[str]] = {}
     for financial_date in year_cols:
         release_date = release_map.get(financial_date, "")
-        entries = [f"Release Date: {release_date or 'NA'}"]
+        release_text = f"{release_date} days" if release_date else ""
+        entries = [f"Release Date: {release_text or 'NA'}"]
         for label, lookup in factor_lookup.items():
             if label == "":
                 continue
@@ -214,7 +215,7 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
         df_plot,
         title=f"Financial/Income for {ticker}",
         factor_lookup=factor_lookup,
-        factor_label="Value Per Stock Price Dollar",
+        factor_label="",
         factor_tooltip=factor_tooltip,
         factor_tooltip_label="Prices",
         share_counts=share_counts,
