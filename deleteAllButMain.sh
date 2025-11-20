@@ -9,6 +9,7 @@ git checkout main
 LOG_FILE="deleted_branches_$(date +%Y%m%d_%H%M%S).log"
 
 echo "Recording and deleting all local branches except 'main'..."
+git remote prune origin
 git branch | grep -v "main" | tee "$LOG_FILE" | xargs -r git branch -D
 
 echo "Local branches deleted. Log saved to $LOG_FILE"
