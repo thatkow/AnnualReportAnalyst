@@ -22,7 +22,7 @@ def render_stacked_annual_report(
       1. Financial stacked bars (per-share toggle)
       2. Normalized share counts
 
-    If provided, `today_stock_price` is displayed above the charts for quick context.
+    If provided, `today_stock_price` is included in the hover tooltip for quick context.
     """
 
     if share_counts is None:
@@ -104,7 +104,6 @@ body {{ font-family: sans-serif; margin: 40px; }}
 </head>
 <body>
 <h2>{title}</h2>
-<div id="priceBanner" style="margin-bottom:10px; color:#333;"></div>
 
 <div id="tabs">
   <div id="tabBars" class="tab active">Financial Values</div>
@@ -149,6 +148,10 @@ const pdfSources = {json.dumps(pdf_sources)};
 const typeOffsets = {json.dumps(type_offsets)};
 const typeLineStyles = {json.dumps(type_linestyles)};
 const latestPrice = {json.dumps(today_stock_price)};
+const numericLatestPrice = (latestPrice === null || latestPrice === undefined) ? NaN : Number(latestPrice);
+const latestPriceTooltip = (!Number.isNaN(numericLatestPrice))
+  ? `<br><b>Today's Price:</b> $${{humanReadable(numericLatestPrice)}}`
+  : "";
 const yearToggleState = Object.fromEntries(
   years.map((y, idx) => [y, idx !== years.length - 1])
 );
@@ -164,7 +167,6 @@ document.addEventListener("DOMContentLoaded", () => {{
   initTickerAdjustments();
   initYearCheckboxes();
   updateAdjustmentLabels();
-  updatePriceBanner();
 }});
 
 // --- Human readable number formatter ---
@@ -180,20 +182,6 @@ function humanReadable(val) {{
 
 function fmt(val, perShare) {{
   return humanReadable(val);
-}}
-
-function updatePriceBanner() {{
-  const banner = document.getElementById("priceBanner");
-  if (!banner) return;
-
-  const numericPrice = Number(latestPrice);
-  if (latestPrice === null || Number.isNaN(numericPrice)) {{
-    banner.style.display = "none";
-    return;
-  }}
-
-  banner.style.display = "block";
-  banner.textContent = `Latest price: ${{fmt(numericPrice, false)}}`;
 }}
 
 function hashColor(str) {{
@@ -586,10 +574,7 @@ function renderBars() {{
       `<b>Mean:</b> ${{humanReadable(mean)}} (${{safeRatio(mean)}})<br>` +
       `<b>Max:</b> ${{humanReadable(max)}} (${{safeRatio(max)}})<br>` +
       `<b>Latest raw total${{perShare ? " (per share)" : ""}}:</b> ${{humanReadable(rawTotal)}}` +
-      (factorTooltip?.[years[years.length-1]]?.length
-        ? "<br><b>Today's Price:</b> " +
-          (factorTooltip[years[years.length-1]].find(e => e.startsWith("Today")) || "Today: NaN")
-        : "");
+      latestPriceTooltip;
 
 
     boxTraces.push({{
