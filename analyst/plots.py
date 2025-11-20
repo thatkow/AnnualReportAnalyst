@@ -6,6 +6,7 @@ from typing import Dict
 import pandas as pd
 
 from analyst.data import Company
+from analyst.stats import BoxPlotFigures, financials_boxplots
 from analyst_stackedvisuals import render_stacked_annual_report
 
 # Base, non-date columns present in the combined dataset

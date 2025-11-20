@@ -50,3 +50,24 @@ def import_company(
 
     df = pd.read_csv(combined_path).fillna("")
     return Company(ticker=ticker, combined=df, company_dir=company_dir)
+
+
+def import_companies(
+    tickers: list[str] | tuple[str, ...], *, companies_dir: str | Path = "companies"
+) -> list[Company]:
+    """Load multiple companies' combined data files.
+
+    Parameters
+    ----------
+    tickers:
+        Iterable of ticker symbols to load.
+    companies_dir:
+        Base directory containing the ``companies/<ticker>`` folders.
+
+    Returns
+    -------
+    list[Company]
+        Loaded :class:`Company` instances in the same order as ``tickers``.
+    """
+
+    return [import_company(ticker, companies_dir=companies_dir) for ticker in tickers]
