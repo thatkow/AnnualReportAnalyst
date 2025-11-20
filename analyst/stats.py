@@ -134,7 +134,7 @@ def get_release_dates(df):
 # ------------------------------------------------------------
 
 def render_interlaced_boxplots(
-    ticker1, groups1, ticker2, groups2, releasedate_labels
+    ticker1, groups1, ticker2, groups2, price_labels
 ):
     """
     7 groups per ticker → 14 interlaced boxplots
@@ -144,16 +144,16 @@ def render_interlaced_boxplots(
     inter_colors = []
     inter_labels = []
 
-    for i in range(7):
+    for i in range(len(price_labels)):
         # XRO (ticker1)
         inter_groups.append(groups1[i])
         inter_colors.append(plt.cm.tab10(0))
-        inter_labels.append(releasedate_labels[i])
+        inter_labels.append(price_labels[i])
 
         # SEK (ticker2)
         inter_groups.append(groups2[i])
         inter_colors.append(plt.cm.tab10(1))
-        inter_labels.append(releasedate_labels[i])
+        inter_labels.append(price_labels[i])
 
     fig, ax = plt.subplots(figsize=(16, 6))
     bp = ax.boxplot(inter_groups, labels=inter_labels, patch_artist=True)
@@ -200,35 +200,33 @@ def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
 
     ensure_interactive_backend()
 
-    release_dates = sort_release_dates(
-        set(
-            get_release_dates(company_a.combined)
-            + get_release_dates(company_b.combined)
-        )
-    )
-    if len(release_dates) < 7:
-        release_dates = sort_release_dates(
-            get_release_dates(company_a.combined)
-            + get_release_dates(company_b.combined)
-        )
-    release_labels = release_dates[:7]
     adjusted_a = compute_adjusted_values(company_a.ticker, company_a.combined)
     adjusted_b = compute_adjusted_values(company_b.ticker, company_b.combined)
 
+    shared_price_labels = [
+        label for label in adjusted_a["subcats"] if label in adjusted_b["subcats"]
+    ]
+    if not shared_price_labels:
+        raise ValueError("No shared stock price labels found between companies")
+
+    def filter_groups(groups, available_labels, target_labels):
+        index_lookup = {label: i for i, label in enumerate(available_labels)}
+        return [groups[index_lookup[label]] for label in target_labels]
+
     fig_fin = render_interlaced_boxplots(
         company_a.ticker,
-        adjusted_a["financial"],
+        filter_groups(adjusted_a["financial"], adjusted_a["subcats"], shared_price_labels),
         company_b.ticker,
-        adjusted_b["financial"],
-        release_labels,
+        filter_groups(adjusted_b["financial"], adjusted_b["subcats"], shared_price_labels),
+        shared_price_labels,
     )
 
     fig_inc = render_interlaced_boxplots(
         company_a.ticker,
-        adjusted_a["income"],
+        filter_groups(adjusted_a["income"], adjusted_a["subcats"], shared_price_labels),
         company_b.ticker,
-        adjusted_b["income"],
-        release_labels,
+        filter_groups(adjusted_b["income"], adjusted_b["subcats"], shared_price_labels),
+        shared_price_labels,
     )
 
     return FinancialBoxplots(fig_fin=fig_fin, fig_inc=fig_inc)
