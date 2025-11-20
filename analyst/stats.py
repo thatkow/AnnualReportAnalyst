@@ -260,8 +260,8 @@ class FinancialBoxplots:
 def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
     """Generate interlaced boxplots for all provided companies."""
 
-    if len(companies) < 2:
-        raise ValueError("At least two companies are required to build boxplots.")
+    if not companies:
+        raise ValueError("At least one company is required to build boxplots.")
 
     ensure_interactive_backend()
 
