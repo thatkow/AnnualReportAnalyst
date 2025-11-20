@@ -163,46 +163,38 @@ def get_latest_stock_price(ticker: str) -> float | None:
 # ------------------------------------------------------------
 
 def render_interlaced_boxplots(
-    ticker1,
-    groups1,
-    ticker2,
-    groups2,
+    ticker_groups: Sequence[tuple[str, Sequence[Sequence[float]], str]],
     price_labels,
     *,
     xlabel: str,
     hlines: list[tuple[float, str, str]] | None = None,
 ):
-    """
-    7 groups per ticker → 14 interlaced boxplots
+    """Render interlaced boxplots for ``n`` tickers.
+
+    ``ticker_groups`` contains tuples of ``(ticker, groups, color)`` where
+    ``groups`` is already filtered to ``price_labels`` order.
     """
 
-    inter_groups = []
-    inter_colors = []
-    inter_labels = []
+    inter_groups: list[Sequence[float]] = []
+    inter_colors: list[str] = []
+    inter_labels: list[str] = []
 
     for i in range(len(price_labels)):
-        # XRO (ticker1)
-        inter_groups.append(groups1[i])
-        inter_colors.append(plt.cm.tab10(0))
-        inter_labels.append(price_labels[i])
-
-        # SEK (ticker2)
-        inter_groups.append(groups2[i])
-        inter_colors.append(plt.cm.tab10(1))
-        inter_labels.append(price_labels[i])
+        for _, groups, color in ticker_groups:
+            inter_groups.append(groups[i])
+            inter_colors.append(color)
+            inter_labels.append(price_labels[i])
 
     fig, ax = plt.subplots(figsize=(16, 6))
     bp = ax.boxplot(inter_groups, labels=inter_labels, patch_artist=True)
 
-    for patch, color in zip(bp['boxes'], inter_colors):
+    for patch, color in zip(bp["boxes"], inter_colors):
         patch.set_facecolor(color)
 
-    ax.legend(
-        handles=[
-            Patch(color=plt.cm.tab10(0), label=ticker1.upper()),
-            Patch(color=plt.cm.tab10(1), label=ticker2.upper()),
-        ]
-    )
+    legend_handles = [
+        Patch(color=color, label=ticker.upper()) for ticker, _, color in ticker_groups
+    ]
+    ax.legend(handles=legend_handles)
 
     if hlines:
         for value, color, label in hlines:
@@ -216,8 +208,9 @@ def render_interlaced_boxplots(
         ax.legend(handles, labels)
 
     ax.set_xlabel(xlabel)
-    plt.xticks(rotation=45, ha='right')
-    plt.title(f"Interlaced Boxplots — {ticker1.upper()} vs {ticker2.upper()}")
+    plt.xticks(rotation=45, ha="right")
+    title_tickers = ", ".join([ticker.upper() for ticker, _, _ in ticker_groups])
+    plt.title(f"Interlaced Boxplots — {title_tickers}")
     plt.tight_layout()
 
     return fig
@@ -265,24 +258,28 @@ class FinancialBoxplots:
 
 
 def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
-    """Generate interlaced boxplots for the first two provided companies."""
+    """Generate interlaced boxplots for all provided companies."""
 
     if len(companies) < 2:
         raise ValueError("At least two companies are required to build boxplots.")
 
-    company_a, company_b = companies[0], companies[1]
-
     ensure_interactive_backend()
 
-    adjusted_a = compute_adjusted_values(company_a.ticker, company_a.combined)
-    adjusted_b = compute_adjusted_values(company_b.ticker, company_b.combined)
-
-    latest_price_a = get_latest_stock_price(company_a.ticker)
-    latest_price_b = get_latest_stock_price(company_b.ticker)
-
-    shared_price_labels = [
-        label for label in adjusted_a["subcats"] if label in adjusted_b["subcats"]
+    # Precompute adjustments and latest prices
+    adjusted_list = [
+        compute_adjusted_values(company.ticker, company.combined)
+        for company in companies
     ]
+    latest_prices = [get_latest_stock_price(company.ticker) for company in companies]
+
+    # Determine shared price labels across all companies preserving first-company order
+    first_labels = adjusted_list[0]["subcats"]
+    shared_price_labels = [
+        label
+        for label in first_labels
+        if all(label in adjusted["subcats"] for adjusted in adjusted_list[1:])
+    ]
+
     if not shared_price_labels:
         raise ValueError("No shared stock price labels found between companies")
 
@@ -290,56 +287,48 @@ def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
         index_lookup = {label: i for i, label in enumerate(available_labels)}
         return [groups[index_lookup[label]] for label in target_labels]
 
-    fin_groups_a = filter_groups(
-        adjusted_a["financial"], adjusted_a["subcats"], shared_price_labels
-    )
-    fin_groups_b = filter_groups(
-        adjusted_b["financial"], adjusted_b["subcats"], shared_price_labels
-    )
-    inc_groups_a = filter_groups(
-        adjusted_a["income"], adjusted_a["subcats"], shared_price_labels
-    )
-    inc_groups_b = filter_groups(
-        adjusted_b["income"], adjusted_b["subcats"], shared_price_labels
-    )
+    colors = [plt.cm.tab10(i % 10) for i in range(len(companies))]
 
-    fin_line_a = compute_normalized_latest(
-        fin_groups_a, adjusted_a["dates"], latest_price_a
-    )
-    fin_line_b = compute_normalized_latest(
-        fin_groups_b, adjusted_b["dates"], latest_price_b
-    )
-    inc_line_a = compute_normalized_latest(
-        inc_groups_a, adjusted_a["dates"], latest_price_a
-    )
-    inc_line_b = compute_normalized_latest(
-        inc_groups_b, adjusted_b["dates"], latest_price_b
-    )
+    fin_ticker_groups = []
+    inc_ticker_groups = []
+    fin_hlines = []
+    inc_hlines = []
+
+    for company, adjusted, price, color in zip(
+        companies, adjusted_list, latest_prices, colors
+    ):
+        fin_groups = filter_groups(
+            adjusted["financial"], adjusted["subcats"], shared_price_labels
+        )
+        inc_groups = filter_groups(
+            adjusted["income"], adjusted["subcats"], shared_price_labels
+        )
+
+        fin_ticker_groups.append((company.ticker, fin_groups, color))
+        inc_ticker_groups.append((company.ticker, inc_groups, color))
+
+        fin_line = compute_normalized_latest(fin_groups, adjusted["dates"], price)
+        inc_line = compute_normalized_latest(inc_groups, adjusted["dates"], price)
+
+        fin_hlines.append(
+            (fin_line, color, f"{company.ticker.upper()} latest norm.")
+        )
+        inc_hlines.append(
+            (inc_line, color, f"{company.ticker.upper()} latest norm.")
+        )
 
     fig_fin = render_interlaced_boxplots(
-        company_a.ticker,
-        fin_groups_a,
-        company_b.ticker,
-        fin_groups_b,
+        fin_ticker_groups,
         shared_price_labels,
         xlabel="Balance Sheet",
-        hlines=[
-            (fin_line_a, plt.cm.tab10(0), f"{company_a.ticker.upper()} latest norm."),
-            (fin_line_b, plt.cm.tab10(1), f"{company_b.ticker.upper()} latest norm."),
-        ],
+        hlines=fin_hlines,
     )
 
     fig_inc = render_interlaced_boxplots(
-        company_a.ticker,
-        inc_groups_a,
-        company_b.ticker,
-        inc_groups_b,
+        inc_ticker_groups,
         shared_price_labels,
         xlabel="Income Statement",
-        hlines=[
-            (inc_line_a, plt.cm.tab10(0), f"{company_a.ticker.upper()} latest norm."),
-            (inc_line_b, plt.cm.tab10(1), f"{company_b.ticker.upper()} latest norm."),
-        ],
+        hlines=inc_hlines,
     )
 
     return FinancialBoxplots(fig_fin=fig_fin, fig_inc=fig_inc)
