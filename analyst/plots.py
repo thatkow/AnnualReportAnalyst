@@ -147,17 +147,15 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
     _apply_row_multiplier(df["TYPE"].str.lower() == "financial", fin_mult)
     _apply_row_multiplier(df["TYPE"].str.lower() == "income", inc_mult)
     _apply_row_multiplier(df["TYPE"].str.lower() == "shares", share_mult)
+    _apply_row_multiplier(df["TYPE"].str.lower() == "shares", stock_mult)
 
     price_rows = df_all[
         (df_all["TYPE"].str.lower() == "stock")
         & (df_all["CATEGORY"].str.lower() == "prices")
     ].copy()
     for year in num_cols:
-        factor = stock_mult.get(year, 1.0)
-        if factor == 1.0:
-            price_rows[year] = pd.to_numeric(price_rows[year], errors="coerce")
-        else:
-            price_rows[year] = pd.to_numeric(price_rows[year], errors="coerce") * factor
+        price_rows[year] = pd.to_numeric(price_rows[year], errors="coerce")
+ 
 
     release_map = _release_date_map(df_all, num_cols, company)
     pdf_map = _pdf_source_map(df_all, num_cols)

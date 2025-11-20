@@ -238,7 +238,6 @@ def compute_normalized_latest(groups, dates: Sequence[str], latest_price: float 
 
     if np.isnan(latest_total):
         return None
-
     return latest_total / latest_price
 
 
@@ -333,26 +332,3 @@ def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
 
     return FinancialBoxplots(fig_fin=fig_fin, fig_inc=fig_inc)
 
-
-# ------------------------------------------------------------
-# Equivalent of: int main()
-# ------------------------------------------------------------
-
-def main():
-    from analyst.data import import_companies
-
-    tickers = ["SEK.AX", "XRO.AX"]
-    print(f"Loading data for {', '.join(tickers)}...")
-
-    companies = import_companies(tickers)
-    figures = financials_boxplots(companies)
-
-    print("Showing plots...")
-    figures.show(block=False)
-
-    print("Done.")
-
-
-# Python entry point
-if __name__ == "__main__":
-    main()
