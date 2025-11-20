@@ -5,6 +5,28 @@ import os
 import json
 import warnings
 
+def get_stooq_prices(ticker: str) -> pd.DataFrame:
+    """
+    Fetch historical prices from Stooq as a fallback when yfinance fails.
+
+    The ticker is mapped to Stooq's US suffix and lowercased.
+    Returns a DataFrame with columns ["Date", "Price"].
+    """
+
+    symbol = f"{ticker.lower()}.us"
+    url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
+
+    df = pd.read_csv(url)
+
+    if df.empty:
+        raise ValueError(f"No data received from Stooq for {symbol.upper()}")
+
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.rename(columns={"Close": "Price"})
+    df = df[["Date", "Price"]]
+
+    return df
+
 
 def get_stock_prices(ticker, years=5, interval="1d"):
     """
@@ -30,8 +52,13 @@ def get_stock_prices(ticker, years=5, interval="1d"):
         )
 
     if df.empty:
-        raise ValueError(f"No data found for ticker {ticker} or fallback {fallback_ticker}")
-    df = df.reset_index()[['Date', 'Close']].rename(columns={'Close': 'Price'})
+        print(f"⚠️ No data found for {ticker} on yfinance; using Stooq fallback")
+        df = get_stooq_prices(ticker)
+    else:
+        df = df.reset_index()[['Date', 'Close']].rename(columns={'Close': 'Price'})
+
+    if df.empty:
+        raise ValueError(f"No data found for ticker {ticker} or fallback sources")
     return df
 
 
@@ -98,8 +125,14 @@ def get_stock_data_for_dates(
                 )
 
         if df_full.empty:
-            print(f"⚠️ No data found for {ticker} in {start_date}–{end_date}. Marking all as NA.")
-            df_full = pd.DataFrame(columns=["Date", "Close"])
+            print(f"⚠️ No data found for {ticker} in {start_date}–{end_date}; using Stooq fallback")
+            try:
+                df_full = get_stooq_prices(ticker).rename(columns={"Price": "Close"})
+            except Exception as e:
+                print(
+                    f"⚠️ Stooq fallback failed for {ticker} in {start_date}–{end_date}: {e}. Marking all as NA."
+                )
+                df_full = pd.DataFrame(columns=["Date", "Close"])
         else:
             df_full = df_full.reset_index()
 
