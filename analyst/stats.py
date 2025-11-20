@@ -1,6 +1,11 @@
-import pandas as pd
+from dataclasses import dataclass
+from typing import Sequence
+
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+
+from analyst.data import Company
 
 
 # ------------------------------------------------------------
@@ -136,39 +141,63 @@ def render_interlaced_boxplots(
     return fig
 
 
+@dataclass
+class FinancialBoxplots:
+    """Container for the generated financial and income boxplots."""
+
+    fig_fin: plt.Figure
+    fig_inc: plt.Figure
+
+
+def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
+    """Generate interlaced boxplots for the first two provided companies."""
+
+    if len(companies) < 2:
+        raise ValueError("At least two companies are required to build boxplots.")
+
+    company_a, company_b = companies[0], companies[1]
+
+    release_labels = get_release_dates(company_a.combined)
+    adjusted_a = compute_adjusted_values(company_a.ticker, company_a.combined)
+    adjusted_b = compute_adjusted_values(company_b.ticker, company_b.combined)
+
+    fig_fin = render_interlaced_boxplots(
+        company_a.ticker,
+        adjusted_a["financial"],
+        company_b.ticker,
+        adjusted_b["financial"],
+        release_labels,
+    )
+
+    fig_inc = render_interlaced_boxplots(
+        company_a.ticker,
+        adjusted_a["income"],
+        company_b.ticker,
+        adjusted_b["income"],
+        release_labels,
+    )
+
+    return FinancialBoxplots(fig_fin=fig_fin, fig_inc=fig_inc)
+
+
 # ------------------------------------------------------------
 # Equivalent of: int main()
 # ------------------------------------------------------------
 
 def main():
-    print("Loading data...")
+    from analyst.data import import_companies
 
-    # Example - both tickers point to the same CSV (demo)
-    df_xro = pd.read_csv("/mnt/data/Combined.csv")
-    df_sek = pd.read_csv("/mnt/data/Combined.csv")
+    tickers = ["SEK.AX", "XRO.AX"]
+    print(f"Loading data for {', '.join(tickers)}...")
 
-    print("Computing adjusted values...")
-    r_xro = compute_adjusted_values("xro", df_xro)
-    r_sek = compute_adjusted_values("sek", df_sek)
+    companies = import_companies(tickers)
+    figures = financials_boxplots(companies)
 
-    print("Extracting ReleaseDate labels...")
-    release_labels = get_release_dates(df_xro)
+    print("Showing Financial plot...")
+    figures.fig_fin.show()
 
-    print("Rendering Financial plot...")
-    fig_fin = render_interlaced_boxplots(
-        "xro", r_xro["financial"],
-        "sek", r_sek["financial"],
-        release_labels
-    )
-    fig_fin.show()
-
-    print("Rendering Income plot...")
-    fig_inc = render_interlaced_boxplots(
-        "xro", r_xro["income"],
-        "sek", r_sek["income"],
-        release_labels
-    )
-    fig_inc.show()
+    print("Showing Income plot...")
+    figures.fig_inc.show()
 
     print("Done.")
 
