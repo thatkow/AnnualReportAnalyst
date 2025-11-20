@@ -50,3 +50,19 @@ def import_company(
 
     df = pd.read_csv(combined_path).fillna("")
     return Company(ticker=ticker, combined=df, company_dir=company_dir)
+
+
+def import_companies(
+    tickers: list[str], *, companies_dir: str | Path = "companies", combined_filename: str = "Combined.csv"
+) -> list[Company]:
+    """Load multiple companies in one call.
+
+    Example
+    -------
+    >>> companies = import_companies(["SEK.AX", "XRO.AX"])
+    """
+
+    return [
+        import_company(t, companies_dir=companies_dir, combined_filename=combined_filename)
+        for t in tickers
+    ]
