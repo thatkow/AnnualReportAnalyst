@@ -409,7 +409,7 @@ function buildCumsumLines(factorName, perShare) {{
             : "";
           const pdfName = pdfSources[y];
           const pdfPath = (pdfName && ticker)
-            ? encodeURI(`companies/${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
+            ? encodeURI(`../${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
             : "";
           const pdfHint = pdfPath
             ? "<br><i>Double-click point to open PDF</i>"
@@ -427,7 +427,7 @@ function buildCumsumLines(factorName, perShare) {{
         customdata: years.map(y => {{
           const pdfName = pdfSources[y];
           const pdfPath = (pdfName && ticker)
-            ? encodeURI(`companies/${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
+            ? encodeURI(`../${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
             : "";
           return [y, pdfPath];
         }}),
