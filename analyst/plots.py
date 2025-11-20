@@ -107,11 +107,6 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
 
     df_all["Ticker"] = ticker
 
-    price_rows = df_all[
-        (df_all["TYPE"].str.lower() == "stock")
-        & (df_all["CATEGORY"].str.lower() == "prices")
-    ]
-
     df = df_all[df_all["NOTE"].str.lower() != "excluded"].copy()
     for col in num_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -119,6 +114,28 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
     df.loc[neg_idx, num_cols] = df.loc[neg_idx, num_cols].applymap(
         lambda x: -1.0 * x if pd.notna(x) else x
     )
+
+    def _apply_row_multiplier(mask: pd.Series, factors: Dict[str, float]) -> None:
+        for year in num_cols:
+            factor = factors.get(year, 1.0)
+            if factor == 1.0:
+                continue
+            df.loc[mask, year] = df.loc[mask, year] * factor
+
+    _apply_row_multiplier(df["TYPE"].str.lower() == "financial", fin_mult)
+    _apply_row_multiplier(df["TYPE"].str.lower() == "income", inc_mult)
+    _apply_row_multiplier(df["TYPE"].str.lower() == "shares", share_mult)
+
+    price_rows = df_all[
+        (df_all["TYPE"].str.lower() == "stock")
+        & (df_all["CATEGORY"].str.lower() == "prices")
+    ].copy()
+    for year in num_cols:
+        factor = stock_mult.get(year, 1.0)
+        if factor == 1.0:
+            price_rows[year] = pd.to_numeric(price_rows[year], errors="coerce")
+        else:
+            price_rows[year] = pd.to_numeric(price_rows[year], errors="coerce") * factor
 
     release_map = _release_date_map(df_all, num_cols, company)
 
