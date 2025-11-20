@@ -63,3 +63,22 @@ def import_companies(
         )
         for ticker in tickers
     ]
+
+
+def list_available_companies(*, companies_dir: str | Path = "companies") -> list[str]:
+    """Return a sorted list of company folder names that contain a Combined.csv file."""
+
+    root = Path(companies_dir)
+    if not root.exists():
+        return []
+
+    available = []
+    for path in root.iterdir():
+        if not path.is_dir():
+            continue
+
+        combined_path = path / "Combined.csv"
+        if combined_path.exists():
+            available.append(path.name)
+
+    return sorted(available)
