@@ -1,6 +1,6 @@
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import os
 import json
 import warnings
@@ -89,6 +89,16 @@ def get_stock_data_for_dates(
         except Exception as e:
             print(f"⚠️ Could not read cache file: {e}")
 
+    # Preload a broader historical lookup with the shared fallback logic
+    global_price_lookup: dict[date, float] = {}
+    try:
+        df_global = get_stock_prices(ticker, years=10, interval="1d")
+        df_global["Date"] = pd.to_datetime(df_global["Date"], errors="coerce").dt.date
+        df_global = df_global.dropna(subset=["Date", "Price"])
+        global_price_lookup = {d: float(p) for d, p in zip(df_global["Date"], df_global["Price"])}
+    except Exception as e:
+        print(f"⚠️ Could not build global price lookup for {ticker}: {e}")
+
     all_rows = []
     updated = False
 
@@ -153,33 +163,15 @@ def get_stock_data_for_dates(
 
         # Drop invalid rows
         df_full = df_full.dropna(subset=["Date", "Close"])
-
-        print(f"DEBUG: Cleaned df_full shape {df_full.shape}")
-        print(df_full.head(5))
-
-        # Build lookup
-        price_lookup = {d_: float(v) for d_, v in zip(df_full["Date"], df_full["Close"])}
-
-
-        # Drop invalid rows
-        df_full = df_full.dropna(subset=["Date", "Close"])
-
-        print(f"DEBUG: Cleaned df_full shape {df_full.shape}")
-        print(df_full.head(5))
-
-        # Build lookup
-        price_lookup = {d_: float(v) for d_, v in zip(df_full["Date"], df_full["Close"])}
-
-
-        # Drop any invalid rows (non-numeric Close or bad Date)
-        df_full = df_full.dropna(subset=["Date", "Close"])
-
-        # Build lookup dict
         try:
             price_lookup = {d_: float(v) for d_, v in zip(df_full["Date"], df_full["Close"])}
         except Exception as e:
             print(f"⚠️ Failed to build price lookup for {ticker}: {e}")
             price_lookup = {}
+
+        # If the windowed lookup is empty, fall back to the broader global lookup
+        if not price_lookup and global_price_lookup:
+            price_lookup = global_price_lookup
 
         for offset in days:
             target_date = base_date + timedelta(days=offset)
@@ -210,6 +202,21 @@ def get_stock_data_for_dates(
                             f"after 30-day search window — marking as NA."
                         )
                         price = float("nan")
+
+                # As a final attempt, try the global lookup if the window search failed
+                if pd.isna(price) and global_price_lookup:
+                    price = global_price_lookup.get(target_date, float("nan"))
+                    if pd.isna(price):
+                        direction = 1 if offset > 0 else -1
+                        for retry in range(1, 31):
+                            new_date = target_date + timedelta(days=retry * direction)
+                            if new_date in global_price_lookup:
+                                price = global_price_lookup[new_date]
+                                print(
+                                    f"🔁 (global) Found substitute for {ticker} on {target_date} "
+                                    f"→ {new_date} ({'forward' if direction==1 else 'backward'} {retry:+}d): {price:.2f}"
+                                )
+                                break
 
                 cache[key] = price
 
