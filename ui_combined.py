@@ -10,7 +10,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
@@ -274,11 +274,6 @@ class CombinedUIMixin:
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
             self.root.update()
-
-            messagebox.showinfo(
-                "Stock Multipliers",
-                "stock_multipliers.csv opened and prompt copied to clipboard.",
-            )
 
         except FileNotFoundError as exc:
             messagebox.showerror("Stock Multipliers", str(exc))
@@ -1197,10 +1192,8 @@ class CombinedUIMixin:
             )
             return
 
-        paths = self._get_mapping_json_paths(company_name)
-        existing = [p for p in paths.values() if p.exists()]
-        if existing:
-            for path in existing:
+        def _open_paths(paths: Iterable[Path]) -> None:
+            for path in paths:
                 try:
                     if sys.platform.startswith("win"):
                         os.startfile(str(path))  # type: ignore[attr-defined]
@@ -1211,11 +1204,60 @@ class CombinedUIMixin:
                 except Exception:
                     continue
 
-            proceed = messagebox.askyesno(
-                "Mapping",
-                "Mapping files already exist. Do you want to rerun generation?",
+        def _prompt_mapping_action(existing_paths: List[Path]) -> str:
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Mapping")
+            dialog.resizable(False, False)
+
+            ttk.Label(
+                dialog,
+                text=(
+                    "Mapping files already exist. Choose an action:\n"
+                    "\n• Rerun generation\n• Open existing files\n• Cancel"
+                ),
+                justify=tk.LEFT,
+                padding=(12, 10),
+                wraplength=360,
+            ).pack(fill=tk.X)
+
+            files_frame = ttk.Frame(dialog, padding=(12, 0, 12, 8))
+            files_frame.pack(fill=tk.BOTH, expand=True)
+            ttk.Label(files_frame, text="Existing files:", justify=tk.LEFT).pack(anchor=tk.W)
+            files_list = tk.Text(files_frame, height=4, width=50)
+            files_list.pack(fill=tk.BOTH, expand=True)
+            files_list.insert("1.0", "\n".join(str(p) for p in existing_paths))
+            files_list.configure(state="disabled")
+
+            choice: Dict[str, str] = {"value": "cancel"}
+
+            def set_choice(value: str) -> None:
+                choice["value"] = value
+                dialog.destroy()
+
+            btn_frame = ttk.Frame(dialog, padding=(12, 4, 12, 12))
+            btn_frame.pack(fill=tk.X)
+            ttk.Button(btn_frame, text="Rerun Generation", command=lambda: set_choice("rerun")).pack(
+                side=tk.LEFT, padx=(0, 6)
             )
-            if not proceed:
+            ttk.Button(btn_frame, text="Open Existing", command=lambda: set_choice("open")).pack(
+                side=tk.LEFT, padx=(0, 6)
+            )
+            ttk.Button(btn_frame, text="Cancel", command=lambda: set_choice("cancel")).pack(side=tk.LEFT)
+
+            dialog.transient(self.root)
+            dialog.grab_set()
+            dialog.wait_window()
+            return choice["value"]
+
+        paths = self._get_mapping_json_paths(company_name)
+        existing = [p for p in paths.values() if p.exists()]
+        if existing:
+            action = _prompt_mapping_action(existing)
+            if action == "open":
+                _open_paths(existing)
+                self._update_mapping_buttons()
+                return
+            if action != "rerun":
                 return
 
         logger = getattr(self, "logger", None)
@@ -1236,12 +1278,6 @@ class CombinedUIMixin:
         progress_bar = ttk.Progressbar(progress_win, mode="indeterminate", length=260)
         progress_bar.pack(padx=16, pady=(0, 16))
         progress_bar.start(10)
-        try:
-            progress_win.transient(self.root)
-            progress_win.lift()
-        except Exception:
-            pass
-        progress_win.protocol("WM_DELETE_WINDOW", close_progress)
 
         def close_progress() -> None:
             try:
@@ -1252,6 +1288,13 @@ class CombinedUIMixin:
                 progress_win.destroy()
             except Exception:
                 pass
+
+        try:
+            progress_win.transient(self.root)
+            progress_win.lift()
+        except Exception:
+            pass
+        progress_win.protocol("WM_DELETE_WINDOW", close_progress)
 
         model_name = DEFAULT_OPENAI_MODEL or "gpt-5"
 
