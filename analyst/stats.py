@@ -1,0 +1,178 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+# ------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------
+
+def clean_numeric(dfblock):
+    out = dfblock.copy().astype(str)
+    out = out.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+    out = out.applymap(lambda x: x.replace(",", "") if isinstance(x, str) else x)
+    out = out.replace({"": "0", " ": "0"})
+    return out.apply(pd.to_numeric, errors="coerce").fillna(0)
+
+
+def compute_adjusted_values(ticker, df):
+    df = df.copy()
+    date_cols = [c for c in df.columns if c[0].isdigit()]
+
+    # --- Extract Stock/Prices divisor rows ---
+    stock_rows = df[(df["TYPE"] == "Stock") & (df["CATEGORY"] == "Prices")].copy()
+    stock_rows[date_cols] = clean_numeric(stock_rows[date_cols])
+    divisors = stock_rows[date_cols].astype(float)
+
+    # Use SUBCATEGORY for labeling
+    subcat_labels = stock_rows["SUBCATEGORY"].astype(str).tolist()
+
+    # --- Clean numeric for financial, income, shares + multipliers ---
+    allowed = ["Income", "Financial", "Shares"]
+    mult_names = [
+        "Financial Multiplier", "Income Multiplier",
+        "Shares Multiplier", "Stock Multiplier"
+    ]
+
+    df_clean = df.copy()
+    for c in date_cols:
+        mask = (
+            (df_clean["TYPE"].isin(allowed)) |
+            (df_clean["CATEGORY"].isin(mult_names))
+        ) & (df_clean["NOTE"] != "excluded")
+
+        df_clean.loc[mask, c] = clean_numeric(df_clean.loc[mask, [c]])[c]
+
+    # --- Extract multipliers ---
+    fin_mult    = df_clean[df_clean["CATEGORY"]=="Financial Multiplier"][date_cols].iloc[0].astype(float)
+    inc_mult    = df_clean[df_clean["CATEGORY"]=="Income Multiplier"][date_cols].iloc[0].astype(float)
+    shares_mult = df_clean[df_clean["CATEGORY"]=="Shares Multiplier"][date_cols].iloc[0].astype(float)
+    stock_mult  = df_clean[df_clean["CATEGORY"]=="Stock Multiplier"][date_cols].iloc[0].astype(float)
+    share_count = df_clean[df_clean["NOTE"]=="share_count"][date_cols].iloc[0].astype(float)
+
+    # --- Filter usable rows ---
+    df2 = df_clean[
+        (~df_clean["CATEGORY"].isin(mult_names)) &
+        (df_clean["NOTE"]!="share_count") &
+        (df_clean["NOTE"]!="excluded")
+    ].copy()
+
+    df2.loc[df2["NOTE"]=="negated", date_cols] *= -1
+
+    # --- Compute adjusted base values ---
+    denom = (share_count * shares_mult * stock_mult).replace(0, float("nan"))
+    final_df = pd.DataFrame(columns=date_cols)
+
+    for idx, row in df2.iterrows():
+        mult = fin_mult if row["TYPE"] == "Financial" else inc_mult
+        final_df.loc[idx] = (row[date_cols].astype(float) * mult) / denom
+
+    # --- Build grouped values for Financial or Income ---
+    def build_group(type_name):
+        sub_idx = df2[df2["TYPE"] == type_name].index
+        grouped = []
+
+        # 7 divisors → 7 groups
+        for _, divisor_row in divisors.iterrows():
+            divided = final_df.loc[sub_idx].divide(
+                divisor_row.replace(0, float("nan")),
+                axis=1
+            )
+            sums = divided.sum(skipna=True)
+            grouped.append(sums.values)
+
+        return grouped
+
+    return {
+        "ticker": ticker,
+        "subcats": subcat_labels,
+        "financial": build_group("Financial"),
+        "income":    build_group("Income")
+    }
+
+
+def get_release_dates(df):
+    date_cols = [c for c in df.columns if c[0].isdigit()]
+    release = df[df["CATEGORY"] == "ReleaseDate"].iloc[0]
+    return [str(release[c]) for c in date_cols[:7]]
+
+
+# ------------------------------------------------------------
+# Interlaced Ticker-Colored Boxplots
+# ------------------------------------------------------------
+
+def render_interlaced_boxplots(
+    ticker1, groups1, ticker2, groups2, releasedate_labels
+):
+    """
+    7 groups per ticker → 14 interlaced boxplots
+    """
+
+    inter_groups = []
+    inter_colors = []
+    inter_labels = []
+
+    for i in range(7):
+        # XRO (ticker1)
+        inter_groups.append(groups1[i])
+        inter_colors.append(plt.cm.tab10(0))
+        inter_labels.append(releasedate_labels[i])
+
+        # SEK (ticker2)
+        inter_groups.append(groups2[i])
+        inter_colors.append(plt.cm.tab10(1))
+        inter_labels.append(releasedate_labels[i])
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+    bp = ax.boxplot(inter_groups, labels=inter_labels, patch_artist=True)
+
+    for patch, color in zip(bp['boxes'], inter_colors):
+        patch.set_facecolor(color)
+
+    plt.xticks(rotation=45, ha='right')
+    plt.title(f"Interlaced Boxplots — {ticker1.upper()} vs {ticker2.upper()}")
+    plt.tight_layout()
+
+    return fig
+
+
+# ------------------------------------------------------------
+# Equivalent of: int main()
+# ------------------------------------------------------------
+
+def main():
+    print("Loading data...")
+
+    # Example - both tickers point to the same CSV (demo)
+    df_xro = pd.read_csv("/mnt/data/Combined.csv")
+    df_sek = pd.read_csv("/mnt/data/Combined.csv")
+
+    print("Computing adjusted values...")
+    r_xro = compute_adjusted_values("xro", df_xro)
+    r_sek = compute_adjusted_values("sek", df_sek)
+
+    print("Extracting ReleaseDate labels...")
+    release_labels = get_release_dates(df_xro)
+
+    print("Rendering Financial plot...")
+    fig_fin = render_interlaced_boxplots(
+        "xro", r_xro["financial"],
+        "sek", r_sek["financial"],
+        release_labels
+    )
+    fig_fin.show()
+
+    print("Rendering Income plot...")
+    fig_inc = render_interlaced_boxplots(
+        "xro", r_xro["income"],
+        "sek", r_sek["income"],
+        release_labels
+    )
+    fig_inc.show()
+
+    print("Done.")
+
+
+# Python entry point
+if __name__ == "__main__":
+    main()
