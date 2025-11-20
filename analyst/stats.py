@@ -4,6 +4,7 @@ from typing import Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.patches import Patch
 
 from analyst.data import Company
 
@@ -14,8 +15,8 @@ from analyst.data import Company
 
 def clean_numeric(dfblock):
     out = dfblock.copy().astype(str)
-    out = out.applymap(lambda x: x.strip() if isinstance(x, str) else x)
-    out = out.applymap(lambda x: x.replace(",", "") if isinstance(x, str) else x)
+    out = out.map(lambda x: x.strip() if isinstance(x, str) else x)
+    out = out.map(lambda x: x.replace(",", "") if isinstance(x, str) else x)
     out = out.replace({"": "0", " ": "0"})
     return out.apply(pd.to_numeric, errors="coerce").fillna(0)
 
@@ -134,6 +135,13 @@ def render_interlaced_boxplots(
     for patch, color in zip(bp['boxes'], inter_colors):
         patch.set_facecolor(color)
 
+    ax.legend(
+        handles=[
+            Patch(color=plt.cm.tab10(0), label=ticker1.upper()),
+            Patch(color=plt.cm.tab10(1), label=ticker2.upper()),
+        ]
+    )
+
     plt.xticks(rotation=45, ha='right')
     plt.title(f"Interlaced Boxplots — {ticker1.upper()} vs {ticker2.upper()}")
     plt.tight_layout()
@@ -157,7 +165,20 @@ def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
 
     company_a, company_b = companies[0], companies[1]
 
-    release_labels = get_release_dates(company_a.combined)
+    release_dates = sorted(
+        set(
+            get_release_dates(company_a.combined)
+            + get_release_dates(company_b.combined)
+        ),
+        key=pd.to_datetime,
+    )
+    if len(release_dates) < 7:
+        release_dates = sorted(
+            get_release_dates(company_a.combined)
+            + get_release_dates(company_b.combined),
+            key=pd.to_datetime,
+        )
+    release_labels = release_dates[:7]
     adjusted_a = compute_adjusted_values(company_a.ticker, company_a.combined)
     adjusted_b = compute_adjusted_values(company_b.ticker, company_b.combined)
 
