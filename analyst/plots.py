@@ -132,7 +132,7 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
     for col in num_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     neg_idx = df["NOTE"].str.lower() == "negated"
-    df.loc[neg_idx, num_cols] = df.loc[neg_idx, num_cols].applymap(
+    df.loc[neg_idx, num_cols] = df.loc[neg_idx, num_cols].map(
         lambda x: -1.0 * x if pd.notna(x) else x
     )
 
