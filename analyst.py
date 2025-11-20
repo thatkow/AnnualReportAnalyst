@@ -5,8 +5,17 @@ from typing import Dict
 
 import pandas as pd
 
-from constants import COMBINED_BASE_COLUMNS
 from analyst_stackedvisuals import render_stacked_annual_report
+
+# Base, non-date columns present in the combined dataset
+COMBINED_BASE_COLUMNS = [
+    "TYPE",
+    "CATEGORY",
+    "SUBCATEGORY",
+    "ITEM",
+    "NOTE",
+    "Key4Coloring",
+]
 
 
 def _extract_multiplier(row_df: pd.DataFrame, num_cols: list[str]) -> Dict[str, float]:
