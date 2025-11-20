@@ -8,6 +8,7 @@ import pandas as pd
 from analyst.data import Company
 from analyst.stats import FinancialBoxplots, financials_boxplots
 from .stackedvisuals import render_stacked_annual_report
+from . import yahoo
 
 # Base, non-date columns present in the combined dataset
 COMBINED_BASE_COLUMNS = [
@@ -189,6 +190,22 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
             else:
                 entries.append(f"{label}: {1.0 / inv:.3f}")
         factor_tooltip[financial_date] = entries
+
+    # Append today's stock price to the latest financial period tooltip if available
+    latest_price = None
+    try:
+        prices = yahoo.get_stock_prices(ticker, years=1)
+        if not prices.empty:
+            latest_val = pd.to_numeric(prices["Price"].iloc[-1], errors="coerce")
+            if isinstance(latest_val, pd.Series):
+                latest_val = latest_val.iloc[0]
+            if pd.notna(latest_val):
+                latest_price = float(latest_val)
+    except Exception as exc:  # pragma: no cover - network dependent
+        print(f"⚠️ Failed to fetch today's price for {ticker}: {exc}")
+
+    if latest_price is not None and year_cols:
+        factor_tooltip.setdefault(year_cols[-1], []).append(f"Today: {latest_price:.3f}")
 
     df["Ticker"] = ticker
 
