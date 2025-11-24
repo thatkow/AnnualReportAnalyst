@@ -15,6 +15,7 @@ def render_stacked_annual_report(
     share_counts: dict | None = None,
     pdf_sources: dict | None = None,
     out_path: str = "stacked_annual_report.html",
+    include_goodwill: bool = True,
 ):
     """
     Generates an interactive two-tab HTML report:
@@ -59,6 +60,7 @@ def render_stacked_annual_report(
             "CATEGORY": r.get("CATEGORY"),
             "SUBCATEGORY": r.get("SUBCATEGORY"),
             "ITEM": r.get("ITEM"),
+            "NOTE": r.get("NOTE"),
             "Key4Coloring": r.get("Key4Coloring"),
         }
         for y in year_cols:
@@ -114,6 +116,9 @@ body {{ font-family: sans-serif; margin: 40px; }}
     <label style="margin-left:20px;">
       <input type="checkbox" id="perShareCheckbox" checked /> Per Share
     </label>
+    <label style="margin-left:20px;">
+      <input type="checkbox" id="goodwillCheckbox" /> Include goodwill
+    </label>
     <div id="yearToggleContainer" style="margin-top:10px;"></div>
     <!-- Per-ticker raw adjustment inputs (one per ticker, applied per TYPE to latest year) -->
     <span
@@ -136,7 +141,10 @@ body {{ font-family: sans-serif; margin: 40px; }}
 const years = {json.dumps(year_cols)};
 const tickers = {json.dumps(tickers)};
 const types = {json.dumps(types)};
-const rawData = {json.dumps(records)};
+const baseRawData = {json.dumps(records)};
+const includeGoodwillDefault = {str(include_goodwill).lower()};
+let includeGoodwill = includeGoodwillDefault;
+let rawData = filterGoodwill(baseRawData, includeGoodwill);
 const shareCounts = {json.dumps(share_counts)};
 const factorLookup = {json.dumps(factor_lookup)};
 const factorTooltip = {json.dumps(factor_tooltip)};
@@ -151,11 +159,25 @@ const yearToggleState = Object.fromEntries(
 let adjustedRawData = rawData;   // rawData + synthetic adjustment rows
 let sliderState = {{}};
 
+function filterGoodwill(data, include) {{
+  if (include) return data.slice();
+  return data.filter(r => (r.NOTE || "").toLowerCase() !== "goodwill");
+}}
+
 
 // Add label for dropdown
 const factorLabel = {json.dumps(factor_label)};
 document.addEventListener("DOMContentLoaded", () => {{
   document.querySelector('label b').textContent = factorLabel + ":";
+  const goodwillCheckbox = document.getElementById("goodwillCheckbox");
+  if (goodwillCheckbox) {{
+    goodwillCheckbox.checked = includeGoodwillDefault;
+    goodwillCheckbox.addEventListener("change", (ev) => {{
+      includeGoodwill = ev.target.checked;
+      rawData = filterGoodwill(baseRawData, includeGoodwill);
+      renderBars();
+    }});
+  }}
   initTickerAdjustments();
   initYearCheckboxes();
   updateAdjustmentLabels();
@@ -188,7 +210,7 @@ const tickerOffsets = Object.fromEntries(tickers.map((t, i) => [t, (i - ((ticker
 
 // --- Canonical colour mapping using mapped fields ---
 const colorMap = {{}};
-rawData.forEach(r => {{
+baseRawData.forEach(r => {{
   const keyCandidate = (r.Key4Coloring && r.Key4Coloring.trim()) ? r.Key4Coloring.trim() : (r.ITEM || "");
   const fallback = (r.ITEM && r.ITEM.trim()) ? r.ITEM.trim() : "";
   const key4 = keyCandidate || fallback;

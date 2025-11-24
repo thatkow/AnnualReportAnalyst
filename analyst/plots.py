@@ -137,8 +137,6 @@ def plot_stacked_financials(
 
     notes_lower = df_all["NOTE"].astype(str).str.lower()
     mask = notes_lower != "excluded"
-    if not include_goodwill:
-        mask &= notes_lower != "goodwill"
 
     df = df_all[mask].copy()
     for col in num_cols:
@@ -247,6 +245,7 @@ def plot_stacked_financials(
         share_counts=share_counts,
         pdf_sources=pdf_map,
         out_path=out_path,
+        include_goodwill=include_goodwill,
     )
 
     return out_path
