@@ -75,6 +75,12 @@ class ScrapeContextMenu:
             value="share_count",
             command=lambda: self._set_row_state("share_count", apply_all=False),
         )
+        self.menu.add_radiobutton(
+            label="Goodwill",
+            variable=self._row_state_var,
+            value="goodwill",
+            command=lambda: self._set_row_state("goodwill", apply_all=False),
+        )
         self.menu.add_separator()
         self.menu.add_command(
             label="As is (all)",
@@ -91,6 +97,10 @@ class ScrapeContextMenu:
         self.menu.add_command(
             label="Share count (all)",
             command=lambda: self._set_row_state("share_count", apply_all=True),
+        )
+        self.menu.add_command(
+            label="Goodwill (all)",
+            command=lambda: self._set_row_state("goodwill", apply_all=True),
         )
         self.menu.add_separator()
         self.menu.add_command(

@@ -67,6 +67,7 @@ class ScrapeTableView:
         self.table.tag_configure("state-negated", background="#FFE6E6")
         self.table.tag_configure("state-excluded", background="#E8E8E8", foreground="#666666")
         self.table.tag_configure("state-share_count", background="#E0F3FF")
+        self.table.tag_configure("state-goodwill", background="#FFF7E6")
 
         for widget in (
             self.panel.container,

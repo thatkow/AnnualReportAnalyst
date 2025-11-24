@@ -48,7 +48,7 @@ def clean_numeric(dfblock):
     return out.apply(pd.to_numeric, errors="coerce").fillna(0)
 
 
-def compute_adjusted_values(ticker, df):
+def compute_adjusted_values(ticker, df, include_goodwill: bool = True):
     df = df.copy()
     date_cols = [c for c in df.columns if c[0].isdigit()]
 
@@ -68,11 +68,15 @@ def compute_adjusted_values(ticker, df):
     ]
 
     df_clean = df.copy()
+    note_lower = df_clean["NOTE"].astype(str).str.lower()
     for c in date_cols:
         mask = (
             (df_clean["TYPE"].isin(allowed)) |
             (df_clean["CATEGORY"].isin(mult_names))
-        ) & (df_clean["NOTE"] != "excluded")
+        ) & (note_lower != "excluded")
+
+        if not include_goodwill:
+            mask = mask & (note_lower != "goodwill")
 
         df_clean.loc[mask, c] = clean_numeric(df_clean.loc[mask, [c]])[c]
 
@@ -81,16 +85,21 @@ def compute_adjusted_values(ticker, df):
     inc_mult    = df_clean[df_clean["CATEGORY"]=="Income Multiplier"][date_cols].iloc[0].astype(float)
     shares_mult = df_clean[df_clean["CATEGORY"]=="Shares Multiplier"][date_cols].iloc[0].astype(float)
     stock_mult  = df_clean[df_clean["CATEGORY"]=="Stock Multiplier"][date_cols].iloc[0].astype(float)
-    share_count = df_clean[df_clean["NOTE"]=="share_count"][date_cols].iloc[0].astype(float)
+    share_count = (
+        df_clean[note_lower == "share_count"][date_cols].iloc[0].astype(float)
+    )
 
     # --- Filter usable rows ---
     df2 = df_clean[
         (~df_clean["CATEGORY"].isin(mult_names)) &
-        (df_clean["NOTE"]!="share_count") &
-        (df_clean["NOTE"]!="excluded")
+        (note_lower!="share_count") &
+        (note_lower!="excluded")
     ].copy()
 
-    df2.loc[df2["NOTE"]=="negated", date_cols] *= -1
+    if not include_goodwill:
+        df2 = df2[note_lower.loc[df2.index] != "goodwill"].copy()
+
+    df2.loc[df2["NOTE"].astype(str).str.lower()=="negated", date_cols] *= -1
 
     # --- Compute adjusted base values ---
     denom = (share_count * shares_mult * stock_mult).replace(0, float("nan"))
@@ -282,7 +291,9 @@ class FinancialBoxplots:
         plt.show(block=block)
 
 
-def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
+def financials_boxplots(
+    companies: Sequence[Company], *, include_goodwill: bool = True
+) -> FinancialBoxplots:
     """Generate interlaced boxplots for all provided companies."""
 
     if not companies:
@@ -292,7 +303,9 @@ def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
 
     # Precompute adjustments and latest prices
     adjusted_list = [
-        compute_adjusted_values(company.ticker, company.combined)
+        compute_adjusted_values(
+            company.ticker, company.combined, include_goodwill=include_goodwill
+        )
         for company in companies
     ]
     latest_prices = [get_latest_stock_price(company.ticker) for company in companies]

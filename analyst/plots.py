@@ -99,7 +99,12 @@ def _pdf_source_map(df_all: pd.DataFrame, num_cols: list[str]) -> Dict[str, str]
     return pdf_map
 
 
-def plot_stacked_financials(company: Company, *, out_path: str | Path | None = None) -> Path:
+def plot_stacked_financials(
+    company: Company,
+    *,
+    out_path: str | Path | None = None,
+    include_goodwill: bool = True,
+) -> Path:
     """Plot stacked visuals for a company's combined dataset."""
 
     combined_df = company.combined
@@ -130,7 +135,12 @@ def plot_stacked_financials(company: Company, *, out_path: str | Path | None = N
 
     df_all["Ticker"] = ticker
 
-    df = df_all[df_all["NOTE"].str.lower() != "excluded"].copy()
+    notes_lower = df_all["NOTE"].astype(str).str.lower()
+    mask = notes_lower != "excluded"
+    if not include_goodwill:
+        mask &= notes_lower != "goodwill"
+
+    df = df_all[mask].copy()
     for col in num_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     neg_idx = df["NOTE"].str.lower() == "negated"

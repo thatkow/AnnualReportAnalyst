@@ -473,10 +473,19 @@ class CombinedUIMixin:
                     company_name, df_all, companies_dir=self.companies_dir
                 )
 
-                plot_stacked_financials(company)
+                plot_stacked_financials(
+                    company, include_goodwill=self.include_goodwill_var.get()
+                )
 
             except Exception as e:
                 messagebox.showerror("Plot Error", f"Failed to plot stacked visuals:\n{e}")
+        self.include_goodwill_var = tk.BooleanVar(value=True)
+        goodwill_toggle = ttk.Checkbutton(
+            controls,
+            text="Include goodwill",
+            variable=self.include_goodwill_var,
+        )
+        goodwill_toggle.pack(side=tk.LEFT)
         self.plot_visuals_button = ttk.Button(
             controls, text="Plot Stacked Visuals", command=_on_plot_stacked_visuals
         )

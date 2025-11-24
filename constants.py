@@ -39,6 +39,7 @@ DEFAULT_NOTE_COLOR_SCHEME: Dict[str, str] = {
     "8": "#CFE2F3",
     "9": "#FFD966",
     "10": "#D9D2E9",
+    "goodwill": "#FFEFD5",  # peach puff
 }
 FALLBACK_NOTE_PALETTE: List[str] = [
     "#FFF2CC", "#E2EFDA", "#FCE4D6", "#E7E6FF", "#DDEBF7",
