@@ -297,6 +297,16 @@ def financials_boxplots(companies: Sequence[Company]) -> FinancialBoxplots:
     ]
     latest_prices = [get_latest_stock_price(company.ticker) for company in companies]
 
+    # Normalise subcats so strings '1' and '1.0' match
+    def normalise(label):
+        try:
+            return str(int(float(label)))   # "1.0" -> 1 -> "1"
+        except:
+            return label
+        
+    for adjusted in adjusted_list:
+        adjusted["subcats"] = [normalise(s) for s in adjusted["subcats"]]
+
     # Determine shared price labels across all companies preserving first-company order
     first_labels = adjusted_list[0]["subcats"]
     shared_price_labels = [
