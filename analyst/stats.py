@@ -235,6 +235,84 @@ def render_interlaced_boxplots(
     return fig
 
 
+def _interleave_groups(
+    ticker_groups: Sequence[tuple[str, Sequence[Sequence[float]], str]],
+    price_labels: Sequence[str],
+):
+    inter_groups: list[Sequence[float]] = []
+    inter_colors: list[str] = []
+    inter_labels: list[str] = []
+
+    for i in range(len(price_labels)):
+        for _, groups, color in ticker_groups:
+            inter_groups.append(groups[i])
+            inter_colors.append(color)
+            inter_labels.append(price_labels[i])
+
+    return inter_groups, inter_colors, inter_labels
+
+
+def render_interlaced_violin(
+    ticker_groups_include: Sequence[tuple[str, Sequence[Sequence[float]], str]],
+    ticker_groups_exclude: Sequence[tuple[str, Sequence[Sequence[float]], str]],
+    price_labels,
+    *,
+    xlabel: str,
+    hlines: list[tuple[float, str, str]] | None = None,
+):
+    """Render side-by-side interlaced violins for intangible on/off views.
+
+    The left half shows distributions with ``include_intangibles=True`` and the
+    right half shows ``include_intangibles=False`` using the same price label
+    ordering for easy comparison.
+    """
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 6), sharey=True)
+
+    def plot_half(ax, ticker_groups, title: str):
+        inter_groups, inter_colors, inter_labels = _interleave_groups(
+            ticker_groups, price_labels
+        )
+
+        positions = np.arange(1, len(inter_groups) + 1)
+        vp = ax.violinplot(
+            inter_groups,
+            positions=positions,
+            showmeans=True,
+            showextrema=False,
+            widths=0.85,
+        )
+
+        for body, color in zip(vp["bodies"], inter_colors):
+            body.set_facecolor(color)
+            body.set_edgecolor("black")
+            body.set_alpha(0.6)
+
+        if hlines:
+            for value, color, label in hlines:
+                if value is None or np.isnan(value):
+                    continue
+                ax.axhline(value, color=color, linestyle="--", linewidth=1.5, label=label)
+
+        ax.set_xticks(positions)
+        ax.set_xticklabels(inter_labels, rotation=45, ha="right")
+        ax.set_title(title)
+        ax.set_xlabel(xlabel)
+
+    plot_half(axes[0], ticker_groups_include, "Include intangibles")
+    plot_half(axes[1], ticker_groups_exclude, "Exclude intangibles")
+
+    legend_handles = [
+        Patch(color=color, label=ticker.upper())
+        for ticker, _, color in ticker_groups_include
+    ]
+    fig.legend(handles=legend_handles, loc="upper center", ncol=len(legend_handles))
+    fig.suptitle("Interlaced Violins — include_intangibles comparison")
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+
+    return fig
+
+
 def compute_normalized_latest(
     groups: Sequence[Sequence[float]],
     divisors: Sequence[Sequence[float]],
