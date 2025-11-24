@@ -186,8 +186,6 @@ class ScrapeTableView:
                     raw_values[0] if column_count > 0 else "",
                     raw_values[1] if column_count > 1 else "",
                     raw_values[2] if column_count > 2 else "",
-                    raw_values[3] if column_count > 3 else "",
-                    raw_values[4] if column_count > 4 else "",
                 )
                 self.model.register_row_key(item_id, key)
                 self.app.register_scrape_row(self.panel, item_id, key)

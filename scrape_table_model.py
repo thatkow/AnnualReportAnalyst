@@ -35,7 +35,7 @@ class ScrapeTableModel:
         self._updating_multiplier = False
 
         self.row_states: Dict[str, str] = {}
-        self.row_keys: Dict[str, Tuple[str, str, str, str, str]] = {}
+        self.row_keys: Dict[str, Tuple[str, str, str]] = {}
 
     # ------------------------------------------------------------------
     # CSV helpers
@@ -142,7 +142,7 @@ class ScrapeTableModel:
         self.row_states.clear()
         self.row_keys.clear()
 
-    def register_row_key(self, item_id: str, key: Tuple[str, str, str, str, str]) -> None:
+    def register_row_key(self, item_id: str, key: Tuple[str, str, str]) -> None:
         self.row_keys[item_id] = key
 
     def unregister_row(self, item_id: str) -> None:
