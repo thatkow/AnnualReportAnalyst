@@ -62,6 +62,7 @@ Each row must be given a NOTE value as follows:
 | Context | NOTE |
 |----------|------|
 | ASSETS section | asis |
+| Any line whose item name includes the word "GOODWILL" | goodwill |
 | LIABILITIES section | negated |
 | SHAREHOLDERS’ EQUITY — “Noncontrolling interests” | negated |
 | SHAREHOLDERS’ EQUITY — all other items | excluded |
@@ -70,6 +71,11 @@ Each row must be given a NOTE value as follows:
 ✅ **All rows must remain in the CSV.**
 Totals, subtotals, and group sums (e.g., “TOTAL ASSETS”) are **never dropped**;
 they are kept with NOTE = "excluded".
+
+Goodwill detection rules:
+- Assign NOTE = goodwill for any row whose ITEM text contains "goodwill" (case-insensitive),
+  regardless of section placement.
+- Do **not** reclassify totals or subtotals as goodwill; they stay "excluded".
 
 ═══════════════════════════════════════════════════════════════════════════════
 6. OUTPUT FORMAT
