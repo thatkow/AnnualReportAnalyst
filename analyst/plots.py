@@ -103,7 +103,7 @@ def plot_stacked_financials(
     company: Company,
     *,
     out_path: str | Path | None = None,
-    include_goodwill: bool = True,
+    include_intangibles: bool = True,
 ) -> Path:
     """Plot stacked visuals for a company's combined dataset."""
 
@@ -245,7 +245,7 @@ def plot_stacked_financials(
         share_counts=share_counts,
         pdf_sources=pdf_map,
         out_path=out_path,
-        include_goodwill=include_goodwill,
+        include_intangibles=include_intangibles,
     )
 
     return out_path

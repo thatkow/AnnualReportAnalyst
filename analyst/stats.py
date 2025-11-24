@@ -48,7 +48,7 @@ def clean_numeric(dfblock):
     return out.apply(pd.to_numeric, errors="coerce").fillna(0)
 
 
-def compute_adjusted_values(ticker, df, include_goodwill: bool = True):
+def compute_adjusted_values(ticker, df, include_intangibles: bool = True):
     df = df.copy()
     date_cols = [c for c in df.columns if c[0].isdigit()]
 
@@ -75,8 +75,8 @@ def compute_adjusted_values(ticker, df, include_goodwill: bool = True):
             (df_clean["CATEGORY"].isin(mult_names))
         ) & (note_lower != "excluded")
 
-        if not include_goodwill:
-            mask = mask & (note_lower != "goodwill")
+        if not include_intangibles:
+            mask = mask & (note_lower != "intangibles")
 
         df_clean.loc[mask, c] = clean_numeric(df_clean.loc[mask, [c]])[c]
 
@@ -96,8 +96,8 @@ def compute_adjusted_values(ticker, df, include_goodwill: bool = True):
         (note_lower!="excluded")
     ].copy()
 
-    if not include_goodwill:
-        df2 = df2[note_lower.loc[df2.index] != "goodwill"].copy()
+    if not include_intangibles:
+        df2 = df2[note_lower.loc[df2.index] != "intangibles"].copy()
 
     df2.loc[df2["NOTE"].astype(str).str.lower()=="negated", date_cols] *= -1
 
@@ -292,7 +292,7 @@ class FinancialBoxplots:
 
 
 def financials_boxplots(
-    companies: Sequence[Company], *, include_goodwill: bool = True
+    companies: Sequence[Company], *, include_intangibles: bool = True
 ) -> FinancialBoxplots:
     """Generate interlaced boxplots for all provided companies."""
 
@@ -304,7 +304,7 @@ def financials_boxplots(
     # Precompute adjustments and latest prices
     adjusted_list = [
         compute_adjusted_values(
-            company.ticker, company.combined, include_goodwill=include_goodwill
+            company.ticker, company.combined, include_intangibles=include_intangibles
         )
         for company in companies
     ]

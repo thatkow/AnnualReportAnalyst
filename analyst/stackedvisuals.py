@@ -15,7 +15,7 @@ def render_stacked_annual_report(
     share_counts: dict | None = None,
     pdf_sources: dict | None = None,
     out_path: str = "stacked_annual_report.html",
-    include_goodwill: bool = True,
+    include_intangibles: bool = True,
 ):
     """
     Generates an interactive two-tab HTML report:
@@ -117,7 +117,7 @@ body {{ font-family: sans-serif; margin: 40px; }}
       <input type="checkbox" id="perShareCheckbox" checked /> Per Share
     </label>
     <label style="margin-left:20px;">
-      <input type="checkbox" id="goodwillCheckbox" /> Include goodwill
+      <input type="checkbox" id="intangiblesCheckbox" /> Include intangibles
     </label>
     <div id="yearToggleContainer" style="margin-top:10px;"></div>
     <!-- Per-ticker raw adjustment inputs (one per ticker, applied per TYPE to latest year) -->
@@ -142,9 +142,9 @@ const years = {json.dumps(year_cols)};
 const tickers = {json.dumps(tickers)};
 const types = {json.dumps(types)};
 const baseRawData = {json.dumps(records)};
-const includeGoodwillDefault = {str(include_goodwill).lower()};
-let includeGoodwill = includeGoodwillDefault;
-let rawData = filterGoodwill(baseRawData, includeGoodwill);
+const includeIntangiblesDefault = {str(include_intangibles).lower()};
+let includeIntangibles = includeIntangiblesDefault;
+let rawData = filterIntangibles(baseRawData, includeIntangibles);
 const shareCounts = {json.dumps(share_counts)};
 const factorLookup = {json.dumps(factor_lookup)};
 const factorTooltip = {json.dumps(factor_tooltip)};
@@ -159,9 +159,9 @@ const yearToggleState = Object.fromEntries(
 let adjustedRawData = rawData;   // rawData + synthetic adjustment rows
 let sliderState = {{}};
 
-function filterGoodwill(data, include) {{
+function filterIntangibles(data, include) {{
   if (include) return data.slice();
-  return data.filter(r => (r.NOTE || "").toLowerCase() !== "goodwill");
+  return data.filter(r => (r.NOTE || "").toLowerCase() !== "intangibles");
 }}
 
 
@@ -169,12 +169,12 @@ function filterGoodwill(data, include) {{
 const factorLabel = {json.dumps(factor_label)};
 document.addEventListener("DOMContentLoaded", () => {{
   document.querySelector('label b').textContent = factorLabel + ":";
-  const goodwillCheckbox = document.getElementById("goodwillCheckbox");
-  if (goodwillCheckbox) {{
-    goodwillCheckbox.checked = includeGoodwillDefault;
-    goodwillCheckbox.addEventListener("change", (ev) => {{
-      includeGoodwill = ev.target.checked;
-      rawData = filterGoodwill(baseRawData, includeGoodwill);
+  const intangiblesCheckbox = document.getElementById("intangiblesCheckbox");
+  if (intangiblesCheckbox) {{
+    intangiblesCheckbox.checked = includeIntangiblesDefault;
+    intangiblesCheckbox.addEventListener("change", (ev) => {{
+      includeIntangibles = ev.target.checked;
+      rawData = filterIntangibles(baseRawData, includeIntangibles);
       renderBars();
     }});
   }}
