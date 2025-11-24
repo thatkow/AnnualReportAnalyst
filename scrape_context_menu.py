@@ -168,16 +168,20 @@ class ScrapeContextMenu:
         if not item_id:
             return
 
-        # NEW LOGIC:
-        # When apply_all=True, apply to ALL SELECTED rows, not just the context row.
         selected = list(self.view.table.selection())
-        if apply_all:
-            target_rows = selected if selected else [item_id]
-        else:
-            # Only apply to selected rows; if none selected, use context row.
-            target_rows = selected if selected else [item_id]
+        target_rows = selected if selected else [item_id]
 
         normalized = self.view.normalize_state_label(state_label)
+
+        if apply_all:
+            for rid in target_rows:
+                key = self.model.row_keys.get(rid)
+                if key:
+                    self.app.apply_row_state_to_all(key, normalized)
+            self.view.table.selection_remove(self.view.table.selection())
+            self._context_item = None
+            return
+
         note_index = self.view._note_column_index()
         if note_index is not None:
             for rid in target_rows:
@@ -191,43 +195,6 @@ class ScrapeContextMenu:
 
         for rid in target_rows:
             self.view.update_row_state(rid, normalized)
-
-        if not apply_all:
-            self.view.panel.save_table_to_csv()
-            return
-
-        key = self.model.row_keys.get(item_id)
-        if apply_all and key and not getattr(self, "_is_propagating", False):
-            self._is_propagating = True
-            try:
-                if normalized is not None:
-                    self.app.scrape_row_state_by_key[key] = normalized
-                else:
-                    self.app.scrape_row_state_by_key.pop(key, None)
-
-                note_index = self.view._note_column_index()
-                if note_index is not None:
-                    for panel in self.app.scrape_panels.values():
-                        if panel is self.view.panel:
-                            continue
-                        view = panel.view
-                        for other_id, other_key in panel.model.row_keys.items():
-                            if other_key == key:
-                                vals = list(view.table.item(other_id, "values"))
-                                if len(vals) <= note_index:
-                                    vals.extend([""] * (note_index + 1 - len(vals)))
-                                vals[note_index] = state_label
-                                view.table.item(other_id, values=vals)
-                                view._apply_note_color_to_item(other_id)
-                                view.table.update_idletasks()
-                                break
-                        panel.save_table_to_csv()
-            finally:
-                self._is_propagating = False
-
-        elif not apply_all:
-            self.view.update_row_state(item_id, normalized)
-            self.view.table.update_idletasks()
 
         self.view.panel.save_table_to_csv()
         self.view.table.selection_remove(self.view.table.selection())
