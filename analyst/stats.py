@@ -292,7 +292,9 @@ def render_interlaced_boxplots(
         ax.set_ylim(y_min, y_max + y_pad)
         y_text = y_max + y_pad - 0.02 * (y_max - y_min)
 
-        for pos, data, (ticker, variant) in zip(positions, inter_groups, box_meta):
+        for pos, data, (ticker, variant), color in zip(
+            positions, inter_groups, box_meta, inter_colors
+        ):
             hline_value = hline_lookup.get(ticker, {}).get(variant)
             data_arr = np.asarray(data, dtype=float)
             mean_val = np.nanmean(data_arr)
@@ -315,10 +317,11 @@ def render_interlaced_boxplots(
             ax.text(
                 pos,
                 y_text,
-                f"{mean_pct} / {median_pct}",
+                f"{mean_pct}\n{median_pct}",
                 ha="center",
                 va="top",
                 fontsize=8,
+                color=color,
             )
 
     legend_handles = [
