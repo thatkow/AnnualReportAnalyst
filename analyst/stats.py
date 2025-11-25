@@ -243,7 +243,11 @@ def render_interlaced_boxplots(
 
     fig, ax = plt.subplots(figsize=(16, 6))
     bp = ax.boxplot(
-        inter_groups, labels=inter_labels, patch_artist=True, positions=positions
+        inter_groups,
+        labels=inter_labels,
+        patch_artist=True,
+        positions=positions,
+        widths=0.25,
     )
 
     for patch, color in zip(bp["boxes"], inter_colors):
