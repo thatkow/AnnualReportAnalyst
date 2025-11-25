@@ -276,6 +276,11 @@ def render_interlaced_boxplots(
     for patch, color in zip(bp["boxes"], inter_colors):
         patch.set_facecolor(color)
 
+    for median in bp.get("medians", []):
+        median.set_color("black")
+    for mean in bp.get("means", []):
+        mean.set_color("black")
+
     legend_handles = [
         Patch(color=color, label=f"{ticker.upper()} (incl. intangibles)")
         for ticker, _, color in ticker_groups
