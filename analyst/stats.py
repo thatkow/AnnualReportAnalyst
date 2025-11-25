@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.patches import Patch
+from matplotlib.colors import to_rgba
 
 from analyst.data import Company
 from . import yahoo
@@ -181,38 +182,84 @@ def get_latest_stock_price(ticker: str) -> float | None:
 # Interlaced Ticker-Colored Boxplots
 # ------------------------------------------------------------
 
+def _fade_color(color: str | tuple, *, alpha: float = 0.35) -> tuple[float, float, float, float]:
+    base = to_rgba(color)
+    return (base[0], base[1], base[2], alpha)
+
+
 def render_interlaced_boxplots(
     ticker_groups: Sequence[tuple[str, Sequence[Sequence[float]], str]],
     price_labels,
     *,
     xlabel: str,
     hlines: list[tuple[float, str, str]] | None = None,
+    exclude_ticker_groups: Sequence[tuple[str, Sequence[Sequence[float]], str]] | None = None,
 ):
     """Render interlaced boxplots for ``n`` tickers.
 
     ``ticker_groups`` contains tuples of ``(ticker, groups, color)`` where
-    ``groups`` is already filtered to ``price_labels`` order.
+    ``groups`` is already filtered to ``price_labels`` order. When
+    ``exclude_ticker_groups`` is provided, each ticker's include/exclude groups
+    are plotted side-by-side with a faded color for the exclude variant.
     """
 
     inter_groups: list[Sequence[float]] = []
-    inter_colors: list[str] = []
+    inter_colors: list[str | tuple[float, float, float, float]] = []
     inter_labels: list[str] = []
+    positions: list[float] = []
 
-    for i in range(len(price_labels)):
-        for _, groups, color in ticker_groups:
-            inter_groups.append(groups[i])
-            inter_colors.append(color)
-            inter_labels.append(price_labels[i])
+    if exclude_ticker_groups:
+        pair_index = 0
+        for price_idx, label in enumerate(price_labels):
+            for (ticker_inc, groups_inc, color_inc), (
+                ticker_exc,
+                groups_exc,
+                _color_exc,
+            ) in zip(ticker_groups, exclude_ticker_groups):
+                if ticker_inc != ticker_exc:
+                    raise ValueError(
+                        "Ticker ordering must match between include/exclude groups"
+                    )
+                if price_idx >= len(groups_inc) or price_idx >= len(groups_exc):
+                    raise ValueError("Price labels must align with all group entries")
+
+                center = pair_index + 1
+                inc_pos = center - 0.18
+                exc_pos = center + 0.18
+
+                inter_groups.extend([groups_inc[price_idx], groups_exc[price_idx]])
+                inter_colors.extend([color_inc, _fade_color(color_inc)])
+                inter_labels.extend([label, label])
+                positions.extend([inc_pos, exc_pos])
+
+                pair_index += 1
+    else:
+        for i in range(len(price_labels)):
+            for _, groups, color in ticker_groups:
+                inter_groups.append(groups[i])
+                inter_colors.append(color)
+                inter_labels.append(price_labels[i])
+                positions.append(len(positions) + 1)
 
     fig, ax = plt.subplots(figsize=(16, 6))
-    bp = ax.boxplot(inter_groups, labels=inter_labels, patch_artist=True)
+    bp = ax.boxplot(
+        inter_groups, labels=inter_labels, patch_artist=True, positions=positions
+    )
 
     for patch, color in zip(bp["boxes"], inter_colors):
         patch.set_facecolor(color)
 
     legend_handles = [
-        Patch(color=color, label=ticker.upper()) for ticker, _, color in ticker_groups
+        Patch(color=color, label=f"{ticker.upper()} (incl. intangibles)")
+        for ticker, _, color in ticker_groups
     ]
+
+    if exclude_ticker_groups:
+        legend_handles.extend(
+            Patch(color=_fade_color(color), label=f"{ticker.upper()} (ex intangibles)")
+            for ticker, _, color in exclude_ticker_groups
+        )
+
     ax.legend(handles=legend_handles)
 
     if hlines:
@@ -423,9 +470,13 @@ class FinancialViolins:
 
 
 def financials_boxplots(
-    companies: Sequence[Company], *, include_intangibles: bool = True
+    companies: Sequence[Company], *, include_intangibles: bool = True, shared_price_labels: Sequence[str | int] | None = None
 ) -> FinancialBoxplots:
-    """Generate interlaced boxplots for all provided companies."""
+    """Generate interlaced boxplots for all provided companies.
+
+    When ``include_intangibles`` is ``True`` both include/exclude intangibles
+    series are plotted side-by-side with a faded style for the exclude variant.
+    """
 
     if not companies:
         raise ValueError("At least one company is required to build boxplots.")
@@ -433,10 +484,12 @@ def financials_boxplots(
     ensure_interactive_backend()
 
     # Precompute adjustments and latest prices
-    adjusted_list = [
-        compute_adjusted_values(
-            company.ticker, company.combined, include_intangibles=include_intangibles
-        )
+    adjusted_include = [
+        compute_adjusted_values(company.ticker, company.combined, include_intangibles=True)
+        for company in companies
+    ]
+    adjusted_exclude = [
+        compute_adjusted_values(company.ticker, company.combined, include_intangibles=False)
         for company in companies
     ]
     latest_prices = [get_latest_stock_price(company.ticker) for company in companies]
@@ -445,22 +498,44 @@ def financials_boxplots(
     def normalise(label):
         try:
             return str(int(float(label)))   # "1.0" -> 1 -> "1"
-        except:
-            return label
-        
-    for adjusted in adjusted_list:
+        except Exception:
+            return str(label)
+
+    for adjusted in (*adjusted_include, *adjusted_exclude):
         adjusted["subcats"] = [normalise(s) for s in adjusted["subcats"]]
 
-    # Determine shared price labels across all companies preserving first-company order
-    first_labels = adjusted_list[0]["subcats"]
-    shared_price_labels = [
-        label
-        for label in first_labels
-        if all(label in adjusted["subcats"] for adjusted in adjusted_list[1:])
-    ]
+    def _shared_labels(adjusted_list):
+        first_labels = adjusted_list[0]["subcats"]
+        return [
+            label
+            for label in first_labels
+            if all(label in adjusted["subcats"] for adjusted in adjusted_list[1:])
+        ]
 
-    if not shared_price_labels:
+    shared_inc = _shared_labels(adjusted_include)
+    shared_exc = _shared_labels(adjusted_exclude)
+
+    shared_available = (
+        [label for label in shared_inc if label in shared_exc]
+        if include_intangibles
+        else shared_exc
+    )
+    if not shared_available:
         raise ValueError("No shared stock price labels found between companies")
+
+    requested_labels = shared_price_labels
+    if requested_labels is None:
+        requested_labels = [-30, 0, 30]
+
+    requested_labels = [normalise(label) for label in requested_labels]
+
+    missing = [label for label in requested_labels if label not in shared_available]
+    if missing:
+        raise ValueError(
+            f"Requested shared_price_labels not found in data: {', '.join(map(str, missing))}"
+        )
+
+    shared_price_labels = requested_labels
 
     def filter_groups(groups, available_labels, target_labels):
         index_lookup = {label: i for i, label in enumerate(available_labels)}
@@ -470,30 +545,54 @@ def financials_boxplots(
 
     fin_ticker_groups = []
     inc_ticker_groups = []
+    fin_ticker_groups_exclude = []
+    inc_ticker_groups_exclude = []
     fin_hlines = []
     inc_hlines = []
 
-    for company, adjusted, price, color in zip(
-        companies, adjusted_list, latest_prices, colors
+    for company, adj_inc, adj_exc, price, color in zip(
+        companies, adjusted_include, adjusted_exclude, latest_prices, colors
     ):
-        fin_groups = filter_groups(
-            adjusted["financial"], adjusted["subcats"], shared_price_labels
+        fin_groups_inc = filter_groups(
+            adj_inc["financial"], adj_inc["subcats"], shared_price_labels
         )
-        inc_groups = filter_groups(
-            adjusted["income"], adjusted["subcats"], shared_price_labels
+        inc_groups_inc = filter_groups(
+            adj_inc["income"], adj_inc["subcats"], shared_price_labels
         )
-        shared_divisors = filter_groups(
-            adjusted["divisors"], adjusted["subcats"], shared_price_labels
+        shared_divisors_inc = filter_groups(
+            adj_inc["divisors"], adj_inc["subcats"], shared_price_labels
         )
 
-        fin_ticker_groups.append((company.ticker, fin_groups, color))
-        inc_ticker_groups.append((company.ticker, inc_groups, color))
+        fin_groups_exc = filter_groups(
+            adj_exc["financial"], adj_exc["subcats"], shared_price_labels
+        )
+        inc_groups_exc = filter_groups(
+            adj_exc["income"], adj_exc["subcats"], shared_price_labels
+        )
+        shared_divisors_exc = filter_groups(
+            adj_exc["divisors"], adj_exc["subcats"], shared_price_labels
+        )
+
+        fin_ticker_groups.append((company.ticker, fin_groups_inc, color))
+        inc_ticker_groups.append((company.ticker, inc_groups_inc, color))
+        fin_ticker_groups_exclude.append((company.ticker, fin_groups_exc, color))
+        inc_ticker_groups_exclude.append((company.ticker, inc_groups_exc, color))
+
+        base_fin_groups = fin_groups_inc if include_intangibles else fin_groups_exc
+        base_inc_groups = inc_groups_inc if include_intangibles else inc_groups_exc
+        base_fin_divisors = (
+            shared_divisors_inc if include_intangibles else shared_divisors_exc
+        )
+        base_inc_divisors = (
+            shared_divisors_inc if include_intangibles else shared_divisors_exc
+        )
+        base_dates = adj_inc["dates"] if include_intangibles else adj_exc["dates"]
 
         fin_line = compute_normalized_latest(
-            fin_groups, shared_divisors, adjusted["dates"], price
+            base_fin_groups, base_fin_divisors, base_dates, price
         )
         inc_line = compute_normalized_latest(
-            inc_groups, shared_divisors, adjusted["dates"], price
+            base_inc_groups, base_inc_divisors, base_dates, price
         )
 
         fin_hlines.append(
@@ -508,6 +607,7 @@ def financials_boxplots(
         shared_price_labels,
         xlabel="Balance Sheet",
         hlines=fin_hlines,
+        exclude_ticker_groups=fin_ticker_groups_exclude if include_intangibles else None,
     )
 
     fig_inc = render_interlaced_boxplots(
@@ -515,6 +615,7 @@ def financials_boxplots(
         shared_price_labels,
         xlabel="Income Statement",
         hlines=inc_hlines,
+        exclude_ticker_groups=inc_ticker_groups_exclude if include_intangibles else None,
     )
 
     return FinancialBoxplots(fig_fin=fig_fin, fig_inc=fig_inc)
