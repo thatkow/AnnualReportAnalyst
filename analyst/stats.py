@@ -187,6 +187,18 @@ def _fade_color(color: str | tuple, *, alpha: float = 0.35) -> tuple[float, floa
     return (base[0], base[1], base[2], alpha)
 
 
+def _groups_equal(left: Sequence[float], right: Sequence[float]) -> bool:
+    """Return ``True`` when two numeric sequences match elementwise, including NaNs."""
+
+    left_arr = np.asarray(left, dtype=float)
+    right_arr = np.asarray(right, dtype=float)
+
+    if left_arr.shape != right_arr.shape:
+        return False
+
+    return np.allclose(left_arr, right_arr, equal_nan=True)
+
+
 def render_interlaced_boxplots(
     ticker_groups: Sequence[tuple[str, Sequence[Sequence[float]], str]],
     price_labels,
@@ -208,7 +220,10 @@ def render_interlaced_boxplots(
     inter_labels: list[str] = []
     positions: list[float] = []
 
+    exclude_usage: dict[str, bool] = {}
+
     if exclude_ticker_groups:
+        exclude_usage = {ticker: False for ticker, _, _ in exclude_ticker_groups}
         pair_index = 0
         for price_idx, label in enumerate(price_labels):
             for (ticker_inc, groups_inc, color_inc), (
@@ -224,13 +239,21 @@ def render_interlaced_boxplots(
                     raise ValueError("Price labels must align with all group entries")
 
                 center = pair_index + 1
-                inc_pos = center - 0.18
-                exc_pos = center + 0.18
 
-                inter_groups.extend([groups_inc[price_idx], groups_exc[price_idx]])
-                inter_colors.extend([color_inc, _fade_color(color_inc)])
-                inter_labels.extend([label, label])
-                positions.extend([inc_pos, exc_pos])
+                if _groups_equal(groups_inc[price_idx], groups_exc[price_idx]):
+                    inter_groups.append(groups_inc[price_idx])
+                    inter_colors.append(color_inc)
+                    inter_labels.append(label)
+                    positions.append(center)
+                else:
+                    inc_pos = center - 0.18
+                    exc_pos = center + 0.18
+
+                    inter_groups.extend([groups_inc[price_idx], groups_exc[price_idx]])
+                    inter_colors.extend([color_inc, _fade_color(color_inc)])
+                    inter_labels.extend([label, label])
+                    positions.extend([inc_pos, exc_pos])
+                    exclude_usage[ticker_inc] = True
 
                 pair_index += 1
     else:
@@ -262,6 +285,7 @@ def render_interlaced_boxplots(
         legend_handles.extend(
             Patch(color=_fade_color(color), label=f"{ticker.upper()} (ex intangibles)")
             for ticker, _, color in exclude_ticker_groups
+            if exclude_usage.get(ticker)
         )
 
     ax.legend(handles=legend_handles)
