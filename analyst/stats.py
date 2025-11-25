@@ -187,6 +187,21 @@ def _fade_color(color: str | tuple, *, alpha: float = 0.35) -> tuple[float, floa
     return (base[0], base[1], base[2], alpha)
 
 
+def _darken_color(
+    color: str | tuple, *, factor: float = 0.5, alpha_boost: float = 2.0
+) -> tuple[float, float, float, float]:
+    """Darken a color towards black while optionally boosting opacity."""
+
+    base = to_rgba(color)
+    r, g, b, a = base
+    return (
+        max(0.0, r * factor),
+        max(0.0, g * factor),
+        max(0.0, b * factor),
+        min(1.0, a * alpha_boost),
+    )
+
+
 def _groups_equal(left: Sequence[float], right: Sequence[float]) -> bool:
     """Return ``True`` when two numeric sequences match elementwise, including NaNs."""
 
@@ -329,7 +344,7 @@ def render_interlaced_boxplots(
                 ha="center",
                 va="top",
                 fontsize=8,
-                color=color,
+                color=_darken_color(color),
             )
 
     legend_handles = [
