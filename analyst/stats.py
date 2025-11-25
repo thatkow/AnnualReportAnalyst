@@ -261,58 +261,92 @@ def render_interlaced_violin(
     hlines_include: list[tuple[float, str, str]] | None = None,
     hlines_exclude: list[tuple[float, str, str]] | None = None,
 ):
-    """Render side-by-side interlaced violins for intangible on/off views.
+    """Render split interlaced violins for intangible on/off views in one plot.
 
-    The left half shows distributions with ``include_intangibles=True`` and the
-    right half shows ``include_intangibles=False`` using the same price label
-    ordering for easy comparison. Horizontal reference lines can be specified
+    Each price label appears once with a left-half violin for
+    ``include_intangibles=True`` and a right-half violin for
+    ``include_intangibles=False``. Horizontal reference lines can be specified
     independently for each half.
     """
 
-    fig, axes = plt.subplots(1, 2, figsize=(18, 6), sharey=True)
+    paired_groups: list[tuple[Sequence[float], Sequence[float], str, str]] = []
 
-    def plot_half(
-        ax, ticker_groups, title: str, hlines: list[tuple[float, str, str]] | None
-    ):
-        inter_groups, inter_colors, inter_labels = _interleave_groups(
-            ticker_groups, price_labels
-        )
+    for price_idx, label in enumerate(price_labels):
+        for (ticker_inc, groups_inc, color_inc), (
+            ticker_exc,
+            groups_exc,
+            _color_exc,
+        ) in zip(ticker_groups_include, ticker_groups_exclude):
+            if ticker_inc != ticker_exc:
+                raise ValueError(
+                    "Ticker ordering must match between include/exclude groups"
+                )
 
-        positions = np.arange(1, len(inter_groups) + 1)
+            if price_idx >= len(groups_inc) or price_idx >= len(groups_exc):
+                raise ValueError("Price labels must align with all group entries")
+
+            paired_groups.append((groups_inc[price_idx], groups_exc[price_idx], color_inc, label))
+
+    fig, ax = plt.subplots(figsize=(18, 6))
+    positions = np.arange(1, len(paired_groups) + 1)
+
+    def _half_violin(data, position, color, *, side: str):
         vp = ax.violinplot(
-            inter_groups,
-            positions=positions,
-            showmeans=True,
-            showextrema=False,
-            widths=0.85,
+            [data], positions=[position], showmeans=True, showextrema=False, widths=0.85
         )
 
-        for body, color in zip(vp["bodies"], inter_colors):
+        for body in vp["bodies"]:
+            verts = body.get_paths()[0].vertices
+            if side == "left":
+                verts[:, 0] = position - np.abs(verts[:, 0] - position)
+            else:
+                verts[:, 0] = position + np.abs(verts[:, 0] - position)
             body.set_facecolor(color)
             body.set_edgecolor("black")
             body.set_alpha(0.6)
 
-        if hlines:
-            for value, color, label in hlines:
-                if value is None or np.isnan(value):
-                    continue
-                ax.axhline(value, color=color, linestyle="--", linewidth=1.5, label=label)
+        return vp
 
-        ax.set_xticks(positions)
-        ax.set_xticklabels(inter_labels, rotation=45, ha="right")
-        ax.set_title(title)
-        ax.set_xlabel(xlabel)
+    for pos, (inc_group, exc_group, color, label) in zip(positions, paired_groups):
+        _half_violin(inc_group, pos, color, side="left")
+        _half_violin(exc_group, pos, color, side="right")
 
-    plot_half(axes[0], ticker_groups_include, "Include intangibles", hlines_include)
-    plot_half(axes[1], ticker_groups_exclude, "Exclude intangibles", hlines_exclude)
+    if hlines_include:
+        for value, color, label in hlines_include:
+            if value is None or np.isnan(value):
+                continue
+            ax.axhline(value, color=color, linestyle="--", linewidth=1.5, label=label)
+
+    if hlines_exclude:
+        for value, color, label in hlines_exclude:
+            if value is None or np.isnan(value):
+                continue
+            ax.axhline(value, color=color, linestyle="-.", linewidth=1.5, label=label)
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels([grp_label for _, _, _, grp_label in paired_groups], rotation=45, ha="right")
+    ax.set_xlabel(xlabel)
+    ax.set_title("Interlaced Violins — include/exclude intangibles")
 
     legend_handles = [
         Patch(color=color, label=ticker.upper())
         for ticker, _, color in ticker_groups_include
     ]
-    fig.legend(handles=legend_handles, loc="upper center", ncol=len(legend_handles))
-    fig.suptitle("Interlaced Violins — include_intangibles comparison")
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+
+    line_handles, line_labels = ax.get_legend_handles_labels()
+    combined_handles: list[Patch] = []
+    combined_labels: list[str] = []
+
+    for handle, label in list(zip(legend_handles, [h.get_label() for h in legend_handles])) + list(
+        zip(line_handles, line_labels)
+    ):
+        if label in combined_labels:
+            continue
+        combined_handles.append(handle)
+        combined_labels.append(label)
+
+    ax.legend(handles=combined_handles, labels=combined_labels, loc="upper left")
+    fig.tight_layout()
 
     return fig
 
