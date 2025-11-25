@@ -206,6 +206,7 @@ def render_interlaced_boxplots(
     xlabel: str,
     hlines: list[tuple[float, str, str]] | None = None,
     exclude_ticker_groups: Sequence[tuple[str, Sequence[Sequence[float]], str]] | None = None,
+    hline_lookup: dict[str, dict[str, float | None]] | None = None,
 ):
     """Render interlaced boxplots for ``n`` tickers.
 
@@ -219,6 +220,7 @@ def render_interlaced_boxplots(
     inter_colors: list[str | tuple[float, float, float, float]] = []
     inter_labels: list[str] = []
     positions: list[float] = []
+    box_meta: list[tuple[str, str]] = []  # (ticker, variant "include"/"exclude")
 
     exclude_usage: dict[str, bool] = {}
 
@@ -245,6 +247,7 @@ def render_interlaced_boxplots(
                     inter_colors.append(color_inc)
                     inter_labels.append(label)
                     positions.append(center)
+                    box_meta.append((ticker_inc, "include"))
                 else:
                     inc_pos = center - 0.18
                     exc_pos = center + 0.18
@@ -253,16 +256,18 @@ def render_interlaced_boxplots(
                     inter_colors.extend([color_inc, _fade_color(color_inc)])
                     inter_labels.extend([label, label])
                     positions.extend([inc_pos, exc_pos])
+                    box_meta.extend([(ticker_inc, "include"), (ticker_inc, "exclude")])
                     exclude_usage[ticker_inc] = True
 
                 pair_index += 1
     else:
         for i in range(len(price_labels)):
-            for _, groups, color in ticker_groups:
+            for ticker, groups, color in ticker_groups:
                 inter_groups.append(groups[i])
                 inter_colors.append(color)
                 inter_labels.append(price_labels[i])
                 positions.append(len(positions) + 1)
+                box_meta.append((ticker, "include"))
 
     fig, ax = plt.subplots(figsize=(16, 6))
     bp = ax.boxplot(
@@ -280,6 +285,41 @@ def render_interlaced_boxplots(
         median.set_color("black")
     for mean in bp.get("means", []):
         mean.set_color("black")
+
+    if hline_lookup:
+        y_min, y_max = ax.get_ylim()
+        y_pad = 0.08 * (y_max - y_min)
+        ax.set_ylim(y_min, y_max + y_pad)
+        y_text = y_max + y_pad - 0.02 * (y_max - y_min)
+
+        for pos, data, (ticker, variant) in zip(positions, inter_groups, box_meta):
+            hline_value = hline_lookup.get(ticker, {}).get(variant)
+            data_arr = np.asarray(data, dtype=float)
+            mean_val = np.nanmean(data_arr)
+            median_val = np.nanmedian(data_arr)
+
+            def _pct(hline, base):
+                if (
+                    hline is None
+                    or base is None
+                    or np.isnan(hline)
+                    or np.isnan(base)
+                    or base == 0
+                ):
+                    return "—"
+                return f"{(hline / base) * 100:.0f}%"
+
+            mean_pct = _pct(hline_value, mean_val)
+            median_pct = _pct(hline_value, median_val)
+
+            ax.text(
+                pos,
+                y_text,
+                f"{mean_pct} / {median_pct}",
+                ha="center",
+                va="top",
+                fontsize=8,
+            )
 
     legend_handles = [
         Patch(color=color, label=f"{ticker.upper()} (incl. intangibles)")
@@ -599,6 +639,8 @@ def financials_boxplots(
     inc_ticker_groups_exclude = []
     fin_hlines = []
     inc_hlines = []
+    fin_line_lookup: dict[str, dict[str, float | None]] = {}
+    inc_line_lookup: dict[str, dict[str, float | None]] = {}
 
     for company, adj_inc, adj_exc, price, color in zip(
         companies, adjusted_include, adjusted_exclude, latest_prices, colors
@@ -647,6 +689,8 @@ def financials_boxplots(
 
         fin_hlines.append((fin_line_inc, color, f"{company.ticker.upper()} latest"))
         inc_hlines.append((inc_line_inc, color, f"{company.ticker.upper()} latest"))
+        fin_line_lookup[company.ticker] = {"include": fin_line_inc}
+        inc_line_lookup[company.ticker] = {"include": inc_line_inc}
 
         if include_intangibles:
             fin_line_exc = compute_normalized_latest(
@@ -670,6 +714,8 @@ def financials_boxplots(
                     f"{company.ticker.upper()} latest (ex intg)",
                 )
             )
+            fin_line_lookup[company.ticker]["exclude"] = fin_line_exc
+            inc_line_lookup[company.ticker]["exclude"] = inc_line_exc
 
     fig_fin = render_interlaced_boxplots(
         fin_ticker_groups,
@@ -677,6 +723,7 @@ def financials_boxplots(
         xlabel="Balance Sheet",
         hlines=fin_hlines,
         exclude_ticker_groups=fin_ticker_groups_exclude if include_intangibles else None,
+        hline_lookup=fin_line_lookup,
     )
 
     fig_inc = render_interlaced_boxplots(
@@ -685,6 +732,7 @@ def financials_boxplots(
         xlabel="Income Statement",
         hlines=inc_hlines,
         exclude_ticker_groups=inc_ticker_groups_exclude if include_intangibles else None,
+        hline_lookup=inc_line_lookup,
     )
 
     return FinancialBoxplots(fig_fin=fig_fin, fig_inc=fig_inc)
