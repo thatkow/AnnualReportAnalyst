@@ -616,19 +616,42 @@ def financials_boxplots(
         )
         base_dates = adj_inc["dates"] if include_intangibles else adj_exc["dates"]
 
-        fin_line = compute_normalized_latest(
+        fin_line_inc = compute_normalized_latest(
             base_fin_groups, base_fin_divisors, base_dates, price
         )
-        inc_line = compute_normalized_latest(
+        inc_line_inc = compute_normalized_latest(
             base_inc_groups, base_inc_divisors, base_dates, price
         )
 
         fin_hlines.append(
-            (fin_line, color, f"{company.ticker.upper()} latest norm.")
+            (fin_line_inc, color, f"{company.ticker.upper()} latest norm.")
         )
         inc_hlines.append(
-            (inc_line, color, f"{company.ticker.upper()} latest norm.")
+            (inc_line_inc, color, f"{company.ticker.upper()} latest norm.")
         )
+
+        if include_intangibles:
+            fin_line_exc = compute_normalized_latest(
+                fin_groups_exc, shared_divisors_exc, adj_exc["dates"], price
+            )
+            inc_line_exc = compute_normalized_latest(
+                inc_groups_exc, shared_divisors_exc, adj_exc["dates"], price
+            )
+
+            fin_hlines.append(
+                (
+                    fin_line_exc,
+                    _fade_color(color),
+                    f"{company.ticker.upper()} latest norm. (ex intangibles)",
+                )
+            )
+            inc_hlines.append(
+                (
+                    inc_line_exc,
+                    _fade_color(color),
+                    f"{company.ticker.upper()} latest norm. (ex intangibles)",
+                )
+            )
 
     fig_fin = render_interlaced_boxplots(
         fin_ticker_groups,
