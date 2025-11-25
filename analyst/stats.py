@@ -276,6 +276,13 @@ def render_interlaced_boxplots(
         patch_artist=True,
         positions=positions,
         widths=0.25,
+        showmeans=True,
+        meanline=False,
+        meanprops={
+            "marker": "x",
+            "markeredgecolor": "black",
+            "markerfacecolor": "black",
+        },
     )
 
     for patch, color in zip(bp["boxes"], inter_colors):
