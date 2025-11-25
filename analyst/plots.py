@@ -251,6 +251,7 @@ def plot_stacked_financials(
         pdf_sources=pdf_map,
         out_path=out_path,
         include_intangibles=include_intangibles,
+        latest_price=latest_price,
     )
 
     return out_path

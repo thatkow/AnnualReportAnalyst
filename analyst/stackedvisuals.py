@@ -16,6 +16,7 @@ def render_stacked_annual_report(
     pdf_sources: dict | None = None,
     out_path: str = "stacked_annual_report.html",
     include_intangibles: bool = True,
+    latest_price: float | None = None,
 ):
     """
     Generates an interactive two-tab HTML report:
@@ -152,6 +153,7 @@ const factorTooltipLabel = {json.dumps(factor_tooltip_label)};
 const pdfSources = {json.dumps(pdf_sources)};
 const typeOffsets = {json.dumps(type_offsets)};
 const typeLineStyles = {json.dumps(type_linestyles)};
+const latestPrice = {json.dumps(latest_price)};
 const yearToggleState = Object.fromEntries(
   years.map((y, idx) => [y, idx !== years.length - 1])
 );
@@ -572,21 +574,31 @@ function renderBars() {{
     }}
 
     const safeRatio = (stat) => {{
-      if (!stat || isNaN(stat) || stat === 0) return "–";
-      if (rawTotal === 0 || isNaN(rawTotal)) return "–";
-      return (rawTotal / stat).toFixed(2);
+      if (!stat || isNaN(stat) || stat === 0) return {{ value: NaN, display: "–" }};
+      if (rawTotal === 0 || isNaN(rawTotal)) return {{ value: NaN, display: "–" }};
+      const ratio = rawTotal / stat;
+      return {{ value: ratio, display: ratio.toFixed(2) }};
+    }};
+
+    const formatStat = (stat) => {{
+      const {{ value, display }} = safeRatio(stat);
+      const priceValid = latestPrice !== null && latestPrice !== undefined && !isNaN(latestPrice) && latestPrice > 0;
+      const percentText = priceValid && !isNaN(value)
+        ? `[${{((value / latestPrice) * 100).toFixed(2)}}%]`
+        : "";
+      return `(${{display}})${{percentText}}`;
     }};
 
     const tooltip =
       `<b>Ticker:</b> ${{ticker}}<br>` +
       `<b>Type:</b> ${{typ}}<br>` +
       `<b>Count:</b> ${{vals.length}}<br>` +
-      `<b>Min:</b> ${{humanReadable(min)}} (${{safeRatio(min)}})<br>` +
-      `<b>Q1:</b> ${{humanReadable(q1)}} (${{safeRatio(q1)}})<br>` +
-      `<b>Median:</b> ${{humanReadable(q2)}} (${{safeRatio(q2)}})<br>` +
-      `<b>Q3:</b> ${{humanReadable(q3)}} (${{safeRatio(q3)}})<br>` +
-      `<b>Mean:</b> ${{humanReadable(mean)}} (${{safeRatio(mean)}})<br>` +
-      `<b>Max:</b> ${{humanReadable(max)}} (${{safeRatio(max)}})<br>` +
+      `<b>Min:</b> ${{humanReadable(min)}} ${{formatStat(min)}}<br>` +
+      `<b>Q1:</b> ${{humanReadable(q1)}} ${{formatStat(q1)}}<br>` +
+      `<b>Median:</b> ${{humanReadable(q2)}} ${{formatStat(q2)}}<br>` +
+      `<b>Q3:</b> ${{humanReadable(q3)}} ${{formatStat(q3)}}<br>` +
+      `<b>Mean:</b> ${{humanReadable(mean)}} ${{formatStat(mean)}}<br>` +
+      `<b>Max:</b> ${{humanReadable(max)}} ${{formatStat(max)}}<br>` +
       `<b>Latest raw total${{perShare ? " (per share)" : ""}}:</b> ${{humanReadable(rawTotal)}}` +
       (factorTooltip?.[years[years.length-1]]?.length
         ? "<br><b>Today's Price:</b> " +
