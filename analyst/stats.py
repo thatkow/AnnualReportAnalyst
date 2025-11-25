@@ -295,7 +295,7 @@ def render_interlaced_boxplots(
 
     if hline_lookup:
         y_min, y_max = ax.get_ylim()
-        y_pad = 0.08 * (y_max - y_min)
+        y_pad = 0.12 * (y_max - y_min)
         ax.set_ylim(y_min, y_max + y_pad)
         y_text = y_max + y_pad - 0.02 * (y_max - y_min)
 
@@ -306,6 +306,7 @@ def render_interlaced_boxplots(
             data_arr = np.asarray(data, dtype=float)
             mean_val = np.nanmean(data_arr)
             median_val = np.nanmedian(data_arr)
+            n_points = int(np.count_nonzero(~np.isnan(data_arr)))
 
             def _pct(hline, base):
                 if (
@@ -324,7 +325,7 @@ def render_interlaced_boxplots(
             ax.text(
                 pos,
                 y_text,
-                f"{mean_pct}\n{median_pct}",
+                f"{mean_pct}\n{median_pct}\nn={n_points}",
                 ha="center",
                 va="top",
                 fontsize=8,
