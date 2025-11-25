@@ -283,28 +283,45 @@ def render_interlaced_boxplots(
 
     if exclude_ticker_groups:
         legend_handles.extend(
-            Patch(color=_fade_color(color), label=f"{ticker.upper()} (ex intangibles)")
+            Patch(color=_fade_color(color), label=f"{ticker.upper()} (ex intg)")
             for ticker, _, color in exclude_ticker_groups
             if exclude_usage.get(ticker)
         )
 
-    ax.legend(handles=legend_handles)
+    line_handles: list[plt.Line2D] = []
 
     if hlines:
         for value, color, label in hlines:
             if value is None or np.isnan(value):
                 continue
-            ax.axhline(value, color=color, linestyle="--", linewidth=1.5, label=label)
+            line = ax.axhline(
+                value, color=color, linestyle="--", linewidth=1.5, label=label
+            )
+            line_handles.append(line)
 
-    # Combine legend entries if horizontal lines added
-    if hlines:
-        handles, labels = ax.get_legend_handles_labels()
-        ax.legend(handles, labels)
+    handles: list[Patch | plt.Line2D] = []
+    labels: list[str] = []
+
+    for handle, label in zip(legend_handles + line_handles, [
+        h.get_label() for h in legend_handles + line_handles
+    ]):
+        if label in labels or label == "_nolegend_":
+            continue
+        handles.append(handle)
+        labels.append(label)
+
+    ax.legend(
+        handles=handles,
+        labels=labels,
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
+    )
+    fig.subplots_adjust(right=0.78)
 
     ax.set_xlabel(xlabel)
     plt.xticks(rotation=45, ha="right")
-    title_tickers = ", ".join([ticker.upper() for ticker, _, _ in ticker_groups])
-    plt.title(f"Interlaced Boxplots — {title_tickers}")
+    plt.title(xlabel)
     plt.tight_layout()
 
     return fig
@@ -623,12 +640,8 @@ def financials_boxplots(
             base_inc_groups, base_inc_divisors, base_dates, price
         )
 
-        fin_hlines.append(
-            (fin_line_inc, color, f"{company.ticker.upper()} latest norm.")
-        )
-        inc_hlines.append(
-            (inc_line_inc, color, f"{company.ticker.upper()} latest norm.")
-        )
+        fin_hlines.append((fin_line_inc, color, f"{company.ticker.upper()} latest"))
+        inc_hlines.append((inc_line_inc, color, f"{company.ticker.upper()} latest"))
 
         if include_intangibles:
             fin_line_exc = compute_normalized_latest(
@@ -642,14 +655,14 @@ def financials_boxplots(
                 (
                     fin_line_exc,
                     _fade_color(color),
-                    f"{company.ticker.upper()} latest norm. (ex intangibles)",
+                    f"{company.ticker.upper()} latest (ex intg)",
                 )
             )
             inc_hlines.append(
                 (
                     inc_line_exc,
                     _fade_color(color),
-                    f"{company.ticker.upper()} latest norm. (ex intangibles)",
+                    f"{company.ticker.upper()} latest (ex intg)",
                 )
             )
 
@@ -760,7 +773,7 @@ def financials_violin_comparison(companies: Sequence[Company]) -> FinancialVioli
                     fin_groups_inc, shared_divisors_inc, adj_inc["dates"], price
                 ),
                 color,
-                f"{company.ticker.upper()} latest norm.",
+                f"{company.ticker.upper()} latest",
             )
         )
         fin_hlines_exclude.append(
@@ -769,7 +782,7 @@ def financials_violin_comparison(companies: Sequence[Company]) -> FinancialVioli
                     fin_groups_exc, shared_divisors_exc, adj_exc["dates"], price
                 ),
                 color,
-                f"{company.ticker.upper()} latest norm.",
+                f"{company.ticker.upper()} latest (ex intg)",
             )
         )
         inc_hlines_include.append(
@@ -778,7 +791,7 @@ def financials_violin_comparison(companies: Sequence[Company]) -> FinancialVioli
                     inc_groups_inc, shared_divisors_inc, adj_inc["dates"], price
                 ),
                 color,
-                f"{company.ticker.upper()} latest norm.",
+                f"{company.ticker.upper()} latest",
             )
         )
         inc_hlines_exclude.append(
@@ -787,7 +800,7 @@ def financials_violin_comparison(companies: Sequence[Company]) -> FinancialVioli
                     inc_groups_exc, shared_divisors_exc, adj_exc["dates"], price
                 ),
                 color,
-                f"{company.ticker.upper()} latest norm.",
+                f"{company.ticker.upper()} latest (ex intg)",
             )
         )
 
