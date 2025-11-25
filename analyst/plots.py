@@ -6,7 +6,12 @@ from typing import Dict
 import pandas as pd
 
 from analyst.data import Company
-from analyst.stats import FinancialBoxplots, financials_boxplots
+from analyst.stats import (
+    FinancialBoxplots,
+    FinancialViolins,
+    financials_boxplots,
+    financials_violin_comparison,
+)
 from .stackedvisuals import render_stacked_annual_report
 from . import yahoo
 

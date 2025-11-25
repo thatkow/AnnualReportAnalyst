@@ -258,18 +258,22 @@ def render_interlaced_violin(
     price_labels,
     *,
     xlabel: str,
-    hlines: list[tuple[float, str, str]] | None = None,
+    hlines_include: list[tuple[float, str, str]] | None = None,
+    hlines_exclude: list[tuple[float, str, str]] | None = None,
 ):
     """Render side-by-side interlaced violins for intangible on/off views.
 
     The left half shows distributions with ``include_intangibles=True`` and the
     right half shows ``include_intangibles=False`` using the same price label
-    ordering for easy comparison.
+    ordering for easy comparison. Horizontal reference lines can be specified
+    independently for each half.
     """
 
     fig, axes = plt.subplots(1, 2, figsize=(18, 6), sharey=True)
 
-    def plot_half(ax, ticker_groups, title: str):
+    def plot_half(
+        ax, ticker_groups, title: str, hlines: list[tuple[float, str, str]] | None
+    ):
         inter_groups, inter_colors, inter_labels = _interleave_groups(
             ticker_groups, price_labels
         )
@@ -299,8 +303,8 @@ def render_interlaced_violin(
         ax.set_title(title)
         ax.set_xlabel(xlabel)
 
-    plot_half(axes[0], ticker_groups_include, "Include intangibles")
-    plot_half(axes[1], ticker_groups_exclude, "Exclude intangibles")
+    plot_half(axes[0], ticker_groups_include, "Include intangibles", hlines_include)
+    plot_half(axes[1], ticker_groups_exclude, "Exclude intangibles", hlines_exclude)
 
     legend_handles = [
         Patch(color=color, label=ticker.upper())
@@ -357,6 +361,21 @@ def compute_normalized_latest(
 @dataclass
 class FinancialBoxplots:
     """Container for the generated financial and income boxplots."""
+
+    fig_fin: plt.Figure
+    fig_inc: plt.Figure
+
+    def show(self, *, block=True):
+        """Display both figures using the active Matplotlib backend."""
+
+        self.fig_fin.show()
+        self.fig_inc.show()
+        plt.show(block=block)
+
+
+@dataclass
+class FinancialViolins:
+    """Container for the generated include/exclude intangibles violin plots."""
 
     fig_fin: plt.Figure
     fig_inc: plt.Figure
@@ -465,4 +484,144 @@ def financials_boxplots(
     )
 
     return FinancialBoxplots(fig_fin=fig_fin, fig_inc=fig_inc)
+
+
+def financials_violin_comparison(companies: Sequence[Company]) -> FinancialViolins:
+    """Compare include_intangibles on/off views via interlaced violins."""
+
+    if not companies:
+        raise ValueError("At least one company is required to build violins.")
+
+    ensure_interactive_backend()
+
+    adjusted_include = [
+        compute_adjusted_values(company.ticker, company.combined, include_intangibles=True)
+        for company in companies
+    ]
+    adjusted_exclude = [
+        compute_adjusted_values(company.ticker, company.combined, include_intangibles=False)
+        for company in companies
+    ]
+    latest_prices = [get_latest_stock_price(company.ticker) for company in companies]
+
+    def normalise(label):
+        try:
+            return str(int(float(label)))
+        except Exception:
+            return label
+
+    for adjusted in (*adjusted_include, *adjusted_exclude):
+        adjusted["subcats"] = [normalise(s) for s in adjusted["subcats"]]
+
+    first_labels = adjusted_include[0]["subcats"]
+    shared_price_labels = [
+        label
+        for label in first_labels
+        if all(label in adjusted["subcats"] for adjusted in adjusted_include[1:])
+        and all(label in adjusted["subcats"] for adjusted in adjusted_exclude)
+    ]
+
+    if not shared_price_labels:
+        raise ValueError(
+            "No shared stock price labels found between companies for violin comparison"
+        )
+
+    def filter_groups(groups, available_labels, target_labels):
+        index_lookup = {label: i for i, label in enumerate(available_labels)}
+        return [groups[index_lookup[label]] for label in target_labels]
+
+    colors = [plt.cm.tab10(i % 10) for i in range(len(companies))]
+
+    fin_include_groups = []
+    fin_exclude_groups = []
+    inc_include_groups = []
+    inc_exclude_groups = []
+    fin_hlines_include = []
+    fin_hlines_exclude = []
+    inc_hlines_include = []
+    inc_hlines_exclude = []
+
+    for company, adj_inc, adj_exc, price, color in zip(
+        companies, adjusted_include, adjusted_exclude, latest_prices, colors
+    ):
+        fin_groups_inc = filter_groups(
+            adj_inc["financial"], adj_inc["subcats"], shared_price_labels
+        )
+        fin_groups_exc = filter_groups(
+            adj_exc["financial"], adj_exc["subcats"], shared_price_labels
+        )
+        inc_groups_inc = filter_groups(
+            adj_inc["income"], adj_inc["subcats"], shared_price_labels
+        )
+        inc_groups_exc = filter_groups(
+            adj_exc["income"], adj_exc["subcats"], shared_price_labels
+        )
+        shared_divisors_inc = filter_groups(
+            adj_inc["divisors"], adj_inc["subcats"], shared_price_labels
+        )
+        shared_divisors_exc = filter_groups(
+            adj_exc["divisors"], adj_exc["subcats"], shared_price_labels
+        )
+
+        fin_include_groups.append((company.ticker, fin_groups_inc, color))
+        fin_exclude_groups.append((company.ticker, fin_groups_exc, color))
+        inc_include_groups.append((company.ticker, inc_groups_inc, color))
+        inc_exclude_groups.append((company.ticker, inc_groups_exc, color))
+
+        fin_hlines_include.append(
+            (
+                compute_normalized_latest(
+                    fin_groups_inc, shared_divisors_inc, adj_inc["dates"], price
+                ),
+                color,
+                f"{company.ticker.upper()} latest norm.",
+            )
+        )
+        fin_hlines_exclude.append(
+            (
+                compute_normalized_latest(
+                    fin_groups_exc, shared_divisors_exc, adj_exc["dates"], price
+                ),
+                color,
+                f"{company.ticker.upper()} latest norm.",
+            )
+        )
+        inc_hlines_include.append(
+            (
+                compute_normalized_latest(
+                    inc_groups_inc, shared_divisors_inc, adj_inc["dates"], price
+                ),
+                color,
+                f"{company.ticker.upper()} latest norm.",
+            )
+        )
+        inc_hlines_exclude.append(
+            (
+                compute_normalized_latest(
+                    inc_groups_exc, shared_divisors_exc, adj_exc["dates"], price
+                ),
+                color,
+                f"{company.ticker.upper()} latest norm.",
+            )
+        )
+
+    fig_fin = render_interlaced_violin(
+        fin_include_groups,
+        fin_exclude_groups,
+        shared_price_labels,
+        xlabel="Balance Sheet",
+        hlines_include=fin_hlines_include,
+        hlines_exclude=fin_hlines_exclude,
+    )
+
+    fig_inc = render_interlaced_violin(
+        inc_include_groups,
+        inc_exclude_groups,
+        shared_price_labels,
+        xlabel="Income Statement",
+        hlines_include=inc_hlines_include,
+        hlines_exclude=inc_hlines_exclude,
+    )
+
+    return FinancialViolins(fig_fin=fig_fin, fig_inc=fig_inc)
 

@@ -2,7 +2,9 @@ from analyst.data import Company, import_company, import_companies
 from analyst.plots import (
     COMBINED_BASE_COLUMNS,
     FinancialBoxplots,
+    FinancialViolins,
     financials_boxplots,
+    financials_violin_comparison,
     plot_stacked_financials,
     plot_stacked_visuals,
 )
@@ -13,7 +15,9 @@ __all__ = [
     "import_companies",
     "COMBINED_BASE_COLUMNS",
     "FinancialBoxplots",
+    "FinancialViolins",
     "financials_boxplots",
+    "financials_violin_comparison",
     "plot_stacked_financials",
     "plot_stacked_visuals",
 ]
