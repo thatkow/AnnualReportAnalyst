@@ -122,6 +122,11 @@ class ScrapeContextMenu:
             command=self._delete_rows,
         )
         self.menu.add_separator()
+        self.menu.add_command(
+            label="Multiply NOTE=negated rows by -1",
+            command=self._multiply_negated_rows,
+        )
+        self.menu.add_separator()
         self._build_subcategory_menu()
 
     def _build_subcategory_menu(self) -> None:
@@ -361,6 +366,67 @@ class ScrapeContextMenu:
         if not self.view.table.selection() and self._context_item:
             self.view.table.selection_set(self._context_item)
         self.view.panel._delete_selected_rows()
+
+    def _multiply_negated_rows(self) -> None:
+        note_idx = self.view._note_column_index()
+        if note_idx is None:
+            messagebox.showinfo(
+                "Multiply Negated Rows",
+                "No NOTE column was found in this table.",
+                parent=self.view.panel.frame,
+            )
+            return
+
+        date_indices = [
+            idx for idx, name in enumerate(self.view.current_columns)
+            if _is_date_col(name)
+        ]
+        if not date_indices:
+            messagebox.showinfo(
+                "Multiply Negated Rows",
+                "No date columns are available to update.",
+                parent=self.view.panel.frame,
+            )
+            return
+
+        changed = False
+        for item_id in self.view.table.get_children(""):
+            values = list(self.view.table.item(item_id, "values"))
+            if len(values) <= note_idx:
+                continue
+
+            note_val = str(values[note_idx]).strip().lower()
+            if note_val != "negated":
+                continue
+
+            while len(values) < len(self.view.current_columns):
+                values.append("")
+
+            new_values = list(values)
+            row_changed = False
+            for idx in date_indices:
+                if idx >= len(new_values):
+                    new_values.extend([""] * (idx + 1 - len(new_values)))
+                num = self._parse_numeric(str(new_values[idx]))
+                if num is None:
+                    continue
+                new_values[idx] = self._format_numeric(-num)
+                row_changed = True
+
+            if row_changed:
+                self.view.table.item(item_id, values=new_values)
+                changed = True
+
+        if not changed:
+            messagebox.showinfo(
+                "Multiply Negated Rows",
+                "No rows with NOTE=negated were updated.",
+                parent=self.view.panel.frame,
+            )
+            return
+
+        self.view.panel.save_table_to_csv()
+        self.view.panel.load_from_files()
 
     # ------------------------------------------------------------------
     # Header menu helpers
