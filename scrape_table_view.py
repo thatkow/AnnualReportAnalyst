@@ -271,11 +271,18 @@ class ScrapeTableView:
     # ------------------------------------------------------------------
     # Note coloring helpers
     # ------------------------------------------------------------------
-    def _note_column_index(self) -> Optional[int]:
+    def _column_index(self, column_name: str) -> Optional[int]:
+        target = column_name.strip().lower()
         for idx, name in enumerate(self.current_columns):
-            if name.strip().lower() == "note":
+            if name.strip().lower() == target:
                 return idx
         return None
+
+    def _note_column_index(self) -> Optional[int]:
+        return self._column_index("note")
+
+    def _subcategory_column_index(self) -> Optional[int]:
+        return self._column_index("subcategory")
 
     def _get_note_value_for_item(self, item_id: str) -> str:
         idx = self._note_column_index()

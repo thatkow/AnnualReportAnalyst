@@ -121,6 +121,21 @@ class ScrapeContextMenu:
             label="Delete selected row(s)",
             command=self._delete_rows,
         )
+        self.menu.add_separator()
+        self._build_subcategory_menu()
+
+    def _build_subcategory_menu(self) -> None:
+        sub_menu = tk.Menu(self.menu, tearoff=False)
+        sub_menu.add_command(
+            label="Custom...",
+            command=self._prompt_custom_subcategory,
+        )
+        for label in ("CURRENT", "NON-CURRENT", "SECONDARYGRP"):
+            sub_menu.add_command(
+                label=label,
+                command=lambda val=label: self._set_subcategory_value(val),
+            )
+        self.menu.add_cascade(label="SUBCATEGORY", menu=sub_menu)
 
     def _build_header_menu(self) -> None:
         self.header_menu.add_command(
@@ -162,6 +177,48 @@ class ScrapeContextMenu:
         finally:
             self.menu.grab_release()
         return "break"
+
+    def _get_target_rows(self) -> List[str]:
+        selected = list(self.view.table.selection())
+        if not selected and self._context_item:
+            selected = [self._context_item]
+        return selected
+
+    def _prompt_custom_subcategory(self) -> None:
+        value = simpledialog.askstring(
+            "Set SUBCATEGORY",
+            "Enter the SUBCATEGORY value to apply:",
+            parent=self.view.panel.frame,
+        )
+        if value is None:
+            return
+        self._set_subcategory_value(value.strip())
+
+    def _set_subcategory_value(self, value: str) -> None:
+        target_rows = self._get_target_rows()
+        if not target_rows:
+            return
+
+        sub_idx = self.view._subcategory_column_index()
+        if sub_idx is None:
+            messagebox.showinfo(
+                "Set SUBCATEGORY",
+                "No SUBCATEGORY column was found in this table.",
+                parent=self.view.panel.frame,
+            )
+            return
+
+        for item_id in target_rows:
+            values = list(self.view.table.item(item_id, "values"))
+            if len(values) <= sub_idx:
+                values.extend([""] * (sub_idx + 1 - len(values)))
+            values[sub_idx] = value
+            self.view.table.item(item_id, values=values)
+
+        self.view.panel.save_table_to_csv()
+        self.view.panel.load_from_files()
+        self.view.table.selection_remove(self.view.table.selection())
+        self._context_item = None
 
     def _set_row_state(self, state_label: str, apply_all: bool) -> None:
         item_id = self._context_item
