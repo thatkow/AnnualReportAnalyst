@@ -1423,6 +1423,11 @@ class CombinedUIMixin:
                 vsb.pack(side=tk.RIGHT, fill=tk.Y)
                 tree.pack(fill=tk.BOTH, expand=True)
 
+                tree.bind(
+                    "<Double-1>",
+                    lambda e, tr=tree: self._on_note_conflict_double_click(e, tr),
+                )
+
             ttk.Button(viewer, text="Close", command=viewer.destroy).pack(pady=8)
 
             try:
