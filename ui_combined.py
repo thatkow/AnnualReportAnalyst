@@ -1311,6 +1311,9 @@ class CombinedUIMixin:
             mapping_lookup = self._load_key4color_lookup(company_name)
 
         conflicts = []
+        duplicate_tracker: Dict[
+            Tuple[str, str], Dict[Tuple[str, str, str], List[Dict[str, str]]]
+        ] = {}
         key_data: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         for entry in self.pdf_entries:
             base = self._combined_scrape_dir_for_entry(entry)
@@ -1328,6 +1331,19 @@ class CombinedUIMixin:
                     subcategory = str(mapping.get("SUBCATEGORY", "")).strip()
                     item = str(mapping.get("ITEM", "")).strip()
                     note_val = mapping.get("NOTE", "")
+                    table_key = (entry.path.name, typ)
+                    row_info = {
+                        "type": str(mapping.get("TYPE", typ) or typ),
+                        "category": category,
+                        "subcategory": subcategory,
+                        "item": item,
+                        "note": str(note_val),
+                        "pdf": entry.path.name,
+                    }
+                    duplicate_tracker.setdefault(table_key, {}).setdefault(
+                        (category, subcategory, item),
+                        [],
+                    ).append(row_info)
                     # Include typ in key for downstream TYPE assignment
                     key = (category, subcategory, item, typ)
                     record = key_data.setdefault(key, {"NOTE": "", "values_by_dyn": {}})
@@ -1347,6 +1363,79 @@ class CombinedUIMixin:
                         value = mapping.get(label, "") if label else ""
                         if label:
                             col_list[(pdf_name, idx)] = value
+        duplicate_rows: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
+        for table_key, key_map in duplicate_tracker.items():
+            for rows in key_map.values():
+                if len(rows) > 1:
+                    duplicate_rows.setdefault(table_key, []).extend(rows)
+
+        if duplicate_rows:
+            viewer = tk.Toplevel(self.root)
+            viewer.title("Duplicate Entry Viewer")
+            viewer.geometry("900x520")
+
+            ttk.Label(
+                viewer,
+                text=(
+                    "Duplicate CATEGORY/SUBCATEGORY/ITEM combinations were found "
+                    "in one or more tables.\nEach table must contain unique "
+                    "CATEGORY, SUBCATEGORY, ITEM entries. Please resolve the "
+                    "duplicates in the source CSV files."
+                ),
+                font=("Segoe UI", 11, "bold"),
+                wraplength=850,
+                justify=tk.LEFT,
+            ).pack(pady=6)
+
+            nb = ttk.Notebook(viewer)
+            nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+            columns = ("TYPE", "Category", "Subcategory", "Item", "Note", "PDF File")
+            for (pdf_name, typ), rows in sorted(duplicate_rows.items()):
+                tab = ttk.Frame(nb)
+                nb.add(tab, text=f"{typ} | {pdf_name[:14]}")
+
+                tree = ttk.Treeview(tab, columns=columns, show="headings", height=10)
+                for col in columns:
+                    tree.heading(col, text=col)
+                    tree.column(
+                        col,
+                        width=150 if col in ("TYPE", "PDF File") else 140,
+                        anchor="center",
+                    )
+
+                for row in rows:
+                    tree.insert(
+                        "",
+                        tk.END,
+                        values=(
+                            row.get("type", typ),
+                            row.get("category", ""),
+                            row.get("subcategory", ""),
+                            row.get("item", ""),
+                            row.get("note", ""),
+                            row.get("pdf", pdf_name),
+                        ),
+                    )
+
+                vsb = ttk.Scrollbar(tab, orient="vertical", command=tree.yview)
+                tree.configure(yscroll=vsb.set)
+                vsb.pack(side=tk.RIGHT, fill=tk.Y)
+                tree.pack(fill=tk.BOTH, expand=True)
+
+            ttk.Button(viewer, text="Close", command=viewer.destroy).pack(pady=8)
+
+            try:
+                viewer.transient(self.root)
+                viewer.focus_set()
+                viewer.lift()
+                viewer.grab_release()
+            except Exception:
+                pass
+
+            viewer.protocol("WM_DELETE_WINDOW", viewer.destroy)
+            return
+
         if conflicts:
             # === Build interactive NOTE Conflict Viewer ===
             viewer = tk.Toplevel(self.root)
