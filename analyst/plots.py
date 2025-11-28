@@ -123,7 +123,36 @@ def plot_stacked_financials(
     excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
     num_cols = [c for c in df_all.columns if c not in excluded_cols]
     for col in num_cols:
-        df_all[col] = df_all[col].astype(str).str.replace(",", "", regex=False)
+        try:
+            # Validate that column name is a string
+            if not isinstance(col, str):
+                raise ValueError(f"Column name '{col}' is not a string.")
+
+            # Confirm column exists
+            if col not in df_all.columns:
+                raise KeyError(f"Column '{col}' not found in DataFrame.")
+
+            series = df_all[col]
+
+            # Confirm the selection is a Series, not a DataFrame (duplicate column names)
+            if not hasattr(series, "dtype"):
+                raise TypeError(
+                    f"Column '{col}' returned a non-Series object "
+                    f"(possible duplicate column names or invalid selection)."
+                )
+
+            # Perform string replacement safely
+            df_all[col] = series.astype(str).str.replace(",", "", regex=False)
+
+        except Exception as e:
+            raise RuntimeError(
+                f"Error while processing column '{col}'. "
+                f"Column type = {type(series)}. "
+                f"Columns in DataFrame = {list(df_all.columns)}. "
+                f"Details: {e}"
+            )
+
+
 
     share_mult = _extract_multiplier(
         df_all[df_all["CATEGORY"].str.lower() == "shares multiplier"], num_cols
