@@ -88,7 +88,7 @@ class ReviewUIMixin:
             text_widget.insert("1.0", "\n".join(defaults))
             self.pattern_texts[column] = text_widget
 
-            model_var = tk.StringVar(master=self.root, value=DEFAULT_OPENAI_MODEL)
+            model_var = self._create_openai_model_var(column, DEFAULT_OPENAI_MODEL)
             self.openai_model_vars[column] = model_var
 
             case_var = tk.BooleanVar(master=self.root, value=True)

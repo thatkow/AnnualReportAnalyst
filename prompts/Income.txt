@@ -47,14 +47,12 @@ Example:
 both normalized to 31.12.2019.
 
 ═══════════════════════════════════════════════════════════════════════════════
-4. COLUMN SUMMATION RULE (AFTER EXTRACTION)
+4. COLUMN HANDLING (AFTER EXTRACTION)
 After extracting all columns:
 
-• Columns with the same normalized date must be summed together.  
-• Missing/blank = 0  
-• Parentheses → negative  
-• Do not scale values.  
-• Final output contains exactly one column per unique normalized date.
+• Preserve one output column per source numeric column, even if multiple
+  columns share the same normalized date.
+• **Do NOT combine, merge, or sum columns with identical dates.**
 
 ═══════════════════════════════════════════════════════════════════════════════
 5. STRUCTURE

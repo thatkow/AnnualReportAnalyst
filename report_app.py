@@ -133,6 +133,7 @@ class ReportAppV2(
         self.combined_table_col_ids: List[str] = []
 
         self._suspend_api_key_save = True
+        self._suspend_openai_model_save = False
         self.config = ConfigManager.load()
         self._apply_config_state()
         self._suspend_api_key_save = False
@@ -166,6 +167,13 @@ class ReportAppV2(
 
         self.logger.info("Logger initialized and bound to ReportAppV2")
         self.logger.info("✅ Shared logger setup complete")
+
+    def _create_openai_model_var(self, column: str, initial: str) -> tk.StringVar:
+        """Return an OpenAI model StringVar that auto-saves on change."""
+
+        var = tk.StringVar(master=self.root, value=initial)
+        var.trace_add("write", lambda *_: self._on_openai_model_changed(column))
+        return var
 
     def _apply_config_state(self) -> None:
         """Populate runtime state from the shared configuration object."""
@@ -279,38 +287,42 @@ class ReportAppV2(
         if config is None:
             return
 
-        for column, widget in self.pattern_texts.items():
-            values = config.patterns.get(column, [])
-            widget.delete("1.0", tk.END)
-            widget.insert("1.0", "\n".join(values))
-
-        for column, var in self.case_insensitive_vars.items():
-            var.set(config.case_insensitive.get(column, True))
-
-        for column, var in self.whitespace_as_space_vars.items():
-            var.set(config.space_as_whitespace.get(column, True))
-
-        if self.year_pattern_text is not None:
-            self.year_pattern_text.delete("1.0", tk.END)
-            self.year_pattern_text.insert("1.0", "\n".join(config.year_patterns))
-
-        self.year_case_insensitive_var.set(config.year_case_insensitive)
-        self.year_whitespace_as_space_var.set(config.year_space_as_whitespace)
-
+        self._suspend_openai_model_save = True
         try:
-            self.recent_download_minutes.set(int(config.downloads_minutes))
-        except Exception:
-            self.recent_download_minutes.set(5)
+            for column, widget in self.pattern_texts.items():
+                values = config.patterns.get(column, [])
+                widget.delete("1.0", tk.END)
+                widget.insert("1.0", "\n".join(values))
 
-        for column, var in self.openai_model_vars.items():
-            var.set(config.openai_models.get(column, DEFAULT_OPENAI_MODEL))
+            for column, var in self.case_insensitive_vars.items():
+                var.set(config.case_insensitive.get(column, True))
 
-        for column, var in self.scrape_upload_mode_vars.items():
-            var.set(config.upload_modes.get(column, "pdf"))
+            for column, var in self.whitespace_as_space_vars.items():
+                var.set(config.space_as_whitespace.get(column, True))
 
-        self.scrape_column_widths = dict(config.scrape_column_widths)
-        self.note_color_scheme = dict(config.note_colors)
-        self.scrape_row_height = int(config.scrape_row_height)
+            if self.year_pattern_text is not None:
+                self.year_pattern_text.delete("1.0", tk.END)
+                self.year_pattern_text.insert("1.0", "\n".join(config.year_patterns))
+
+            self.year_case_insensitive_var.set(config.year_case_insensitive)
+            self.year_whitespace_as_space_var.set(config.year_space_as_whitespace)
+
+            try:
+                self.recent_download_minutes.set(int(config.downloads_minutes))
+            except Exception:
+                self.recent_download_minutes.set(5)
+
+            for column, var in self.openai_model_vars.items():
+                var.set(config.openai_models.get(column, DEFAULT_OPENAI_MODEL))
+
+            for column, var in self.scrape_upload_mode_vars.items():
+                var.set(config.upload_modes.get(column, "pdf"))
+
+            self.scrape_column_widths = dict(config.scrape_column_widths)
+            self.note_color_scheme = dict(config.note_colors)
+            self.scrape_row_height = int(config.scrape_row_height)
+        finally:
+            self._suspend_openai_model_save = False
 
     def get_scrape_row_height(self) -> int:
         """Return the configured scrape table row height."""
@@ -387,6 +399,26 @@ class ReportAppV2(
         except OSError:
             messagebox.showwarning(
                 "Local Config", "Unable to save API key to configuration file."
+            )
+
+    def _on_openai_model_changed(self, column: str, *_: Any) -> None:
+        if self._suspend_openai_model_save:
+            return
+
+        var = self.openai_model_vars.get(column)
+        if var is None:
+            return
+
+        value = var.get().strip() or DEFAULT_OPENAI_MODEL
+        if self.config.openai_models.get(column) == value:
+            return
+
+        self.config.openai_models[column] = value
+        try:
+            self.config.save()
+        except OSError:
+            messagebox.showwarning(
+                "Save Config", "Unable to save OpenAI model configuration to disk."
             )
 
     def _on_api_key_var_changed(self, *_: Any) -> None:

@@ -39,6 +39,10 @@ Detect all date column headers in the balance sheet (usually reporting dates).
 
 Normalize all detected dates to the format DD.MM.YYYY.
 
+Each numeric column must remain separate in the output, even if multiple columns
+share the same normalized date. **Do not combine or sum columns with identical
+dates; preserve one column per source numeric column.**
+
 Examples:
 30 June 2024 → 30.06.2024
 June 30, 2023 → 30.06.2023
