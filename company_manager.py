@@ -5,6 +5,7 @@ import os
 import sys
 import re
 import shutil
+import tempfile
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -309,14 +310,11 @@ class CompanyManagerMixin:
                 preview_window.destroy()
             return
 
-        moved_files = 0
-        for pdf_path in recent_pdfs:
-            try:
-                destination = self._ensure_unique_path(raw_dir / pdf_path.name)
-                shutil.move(str(pdf_path), str(destination))
-                moved_files += 1
-            except Exception as exc:
-                messagebox.showwarning("Move PDF", f"Could not move '{pdf_path.name}': {exc}")
+        copied_files = 0
+        unlock_failures: List[str] = []
+        unlocking_skipped = False
+        if recent_pdfs:
+            copied_files, unlock_failures, unlocking_skipped = self._copy_and_unlock_pdfs(recent_pdfs, raw_dir)
 
         self.company_var.set(safe_name)
         self._refresh_company_options()
@@ -345,8 +343,68 @@ class CompanyManagerMixin:
 
         if preview_window is not None and preview_window.winfo_exists():
             preview_window.destroy()
-        if moved_files:
-            messagebox.showinfo("Create Company", f"Moved {moved_files} PDF(s) into '{safe_name}/raw'.")
+        if unlock_failures:
+            details = "\n".join(unlock_failures[:5])
+            more = "" if len(unlock_failures) <= 5 else "\n…and more"
+            messagebox.showwarning(
+                "PDF Unlock Issues", f"Some PDFs could not be unlocked while copying:\n{details}{more}"
+            )
+        if unlocking_skipped and copied_files:
+            messagebox.showwarning(
+                "PDF Unlocking Skipped",
+                "PyMuPDF is not installed, so PDFs were copied without unlocking.",
+            )
+        if copied_files:
+            messagebox.showinfo("Create Company", f"Copied {copied_files} PDF(s) into '{safe_name}/raw'.")
+
+    def _copy_and_unlock_pdfs(self, pdf_paths: List[Path], destination_dir: Path) -> Tuple[int, List[str], bool]:
+        """Copy PDFs into the destination directory, unlocking when possible."""
+
+        copied = 0
+        failures: List[str] = []
+        unlocking_skipped = fitz is None
+
+        for pdf_path in pdf_paths:
+            dest_path = self._ensure_unique_path(destination_dir / pdf_path.name)
+            temp_path: Optional[Path] = None
+            try:
+                if fitz is not None:
+                    with tempfile.NamedTemporaryFile(
+                        suffix=pdf_path.suffix, dir=destination_dir, delete=False
+                    ) as tmp:
+                        temp_path = Path(tmp.name)
+
+                    with fitz.open(pdf_path) as doc:  # type: ignore[arg-type]
+                        if doc.needs_pass and not doc.authenticate(""):
+                            raise RuntimeError("PDF requires a password to open.")
+
+                        doc.save(
+                            temp_path,
+                            garbage=4,
+                            deflate=True,
+                            encryption=fitz.PDF_ENCRYPT_NONE,
+                        )
+
+                    os.replace(temp_path, dest_path)
+                else:
+                    shutil.copy2(pdf_path, dest_path)
+
+                copied += 1
+            except Exception as exc:
+                try:
+                    shutil.copy2(pdf_path, dest_path)
+                    copied += 1
+                except Exception as copy_exc:
+                    failures.append(f"{pdf_path.name}: {exc} (fallback copy failed: {copy_exc})")
+                else:
+                    failures.append(
+                        f"{pdf_path.name}: unlocked copy failed ({exc}); original copied instead."
+                    )
+            finally:
+                if temp_path and temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
+
+        return copied, failures, unlocking_skipped
 
     def _collect_recent_downloads(self) -> List[Path]:
         downloads_dir = self.downloads_dir.get().strip()
