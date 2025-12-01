@@ -101,33 +101,10 @@ class PDFManagerMixin:
         self._clear_scrape_preview()
         self.refresh_combined_tab()
 
-    def unlock_pdfs_and_reload(self) -> None:
-        """Rewrite PDFs to remove encryption and reload them into the app."""
-        folder = self.folder_path.get()
-        if not folder:
-            messagebox.showinfo("Select Folder", "Choose a company before unlocking PDFs.")
-            return
-
-        if fitz is None:
-            messagebox.showerror(
-                "PDF Library Missing",
-                "PyMuPDF is required to unlock PDFs. Please install dependencies and try again.",
-            )
-            return
-
-        folder_path = Path(folder)
-        if not folder_path.exists():
-            messagebox.showerror("Folder Not Found", f"The folder '{folder}' does not exist.")
-            return
-
-        pdf_paths = sorted(folder_path.rglob("*.pdf"))
+    def _unlock_pdfs_in_place(self, pdf_paths: List[Path]) -> List[str]:
+        """Rewrite PDFs to remove encryption in-place, returning any failure messages."""
         if not pdf_paths:
-            messagebox.showinfo("No PDFs", "No PDF files were found in the selected folder.")
-            return
-
-        # Close any open PDF documents before attempting to rewrite them so file handles
-        # do not block replacement on Windows.
-        self.clear_entries()
+            return []
 
         progress_win = tk.Toplevel(self.root)
         progress_win.title("Unlocking PDFs")
@@ -193,17 +170,43 @@ class PDFManagerMixin:
         except Exception:
             pass
 
-        if failures:
-            details = "\n".join(failures[:5])
-            more = "" if len(failures) <= 5 else "\n…and more"
-            messagebox.showwarning("Unlock Issues", f"Some PDFs could not be unlocked:\n{details}{more}")
-
-        self.load_pdfs()
+        return failures
 
     def load_pdfs(self) -> None:
         folder = self.folder_path.get()
         if not folder:
             messagebox.showinfo("Select Folder", "Choose a company before loading PDFs.")
+            return
+
+        if fitz is None:
+            messagebox.showerror(
+                "PDF Library Missing",
+                "PyMuPDF is required to load and unlock PDFs. Please install dependencies and try again.",
+            )
+            return
+
+        folder_path = Path(folder)
+        if not folder_path.exists():
+            messagebox.showerror("Folder Not Found", f"The folder '{folder}' does not exist.")
+            return
+
+        pdf_paths = sorted(folder_path.rglob("*.pdf"))
+        if not pdf_paths:
+            messagebox.showinfo("No PDFs", "No PDF files were found in the selected folder.")
+            return
+
+        # Close any open PDF documents before attempting to rewrite or reload them so file
+        # handles do not block replacement on Windows.
+        self.clear_entries()
+
+        unlock_failures = self._unlock_pdfs_in_place(pdf_paths)
+        if unlock_failures:
+            details = "\n".join(unlock_failures[:5])
+            more = "" if len(unlock_failures) <= 5 else "\n…and more"
+            messagebox.showwarning("Unlock Issues", f"Some PDFs could not be unlocked:\n{details}{more}")
+
+        pattern_map, year_patterns = self._compile_patterns()
+        if any(not patterns for patterns in pattern_map.values()):
             return
 
         # --- Create progress window ---
@@ -217,6 +220,8 @@ class PDFManagerMixin:
         ttk.Label(progress_win, text="Loading PDF files…", font=("Arial", 11)).pack(pady=(25, 10))
         status_label = ttk.Label(progress_win, text="Please wait…")
         status_label.pack(pady=(5, 10))
+
+        progress_var = tk.DoubleVar(value=0.0)
 
         # Force the window to appear before heavy work starts
         progress_win.update_idletasks()
@@ -234,25 +239,7 @@ class PDFManagerMixin:
             except Exception:
                 pass
 
-        folder_path = Path(folder)
-        if not folder_path.exists():
-            messagebox.showerror("Folder Not Found", f"The folder '{folder}' does not exist.")
-            return
-
-        pattern_map, year_patterns = self._compile_patterns()
-        if any(not patterns for patterns in pattern_map.values()):
-            return
-
-        self.clear_entries()
-
-        pdf_paths = sorted(folder_path.rglob("*.pdf"))
-        if not pdf_paths:
-            messagebox.showinfo("No PDFs", "No PDF files were found in the selected folder.")
-            close_progress()
-            return
-
         total = len(pdf_paths)
-        current = 0
 
         import concurrent.futures
 
