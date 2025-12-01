@@ -141,49 +141,50 @@ class PDFManagerMixin:
         for index, pdf_path in enumerate(pdf_paths, start=1):
             status_label.config(text=f"{index}/{len(pdf_paths)}: {pdf_path.name}")
             progress_win.update_idletasks()
+            temp_path: Optional[Path] = None
             try:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".unlocked.pdf", dir=pdf_path.parent, delete=False
+                ) as tmp:
+                    temp_path = Path(tmp.name)
+
                 with fitz.open(pdf_path) as doc:  # type: ignore[arg-type]
                     if doc.needs_pass and not doc.authenticate(""):
                         raise RuntimeError("PDF requires a password to open.")
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".unlocked.pdf", dir=pdf_path.parent, delete=False
-                    ) as tmp:
-                        temp_path = Path(tmp.name)
 
+                    doc.save(
+                        temp_path,
+                        garbage=4,
+                        deflate=True,
+                        encryption=fitz.PDF_ENCRYPT_NONE,
+                    )
+
+                replaced = False
+                try:
+                    os.replace(temp_path, pdf_path)
+                    replaced = True
+                except PermissionError:
                     try:
-                        doc.save(
-                            temp_path,
-                            garbage=4,
-                            deflate=True,
-                            encryption=fitz.PDF_ENCRYPT_NONE,
-                        )
+                        os.chmod(pdf_path, 0o666)
+                        os.replace(temp_path, pdf_path)
+                        replaced = True
+                    except Exception:
+                        pass
 
-                        replaced = False
-                        try:
-                            os.replace(temp_path, pdf_path)
-                            replaced = True
-                        except PermissionError:
-                            try:
-                                os.chmod(pdf_path, 0o666)
-                                os.replace(temp_path, pdf_path)
-                                replaced = True
-                            except Exception:
-                                pass
-
-                        if not replaced:
-                            raise RuntimeError(
-                                "Access denied while replacing the unlocked PDF. "
-                                "Ensure the file is not open in another program and try again."
-                            )
-                    finally:
-                        if temp_path.exists():
-                            try:
-                                temp_path.unlink(missing_ok=True)
-                            except Exception:
-                                pass
+                if not replaced:
+                    raise RuntimeError(
+                        "Access denied while replacing the unlocked PDF. "
+                        "Ensure the file is not open in another program and try again."
+                    )
             except Exception as exc:
                 logger.exception("Failed to unlock %s", pdf_path)
                 failures.append(f"{pdf_path.name}: {exc}")
+            finally:
+                if temp_path and temp_path.exists():
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
         try:
             progress_win.destroy()
