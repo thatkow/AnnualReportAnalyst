@@ -28,6 +28,7 @@ class MainUIMixin:
         file_menu = tk.Menu(menu_bar, tearoff=False)
         file_menu.add_command(label="New Company", command=self.create_company)
         file_menu.add_command(label="Set Downloads Dir", command=self._set_downloads_dir)
+        file_menu.add_command(label="Unlock PDFs & Reload", command=self.unlock_pdfs_and_reload)
         menu_bar.add_cascade(label="File", menu=file_menu)
 
         company_menu = tk.Menu(menu_bar, tearoff=False)

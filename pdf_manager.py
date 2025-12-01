@@ -101,6 +101,74 @@ class PDFManagerMixin:
         self._clear_scrape_preview()
         self.refresh_combined_tab()
 
+    def unlock_pdfs_and_reload(self) -> None:
+        """Rewrite PDFs to remove encryption and reload them into the app."""
+        folder = self.folder_path.get()
+        if not folder:
+            messagebox.showinfo("Select Folder", "Choose a company before unlocking PDFs.")
+            return
+
+        folder_path = Path(folder)
+        if not folder_path.exists():
+            messagebox.showerror("Folder Not Found", f"The folder '{folder}' does not exist.")
+            return
+
+        pdf_paths = sorted(folder_path.rglob("*.pdf"))
+        if not pdf_paths:
+            messagebox.showinfo("No PDFs", "No PDF files were found in the selected folder.")
+            return
+
+        self.clear_entries()
+
+        progress_win = tk.Toplevel(self.root)
+        progress_win.title("Unlocking PDFs")
+        progress_win.geometry("360x120")
+        progress_win.transient(self.root)
+        progress_win.grab_set()
+
+        ttk.Label(progress_win, text="Unlocking and cleaning PDF files…", font=("Arial", 11)).pack(pady=(20, 8))
+        status_label = ttk.Label(progress_win, text="Preparing…")
+        status_label.pack(pady=(0, 12))
+
+        failures: List[str] = []
+        for index, pdf_path in enumerate(pdf_paths, start=1):
+            status_label.config(text=f"{index}/{len(pdf_paths)}: {pdf_path.name}")
+            progress_win.update_idletasks()
+            try:
+                with fitz.open(pdf_path) as doc:  # type: ignore[arg-type]
+                    if doc.needs_pass and not doc.authenticate(""):
+                        raise RuntimeError("PDF requires a password to open.")
+                    temp_path = pdf_path.with_suffix(".unlocked.tmp.pdf")
+                    try:
+                        doc.save(
+                            temp_path,
+                            garbage=4,
+                            deflate=True,
+                            encryption=fitz.PDF_ENCRYPT_NONE,
+                        )
+                        temp_path.replace(pdf_path)
+                    finally:
+                        if temp_path.exists():
+                            try:
+                                temp_path.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+            except Exception as exc:
+                logger.exception("Failed to unlock %s", pdf_path)
+                failures.append(f"{pdf_path.name}: {exc}")
+
+        try:
+            progress_win.destroy()
+        except Exception:
+            pass
+
+        if failures:
+            details = "\n".join(failures[:5])
+            more = "" if len(failures) <= 5 else "\n…and more"
+            messagebox.showwarning("Unlock Issues", f"Some PDFs could not be unlocked:\n{details}{more}")
+
+        self.load_pdfs()
+
     def load_pdfs(self) -> None:
         folder = self.folder_path.get()
         if not folder:
