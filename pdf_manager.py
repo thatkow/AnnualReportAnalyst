@@ -108,6 +108,13 @@ class PDFManagerMixin:
             messagebox.showinfo("Select Folder", "Choose a company before unlocking PDFs.")
             return
 
+        if fitz is None:
+            messagebox.showerror(
+                "PDF Library Missing",
+                "PyMuPDF is required to unlock PDFs. Please install dependencies and try again.",
+            )
+            return
+
         folder_path = Path(folder)
         if not folder_path.exists():
             messagebox.showerror("Folder Not Found", f"The folder '{folder}' does not exist.")
@@ -138,7 +145,11 @@ class PDFManagerMixin:
                 with fitz.open(pdf_path) as doc:  # type: ignore[arg-type]
                     if doc.needs_pass and not doc.authenticate(""):
                         raise RuntimeError("PDF requires a password to open.")
-                    temp_path = pdf_path.with_suffix(".unlocked.tmp.pdf")
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".unlocked.pdf", dir=pdf_path.parent, delete=False
+                    ) as tmp:
+                        temp_path = Path(tmp.name)
+
                     try:
                         doc.save(
                             temp_path,
@@ -146,7 +157,24 @@ class PDFManagerMixin:
                             deflate=True,
                             encryption=fitz.PDF_ENCRYPT_NONE,
                         )
-                        temp_path.replace(pdf_path)
+
+                        replaced = False
+                        try:
+                            os.replace(temp_path, pdf_path)
+                            replaced = True
+                        except PermissionError:
+                            try:
+                                os.chmod(pdf_path, 0o666)
+                                os.replace(temp_path, pdf_path)
+                                replaced = True
+                            except Exception:
+                                pass
+
+                        if not replaced:
+                            raise RuntimeError(
+                                "Access denied while replacing the unlocked PDF. "
+                                "Ensure the file is not open in another program and try again."
+                            )
                     finally:
                         if temp_path.exists():
                             try:
