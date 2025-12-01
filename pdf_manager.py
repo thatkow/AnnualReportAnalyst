@@ -125,6 +125,8 @@ class PDFManagerMixin:
             messagebox.showinfo("No PDFs", "No PDF files were found in the selected folder.")
             return
 
+        # Close any open PDF documents before attempting to rewrite them so file handles
+        # do not block replacement on Windows.
         self.clear_entries()
 
         progress_win = tk.Toplevel(self.root)
