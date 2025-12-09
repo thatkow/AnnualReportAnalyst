@@ -6,12 +6,12 @@ import sys
 import re
 import shutil
 import subprocess
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 try:
     import fitz  # type: ignore[import-untyped]
@@ -269,18 +269,19 @@ class CompanyManagerMixin:
                     "Recent Downloads",
                     "No recently downloaded PDFs were found in the configured downloads folder.",
                 )
+            preview_window = self._show_recent_download_previews([])
 
-        name = simpledialog.askstring("New Company", "Enter a name for the new company:", parent=self.root)
-        if name is None:
-            if preview_window is not None and preview_window.winfo_exists():
-                preview_window.destroy()
+        if preview_window is None:
+            return
+
+        self.root.wait_window(preview_window)
+        name = getattr(preview_window, "result", None)
+        if not name:
             return
 
         normalized = name.strip()
         if not normalized:
             messagebox.showwarning("Invalid Name", "Company name cannot be empty.")
-            if preview_window is not None and preview_window.winfo_exists():
-                preview_window.destroy()
             return
 
         safe_name = re.sub(r"[\\/:*?\"<>|]", "_", normalized).strip().strip(".")
@@ -323,6 +324,8 @@ class CompanyManagerMixin:
         self._set_active_company(safe_name)
         self._open_in_file_manager(raw_dir)
 
+        self._plot_recent_stock_prices(safe_name)
+
         # Automatically load the new company's PDFs and Combined.csv (if available)
         folder_exists = raw_dir.exists()
         if folder_exists:
@@ -347,6 +350,103 @@ class CompanyManagerMixin:
             preview_window.destroy()
         if moved_files:
             messagebox.showinfo("Create Company", f"Moved {moved_files} PDF(s) into '{safe_name}/raw'.")
+
+    def _plot_recent_stock_prices(self, ticker: str) -> None:
+        """Fetch and display the last year's stock prices for the given ticker."""
+
+        from analyst.stats import ensure_interactive_backend
+
+        figure = self._build_stock_price_figure(ticker)
+        if figure is None:
+            return
+
+        ensure_interactive_backend()
+        figure.show()
+
+    def _build_stock_price_figure(self, ticker: str):
+        """Return a matplotlib Figure for the ticker's last-year prices, or None on failure."""
+
+        if not ticker:
+            return None
+
+        import pandas as pd
+        from matplotlib.figure import Figure
+
+        from analyst import yahoo
+
+        try:
+            prices = yahoo.get_stock_prices(ticker, years=1)
+        except Exception as exc:
+            print(f"⚠️ Unable to fetch stock prices for {ticker}: {exc}")
+            return None
+
+        if prices is None or prices.empty:
+            print(f"⚠️ No stock prices found for {ticker} over the last year.")
+            return None
+
+        prices = prices.copy()
+
+        # Normalize any multi-index columns that may come back from yahoo helpers
+        if isinstance(prices.columns, pd.MultiIndex):
+            prices.columns = [" ".join([str(x) for x in col if str(x)]).strip() for col in prices.columns]
+
+        # Best-effort discovery of a usable price series
+        price_series = None
+
+        non_date_cols = [col for col in prices.columns if str(col).lower() != "date"]
+        price_like_cols = [
+            col
+            for col in non_date_cols
+            if str(col).lower().startswith("price") or str(col).lower().endswith(" price")
+        ]
+        close_like_cols = [
+            col
+            for col in non_date_cols
+            if str(col).lower().startswith("close") or str(col).lower().endswith(" close")
+        ]
+
+        if "Price" in prices:
+            price_series = prices["Price"]
+        elif price_like_cols:
+            price_series = prices[price_like_cols[0]]
+        elif "Close" in prices:
+            price_series = prices["Close"]
+        elif close_like_cols:
+            price_series = prices[close_like_cols[0]]
+        else:
+            numeric_cols = prices.select_dtypes(include=["number"]).columns.tolist()
+            if numeric_cols:
+                price_series = prices[numeric_cols[0]]
+
+        # If a multi-column selection was returned, take the first column
+        if isinstance(price_series, pd.DataFrame):
+            price_series = price_series.iloc[:, 0]
+
+        if price_series is None:
+            price_series = pd.Series(dtype=float)
+
+        prices["Date"] = pd.to_datetime(prices.get("Date"), errors="coerce")
+        prices["Price"] = pd.to_numeric(price_series, errors="coerce")
+        prices = prices.dropna(subset=["Date", "Price"])
+        if prices.empty:
+            print(f"⚠️ Stock price data for {ticker} contained no valid entries.")
+            return None
+
+        today = pd.Timestamp(date.today())
+        start = today - pd.Timedelta(days=365)
+
+        fig = Figure(figsize=(9, 4.5))
+        ax = fig.add_subplot(111)
+        ax.plot(prices["Date"], prices["Price"], label=f"{ticker} close", color="#0b6efd")
+        ax.set_title(f"{ticker} — Last 12 Months")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Price")
+        ax.set_xlim(start, today)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend()
+        fig.autofmt_xdate()
+        fig.tight_layout()
+        return fig
 
     def _collect_recent_downloads(self) -> List[Path]:
         downloads_dir = self.downloads_dir.get().strip()
@@ -385,14 +485,21 @@ class CompanyManagerMixin:
 
     def _show_recent_download_previews(self, pdf_paths: List[Path]) -> tk.Toplevel:
         window = tk.Toplevel(self.root)
-        window.title("Recent Downloads Preview")
+        window.title("Create Company")
         window.transient(self.root)
 
-        container = ttk.Frame(window, padding=8)
+        container = ttk.Frame(window, padding=10)
         container.pack(fill=tk.BOTH, expand=True)
 
-        canvas = tk.Canvas(container, borderwidth=0)
-        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        columns = ttk.Frame(container)
+        columns.pack(fill=tk.BOTH, expand=True)
+
+        # Left side: recent PDF previews
+        previews_panel = ttk.LabelFrame(columns, text="Recent Downloads", padding=8)
+        previews_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8))
+
+        canvas = tk.Canvas(previews_panel, borderwidth=0)
+        scrollbar = ttk.Scrollbar(previews_panel, orient=tk.VERTICAL, command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -404,6 +511,8 @@ class CompanyManagerMixin:
         canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
 
         previews: List[ImageTk.PhotoImage] = []
+        if not pdf_paths:
+            ttk.Label(inner, text="No recently downloaded PDFs were found.").pack(anchor="w", pady=(4, 0))
         for pdf_path in pdf_paths:
             item_frame = ttk.Frame(inner, padding=8)
             item_frame.pack(fill=tk.X, expand=True, pady=4)
@@ -430,7 +539,88 @@ class CompanyManagerMixin:
                 previews.append(photo)
                 ttk.Label(item_frame, image=photo).pack(anchor="w", pady=(4, 0))
 
-        window.preview_images = previews  # type: ignore[attr-defined]
+        # Right side: company name and stock plot
+        details_panel = ttk.LabelFrame(columns, text="Company", padding=12)
+        details_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        name_var = tk.StringVar()
+        ttk.Label(details_panel, text="Company / Ticker:").pack(anchor="w")
+        name_entry = ttk.Entry(details_panel, textvariable=name_var)
+        name_entry.pack(fill=tk.X, pady=(4, 10))
+
+        plot_container = ttk.Frame(details_panel)
+        plot_container.pack(fill=tk.BOTH, expand=True)
+
+        plot_header = ttk.Frame(plot_container)
+        plot_header.pack(fill=tk.X)
+        status_label = ttk.Label(plot_header, text="Enter a company/ticker to preview prices.")
+        status_label.pack(side=tk.LEFT, anchor="w")
+        ttk.Button(plot_header, text="Load Plot", command=lambda: render_plot()).pack(side=tk.RIGHT)
+
+        plot_frame = ttk.Frame(plot_container, borderwidth=1, relief=tk.SOLID)
+        plot_frame.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+
+        def clear_plot() -> None:
+            for child in plot_frame.winfo_children():
+                child.destroy()
+            setattr(window, "plot_canvas", None)
+
+        def render_plot(event: Optional[tk.Event] = None) -> None:
+            clear_plot()
+            ticker = name_var.get().strip()
+            if not ticker:
+                status_label.config(text="Enter a company/ticker to preview prices.")
+                return
+
+            figure = self._build_stock_price_figure(ticker)
+            if figure is None:
+                status_label.config(text=f"No price data available for '{ticker}'.")
+                ttk.Label(plot_frame, text="No data available", padding=12).pack()
+                return
+
+            try:
+                from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            except Exception as exc:  # pragma: no cover - import error handled at runtime
+                status_label.config(text=f"Plotting unavailable: {exc}")
+                ttk.Label(plot_frame, text="Plotting unavailable", padding=12).pack()
+                return
+
+            canvas = FigureCanvasTkAgg(figure, master=plot_frame)
+            canvas.draw()
+            canvas_widget = canvas.get_tk_widget()
+            canvas_widget.pack(fill=tk.BOTH, expand=True)
+            window.plot_canvas = canvas
+            status_label.config(text=f"Last 12 months for {ticker}")
+
+        # Buttons for dialog actions
+        button_row = ttk.Frame(container)
+        button_row.pack(fill=tk.X, pady=(10, 0))
+
+        def close_dialog(result: Optional[str] = None) -> None:
+            window.result = result
+            try:
+                window.grab_release()
+            except tk.TclError:
+                pass
+            window.destroy()
+
+        def on_create() -> None:
+            value = name_var.get().strip()
+            if not value:
+                messagebox.showwarning("Invalid Name", "Company name cannot be empty.")
+                return
+            close_dialog(value)
+
+        ttk.Button(button_row, text="Cancel", command=lambda: close_dialog(None)).pack(side=tk.RIGHT)
+        ttk.Button(button_row, text="Create", command=on_create).pack(side=tk.RIGHT, padx=(0, 8))
+
+        window.bind("<Return>", lambda event: on_create())
+        name_entry.bind("<FocusOut>", render_plot)
+        window.protocol("WM_DELETE_WINDOW", lambda: close_dialog(None))
+
+        name_entry.focus_set()
+        window.previews = previews  # prevent image garbage collection
+        window.grab_set()
         return window
 
     def _ensure_unique_path(self, target: Path) -> Path:

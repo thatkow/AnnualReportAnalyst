@@ -86,6 +86,15 @@ class PDFManagerMixin:
         self._save_pattern_config()
         return pattern_map, year_patterns
 
+    def _bring_main_window_to_front(self) -> None:
+        """Attempt to bring the main application window to the foreground."""
+
+        try:
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+
     def clear_entries(self) -> None:
         for entry in self.pdf_entries:
             try:
@@ -134,6 +143,7 @@ class PDFManagerMixin:
                 progress_win.destroy()
             except Exception:
                 pass
+            self._bring_main_window_to_front()
 
         folder_path = Path(folder)
         if not folder_path.exists():
