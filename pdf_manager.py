@@ -212,6 +212,13 @@ class PDFManagerMixin:
         # --- Close progress window after done ---
         close_progress()
 
+        # Ensure the main window is brought to the front after loading finishes
+        try:
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+
     def _apply_existing_assignments(self, entry: PDFEntry) -> None:
         record = self.assigned_pages.get(entry.path.name)
         if not isinstance(record, dict):
