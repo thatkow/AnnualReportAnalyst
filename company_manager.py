@@ -380,10 +380,31 @@ class CompanyManagerMixin:
 
         # Best-effort discovery of a usable price series
         price_series = None
+
+        non_date_cols = [col for col in prices.columns if str(col).lower() != "date"]
+        price_like_cols = [
+            col
+            for col in non_date_cols
+            if str(col).lower().startswith("price") or str(col).lower().endswith(" price")
+        ]
+        close_like_cols = [
+            col
+            for col in non_date_cols
+            if str(col).lower().startswith("close") or str(col).lower().endswith(" close")
+        ]
+
         if "Price" in prices:
             price_series = prices["Price"]
+        elif price_like_cols:
+            price_series = prices[price_like_cols[0]]
         elif "Close" in prices:
             price_series = prices["Close"]
+        elif close_like_cols:
+            price_series = prices[close_like_cols[0]]
+        else:
+            numeric_cols = prices.select_dtypes(include=["number"]).columns.tolist()
+            if numeric_cols:
+                price_series = prices[numeric_cols[0]]
 
         # If a multi-column selection was returned, take the first column
         if isinstance(price_series, pd.DataFrame):
