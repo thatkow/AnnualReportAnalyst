@@ -278,12 +278,40 @@ class CompanyManagerMixin:
 
         normalized = prices.copy()
 
-        # Ensure we have the expected columns and coerce unexpected structures to Series
-        if not {"Date", "Price"}.issubset(normalized.columns):
+        # Flatten multi-index columns that may include ticker names (e.g., [('Price', 'NXT.AX')])
+        if isinstance(normalized.columns, pd.MultiIndex):
+            normalized.columns = [
+                " ".join(str(part) for part in col if str(part)).strip()
+                for col in normalized.columns
+            ]
+
+        def _pick_column(columns: pd.Index, target: str) -> Optional[str]:
+            """Return the best column match for ``target`` allowing suffixes like ticker codes."""
+
+            if target in columns:
+                return target
+
+            target_lower = target.lower()
+            candidates = [
+                col
+                for col in columns
+                if str(col).lower() == target_lower
+                or str(col).split(" ")[0].lower() == target_lower
+                or target_lower in str(col).lower()
+            ]
+
+            return candidates[0] if candidates else None
+
+        date_col = _pick_column(normalized.columns, "Date")
+        price_col = _pick_column(normalized.columns, "Price")
+
+        if not date_col or not price_col:
             print(
                 f"⚠️ Stock price data for {ticker} missing expected columns: {normalized.columns.tolist()}"
             )
             return None
+
+        normalized = normalized.rename(columns={date_col: "Date", price_col: "Price"})
 
         normalized["Date"] = pd.to_datetime(normalized["Date"], errors="coerce").dt.date
 
