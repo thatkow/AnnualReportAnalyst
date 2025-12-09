@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -19,6 +19,7 @@ except ImportError:  # pragma: no cover - handled at runtime
     fitz = None  # type: ignore[assignment]
 
 from PIL import ImageTk
+import requests
 
 from pdf_utils import PDFEntry
 
@@ -299,6 +300,8 @@ class CompanyManagerMixin:
                 f"Using '{safe_name}' as the folder name due to unsupported characters.",
             )
 
+        self._show_exchange_matches(normalized)
+
         company_dir = self.companies_dir / safe_name
         raw_dir = company_dir / "raw"
         try:
@@ -347,6 +350,38 @@ class CompanyManagerMixin:
             preview_window.destroy()
         if moved_files:
             messagebox.showinfo("Create Company", f"Moved {moved_files} PDF(s) into '{safe_name}/raw'.")
+
+    def _show_exchange_matches(self, symbol: str) -> None:
+        trimmed = symbol.strip()
+        if not trimmed:
+            return
+
+        results = self._fetch_exchange_displays(trimmed)
+        if results is None:
+            return
+
+        if results:
+            entries = "\n".join(sorted(results))
+            message = f"Unique exchanges for '{trimmed}':\n{entries}"
+        else:
+            message = f"No Yahoo Finance entries matched the symbol '{trimmed}'."
+
+        messagebox.showinfo("Yahoo Finance Lookup", message)
+
+    def _fetch_exchange_displays(self, symbol: str) -> Optional[Set[str]]:
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={symbol}"
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:  # pragma: no cover - runtime network issues
+            messagebox.showwarning("Yahoo Finance Lookup", f"Unable to lookup '{symbol}': {exc}")
+            return None
+
+        quotes = payload.get("quotes", []) if isinstance(payload, dict) else []
+        matches = [quote for quote in quotes if str(quote.get("symbol", "")).lower() == symbol.lower()]
+        exchanges = {quote.get("exchDisp") for quote in matches if quote.get("exchDisp")}
+        return exchanges
 
     def _collect_recent_downloads(self) -> List[Path]:
         downloads_dir = self.downloads_dir.get().strip()
