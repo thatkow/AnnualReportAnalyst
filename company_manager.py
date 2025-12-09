@@ -277,8 +277,21 @@ class CompanyManagerMixin:
             return None
 
         normalized = prices.copy()
+
+        # Ensure we have the expected columns and coerce unexpected structures to Series
+        if not {"Date", "Price"}.issubset(normalized.columns):
+            print(
+                f"⚠️ Stock price data for {ticker} missing expected columns: {normalized.columns.tolist()}"
+            )
+            return None
+
         normalized["Date"] = pd.to_datetime(normalized["Date"], errors="coerce").dt.date
-        normalized["Price"] = pd.to_numeric(normalized["Price"], errors="coerce")
+
+        price_values = normalized["Price"]
+        if isinstance(price_values, pd.DataFrame):
+            price_values = price_values.squeeze(axis=1)
+
+        normalized["Price"] = pd.to_numeric(price_values, errors="coerce")
         normalized = normalized.dropna(subset=["Date", "Price"])
 
         if normalized.empty:
