@@ -20,7 +20,10 @@ except ImportError:  # pragma: no cover - handled at runtime
 
 from PIL import ImageTk
 
+import pandas as pd
+
 from pdf_utils import PDFEntry
+from analyst import yahoo
 
 
 class CompanyManagerMixin:
@@ -257,6 +260,41 @@ class CompanyManagerMixin:
         self.downloads_dir.set(selected)
         self._save_config()
 
+    def _lookup_recent_stock_price(self, ticker: str) -> Optional[float]:
+        """Return the most recent stock price within the last month for ``ticker``.
+
+        The lookup relies on ``analyst.yahoo.get_stock_prices`` and walks backward day
+        by day (up to 30 days) from today to find the latest available closing price.
+        """
+
+        try:
+            prices = yahoo.get_stock_prices(ticker, years=1)
+        except Exception as exc:
+            print(f"⚠️ Unable to fetch stock prices for {ticker}: {exc}")
+            return None
+
+        if prices.empty:
+            return None
+
+        normalized = prices.copy()
+        normalized["Date"] = pd.to_datetime(normalized["Date"], errors="coerce").dt.date
+        normalized["Price"] = pd.to_numeric(normalized["Price"], errors="coerce")
+        normalized = normalized.dropna(subset=["Date", "Price"])
+
+        if normalized.empty:
+            return None
+
+        price_lookup = {d: float(p) for d, p in zip(normalized["Date"], normalized["Price"])}
+        today = datetime.now().date()
+
+        for offset in range(0, 31):  # today + past 30 days
+            candidate_date = today - timedelta(days=offset)
+            price = price_lookup.get(candidate_date)
+            if price is not None:
+                return price
+
+        return None
+
     def create_company(self) -> None:
         recent_pdfs = self._collect_recent_downloads()
         preview_window: Optional[tk.Toplevel] = None
@@ -342,6 +380,20 @@ class CompanyManagerMixin:
                     load_combined(safe_name)
                 except Exception as exc:
                     print(f"⚠️ Unable to load Combined.csv for {safe_name}: {exc}")
+
+        price = self._lookup_recent_stock_price(safe_name)
+        if price is not None:
+            messagebox.showinfo(
+                "Stock Price Available",
+                f"Latest available stock price for {safe_name}: ${price:,.2f}",
+                parent=self.root,
+            )
+        else:
+            messagebox.showinfo(
+                "Stock Price Available",
+                f"No stock price found for {safe_name} within the last month.",
+                parent=self.root,
+            )
 
         if preview_window is not None and preview_window.winfo_exists():
             preview_window.destroy()
