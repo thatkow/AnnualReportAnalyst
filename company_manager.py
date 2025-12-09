@@ -430,8 +430,8 @@ class CompanyManagerMixin:
                 parent=self.root,
             )
         else:
-            messagebox.showinfo(
-                "Stock Price Available",
+            messagebox.showwarning(
+                "Stock Price Unavailable",
                 f"No stock price found for {safe_name} within the last month.",
                 parent=self.root,
             )
