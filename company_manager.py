@@ -6,7 +6,7 @@ import sys
 import re
 import shutil
 import subprocess
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -323,6 +323,8 @@ class CompanyManagerMixin:
         self._set_active_company(safe_name)
         self._open_in_file_manager(raw_dir)
 
+        self._plot_recent_stock_prices(safe_name)
+
         # Automatically load the new company's PDFs and Combined.csv (if available)
         folder_exists = raw_dir.exists()
         if folder_exists:
@@ -347,6 +349,53 @@ class CompanyManagerMixin:
             preview_window.destroy()
         if moved_files:
             messagebox.showinfo("Create Company", f"Moved {moved_files} PDF(s) into '{safe_name}/raw'.")
+
+    def _plot_recent_stock_prices(self, ticker: str) -> None:
+        """Fetch and display the last year's stock prices for the given ticker."""
+
+        if not ticker:
+            return
+
+        import matplotlib.pyplot as plt
+        import pandas as pd
+
+        from analyst import yahoo
+        from analyst.stats import ensure_interactive_backend
+
+        try:
+            prices = yahoo.get_stock_prices(ticker, years=1)
+        except Exception as exc:
+            print(f"⚠️ Unable to fetch stock prices for {ticker}: {exc}")
+            return
+
+        if prices is None or prices.empty:
+            print(f"⚠️ No stock prices found for {ticker} over the last year.")
+            return
+
+        prices = prices.copy()
+        prices["Date"] = pd.to_datetime(prices["Date"], errors="coerce")
+        prices["Price"] = pd.to_numeric(prices["Price"], errors="coerce")
+        prices = prices.dropna(subset=["Date", "Price"])
+        if prices.empty:
+            print(f"⚠️ Stock price data for {ticker} contained no valid entries.")
+            return
+
+        ensure_interactive_backend()
+
+        today = pd.Timestamp(date.today())
+        start = today - pd.Timedelta(days=365)
+
+        fig, ax = plt.subplots(figsize=(9, 4.5))
+        ax.plot(prices["Date"], prices["Price"], label=f"{ticker} close", color="#0b6efd")
+        ax.set_title(f"{ticker} — Last 12 Months")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Price")
+        ax.set_xlim(start, today)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend()
+        fig.autofmt_xdate()
+        fig.tight_layout()
+        fig.show()
 
     def _collect_recent_downloads(self) -> List[Path]:
         downloads_dir = self.downloads_dir.get().strip()
