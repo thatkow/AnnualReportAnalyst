@@ -373,8 +373,27 @@ class CompanyManagerMixin:
             return
 
         prices = prices.copy()
-        prices["Date"] = pd.to_datetime(prices["Date"], errors="coerce")
-        prices["Price"] = pd.to_numeric(prices["Price"], errors="coerce")
+
+        # Normalize any multi-index columns that may come back from yahoo helpers
+        if isinstance(prices.columns, pd.MultiIndex):
+            prices.columns = [" ".join([str(x) for x in col if str(x)]).strip() for col in prices.columns]
+
+        # Best-effort discovery of a usable price series
+        price_series = None
+        if "Price" in prices:
+            price_series = prices["Price"]
+        elif "Close" in prices:
+            price_series = prices["Close"]
+
+        # If a multi-column selection was returned, take the first column
+        if isinstance(price_series, pd.DataFrame):
+            price_series = price_series.iloc[:, 0]
+
+        if price_series is None:
+            price_series = pd.Series(dtype=float)
+
+        prices["Date"] = pd.to_datetime(prices.get("Date"), errors="coerce")
+        prices["Price"] = pd.to_numeric(price_series, errors="coerce")
         prices = prices.dropna(subset=["Date", "Price"])
         if prices.empty:
             print(f"⚠️ Stock price data for {ticker} contained no valid entries.")
