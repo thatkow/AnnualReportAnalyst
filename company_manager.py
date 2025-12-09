@@ -6,6 +6,7 @@ import sys
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -370,12 +371,33 @@ class CompanyManagerMixin:
 
     def _fetch_exchange_displays(self, symbol: str) -> Optional[Set[str]]:
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={symbol}"
-        try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            payload = response.json()
-        except Exception as exc:  # pragma: no cover - runtime network issues
-            messagebox.showwarning("Yahoo Finance Lookup", f"Unable to lookup '{symbol}': {exc}")
+        headers = {"User-Agent": "AnnualReportAnalyst/1.0"}
+
+        for attempt in range(2):
+            try:
+                response = requests.get(url, headers=headers, timeout=10)
+            except Exception as exc:  # pragma: no cover - runtime network issues
+                messagebox.showwarning("Yahoo Finance Lookup", f"Unable to lookup '{symbol}': {exc}")
+                return None
+
+            if response.status_code == 429:
+                if attempt == 0:
+                    time.sleep(1)
+                    continue
+                messagebox.showwarning(
+                    "Yahoo Finance Lookup",
+                    "Yahoo Finance is temporarily rate limiting lookups. Please try again shortly.",
+                )
+                return None
+
+            try:
+                response.raise_for_status()
+                payload = response.json()
+            except Exception as exc:  # pragma: no cover - runtime network issues
+                messagebox.showwarning("Yahoo Finance Lookup", f"Unable to lookup '{symbol}': {exc}")
+                return None
+            break
+        else:
             return None
 
         quotes = payload.get("quotes", []) if isinstance(payload, dict) else []
