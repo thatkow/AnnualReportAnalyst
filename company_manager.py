@@ -327,8 +327,7 @@ class CompanyManagerMixin:
         self._plot_recent_stock_prices(safe_name)
 
         # Automatically load the new company's PDFs and Combined.csv (if available)
-        folder_exists = raw_dir.exists()
-        if folder_exists:
+        def load_new_company_assets() -> None:
             load_pdfs = getattr(self, "load_pdfs", None)
             if callable(load_pdfs):
                 try:
@@ -345,6 +344,18 @@ class CompanyManagerMixin:
                     load_combined(safe_name)
                 except Exception as exc:
                     print(f"⚠️ Unable to load Combined.csv for {safe_name}: {exc}")
+
+        folder_exists = raw_dir.exists()
+        if folder_exists:
+            has_pdfs = any(raw_dir.rglob("*.pdf"))
+            if has_pdfs:
+                load_new_company_assets()
+            else:
+                if messagebox.askyesno(
+                    "Load PDFs",
+                    "Add your PDFs to the newly created folder and click Yes to load them now.",
+                ):
+                    load_new_company_assets()
 
         if preview_window is not None and preview_window.winfo_exists():
             preview_window.destroy()
