@@ -367,11 +367,13 @@ class CompanyManagerMixin:
 
         from analyst.stats import ensure_interactive_backend
 
+        ensure_interactive_backend()
         figure = self._build_stock_price_figure(ticker)
         if figure is None:
             return
 
-        ensure_interactive_backend()
+        import matplotlib.pyplot as plt
+
         figure.show()
 
     def _build_stock_price_figure(self, ticker: str):
@@ -381,7 +383,7 @@ class CompanyManagerMixin:
             return None
 
         import pandas as pd
-        from matplotlib.figure import Figure
+        import matplotlib.pyplot as plt
 
         from analyst import yahoo
 
@@ -446,8 +448,7 @@ class CompanyManagerMixin:
         today = pd.Timestamp(date.today())
         start = today - pd.Timedelta(days=365)
 
-        fig = Figure(figsize=(9, 4.5))
-        ax = fig.add_subplot(111)
+        fig, ax = plt.subplots(figsize=(9, 4.5))
         ax.plot(prices["Date"], prices["Price"], label=f"{ticker} close", color="#0b6efd")
         ax.set_title(f"{ticker} — Last 12 Months")
         ax.set_xlabel("Date")
