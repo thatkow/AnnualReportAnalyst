@@ -225,9 +225,9 @@ function hashColor(str) {{
 
 const tickerOffsets = Object.fromEntries(tickers.map((t, i) => [t, (i - ((tickers.length - 1) / 2)) * 0.25]));
 
-function buildBaseYears(yearList) {
+function buildBaseYears(yearList) {{
   return yearList.map((_, i) => i * 2.0);
-}
+}}
 
 // --- Canonical colour mapping using mapped fields ---
 const colorMap = {{}};
