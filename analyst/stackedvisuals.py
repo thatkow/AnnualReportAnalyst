@@ -120,6 +120,9 @@ body {{ font-family: sans-serif; margin: 40px; }}
     <label style="margin-left:20px;">
       <input type="checkbox" id="intangiblesCheckbox" /> Include intangibles
     </label>
+    <label style="margin-left:20px;">
+      <input type="checkbox" id="hideUncheckedYears" /> Hide unchecked years from plots
+    </label>
     <div id="yearToggleContainer" style="margin-top:10px;"></div>
     <!-- Per-ticker raw adjustment inputs (one per ticker, applied per TYPE to latest year) -->
     <span
@@ -157,6 +160,7 @@ const latestPrice = {json.dumps(latest_price)};
 const yearToggleState = Object.fromEntries(
   years.map((y, idx) => [y, idx !== years.length - 1])
 );
+let hideUncheckedYears = false;
 
 let adjustedRawData = rawData;   // rawData + synthetic adjustment rows
 let sliderState = {{}};
@@ -164,6 +168,11 @@ let sliderState = {{}};
 function filterIntangibles(data, include) {{
   if (include) return data.slice();
   return data.filter(r => (r.NOTE || "").toLowerCase() !== "intangibles");
+}}
+
+function getActiveYears() {{
+  if (!hideUncheckedYears) return years.slice();
+  return years.filter(y => yearToggleState[y]);
 }}
 
 
@@ -177,6 +186,13 @@ document.addEventListener("DOMContentLoaded", () => {{
     intangiblesCheckbox.addEventListener("change", (ev) => {{
       includeIntangibles = ev.target.checked;
       rawData = filterIntangibles(baseRawData, includeIntangibles);
+      renderBars();
+    }});
+  }}
+  const hideUncheckedCheckbox = document.getElementById("hideUncheckedYears");
+  if (hideUncheckedCheckbox) {{
+    hideUncheckedCheckbox.addEventListener("change", (ev) => {{
+      hideUncheckedYears = ev.target.checked;
       renderBars();
     }});
   }}
@@ -207,8 +223,11 @@ function hashColor(str) {{
   return `hsl(${{hue}},70%,55%)`;
 }}
 
-const baseYears = years.map((_, i) => i * 2.0);
 const tickerOffsets = Object.fromEntries(tickers.map((t, i) => [t, (i - ((tickers.length - 1) / 2)) * 0.25]));
+
+function buildBaseYears(yearList) {
+  return yearList.map((_, i) => i * 2.0);
+}
 
 // --- Canonical colour mapping using mapped fields ---
 const colorMap = {{}};
@@ -347,7 +366,7 @@ Object.keys(factorLookup).forEach(f => {{
 }});
 sel.value = "";
 
-function buildBarTraces(factorName, perShare) {{
+function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
   const factorMap = factorLookup[factorName];
   const traces = [];
   for (const ticker of tickers) {{
@@ -357,7 +376,7 @@ function buildBarTraces(factorName, perShare) {{
         // Mapped consistent colour key
         const color = colorMap[row._CANONICAL_KEY];
         // Compute yvals, skipping NaN factor years entirely
-        const yvals = years.map(y => {{
+        const yvals = activeYears.map(y => {{
           const factor = factorMap[y];
           if (factor === undefined || factor === null || isNaN(factor)) {{
             return NaN;
@@ -372,7 +391,7 @@ function buildBarTraces(factorName, perShare) {{
         if (yvals.every(v => isNaN(v))) {{
           continue;
         }}
-        const xvals = baseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
+        const xvals = activeBaseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
         traces.push({{
           x: xvals,
           y: yvals,
@@ -387,7 +406,7 @@ function buildBarTraces(factorName, perShare) {{
                          "<br>SUBCATEGORY:" + row.SUBCATEGORY +
                          "<br>ITEM:" + row.ITEM +
                          "<br>VALUE:%{{text}}<extra></extra>",
-          customdata: years.map(y => [y]),
+          customdata: activeYears.map(y => [y]),
           legendgroup: ticker
         }});
       }}
@@ -396,12 +415,12 @@ function buildBarTraces(factorName, perShare) {{
   return traces;
 }}
 
-function buildCumsumLines(factorName, perShare) {{
+function buildCumsumLines(factorName, perShare, activeYears, activeBaseYears) {{
   const factorMap = factorLookup[factorName];
   const lines = [];
   for (const ticker of tickers) {{
     for (const typ of types) {{
-      const perYearTotals = years.map(y => {{
+      const perYearTotals = activeYears.map(y => {{
         const factor = factorMap[y];
         if (factor === undefined || factor === null || isNaN(factor)) {{
           return NaN;
@@ -417,7 +436,7 @@ function buildCumsumLines(factorName, perShare) {{
       if (perYearTotals.every(v => isNaN(v))) {{
         continue;
       }}
-      const xvals = baseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
+      const xvals = activeBaseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
       const color = hashColor(ticker + typ);
       lines.push({{
         x: xvals,
@@ -425,7 +444,7 @@ function buildCumsumLines(factorName, perShare) {{
         mode: "lines+markers",
         line: {{ color, dash: typeLineStyles[typ] || "solid", width: 3 }},
         marker: {{ color, size: 8, symbol: "circle" }},
-        text: years.map((y, i) => {{
+        text: activeYears.map((y, i) => {{
           let tooltipArr = factorTooltip?.[y];
           if (!Array.isArray(tooltipArr)) tooltipArr = tooltipArr ? [tooltipArr] : [];
           const tooltipFormatted = tooltipArr.length
@@ -448,7 +467,7 @@ function buildCumsumLines(factorName, perShare) {{
           );
         }}),
         hoverinfo: "text",
-        customdata: years.map(y => {{
+        customdata: activeYears.map(y => {{
           const pdfName = pdfSources[y];
           const pdfPath = (pdfName && ticker)
             ? encodeURI(`../${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
@@ -467,7 +486,12 @@ function renderBars() {{
   const perShare = document.getElementById("perShareCheckbox").checked;
 
   const factorMap = factorLookup[factorName];
-  const latestYear = years[years.length - 1];
+  let activeYears = getActiveYears();
+  if (activeYears.length === 0) {{
+    activeYears = years.slice();
+  }}
+  const activeBaseYears = buildBaseYears(activeYears);
+  const latestYear = activeYears[activeYears.length - 1];
 
   // === Build synthetic adjustment rows per ticker (latest year only) ===
   // RAW behaviour (Option B): the entered value is applied PER TYPE (no splitting)
@@ -501,8 +525,8 @@ function renderBars() {{
   // Merge original + synthetic into adjustedRawData for this render
   adjustedRawData = rawData.concat(syntheticRows);
 
-  const barTraces = buildBarTraces(factorName, perShare);
-  const cumsumLines = buildCumsumLines(factorName, perShare);
+  const barTraces = buildBarTraces(factorName, perShare, activeYears, activeBaseYears);
+  const cumsumLines = buildCumsumLines(factorName, perShare, activeYears, activeBaseYears);
 
   // === Compute per-ticker, per-type cumulative-sum data ===
   const cumsumMap = {{}};
@@ -544,7 +568,7 @@ function renderBars() {{
 
   // === Build one boxplot per ticker+type ===
   const boxTraces = [];
-  const baseX = baseYears[baseYears.length - 1] + 3.0;
+  const baseX = activeBaseYears[activeBaseYears.length - 1] + 3.0;
   const spacing = 0.4;
   let i = 0;
   for (const key of Object.keys(cumsumMap)) {{
@@ -647,8 +671,8 @@ function renderBars() {{
     yaxis: {{ title: perShare ? "Value (Per Share)" : "Value", zeroline: true }},
     xaxis: {{
       title: "Date",
-      tickvals: [...baseYears, baseX + i * spacing],
-      ticktext: [...years, "Box Plots"],
+      tickvals: [...activeBaseYears, baseX + i * spacing],
+      ticktext: [...activeYears, "Box Plots"],
       tickangle: 45,
       mirror: true,
       linecolor: "black",
