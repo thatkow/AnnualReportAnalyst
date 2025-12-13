@@ -377,14 +377,16 @@ class ScrapeContextMenu:
             )
             return
 
-        date_indices = [
-            idx for idx, name in enumerate(self.view.current_columns)
-            if _is_date_col(name)
+        excluded_columns = {"CATEGORY", "SUBCATEGORY", "ITEM", "NOTE"}
+        target_indices = [
+            idx
+            for idx, name in enumerate(self.view.current_columns)
+            if name.strip().upper() not in excluded_columns
         ]
-        if not date_indices:
+        if not target_indices:
             messagebox.showinfo(
                 "Multiply Negated Rows",
-                "No date columns are available to update.",
+                "No columns are available to update.",
                 parent=self.view.panel.frame,
             )
             return
@@ -404,7 +406,7 @@ class ScrapeContextMenu:
 
             new_values = list(values)
             row_changed = False
-            for idx in date_indices:
+            for idx in target_indices:
                 if idx >= len(new_values):
                     new_values.extend([""] * (idx + 1 - len(new_values)))
                 num = self._parse_numeric(str(new_values[idx]))
