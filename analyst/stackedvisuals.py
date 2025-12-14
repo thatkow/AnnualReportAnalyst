@@ -150,6 +150,14 @@ body {{ font-family: sans-serif; margin: 40px; }}
       <input type="checkbox" id="perShareCheckbox" checked /> Per Share
     </label>
     <label style="margin-left:20px;">
+      <b>Show:</b>
+      <select id="signSelector">
+        <option value="both">Positive &amp; Negative</option>
+        <option value="positive">Positive Only</option>
+        <option value="negative">Negative Only</option>
+      </select>
+    </label>
+    <label style="margin-left:20px;">
       <input type="checkbox" id="intangiblesCheckbox" /> Include intangibles
     </label>
     <div id="yearToggleContainer" style="margin-top:10px;"></div>
@@ -444,7 +452,7 @@ if (numericFactors.length) {{
   sel.value = factorNames[0];
 }}
 
-function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
+function buildBarTraces(factorName, perShare, activeYears, activeBaseYears, signMode) {{
   const factorMap = factorLookup[factorName];
   const traces = [];
   const positiveBases = {{}};
@@ -481,6 +489,9 @@ function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
         const positive = yvals.map(v => (!isNaN(v) && v > 0) ? v : 0);
         const negative = yvals.map(v => (!isNaN(v) && v < 0) ? v : 0);
 
+        const includePos = signMode !== "negative";
+        const includeNeg = signMode !== "positive";
+
         const posBase = activeYears.map((y, idx) => {{
           const v = positive[idx];
           const current = baseFor(positiveBases, ticker, y);
@@ -490,7 +501,7 @@ function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
           return current;
         }});
 
-        if (positive.some(v => v > 0)) {{
+        if (includePos && positive.some(v => v > 0)) {{
           traces.push({{
             x: xvals,
             y: positive,
@@ -520,7 +531,7 @@ function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
           return current;
         }});
 
-        if (negative.some(v => v < 0)) {{
+        if (includeNeg && negative.some(v => v < 0)) {{
           traces.push({{
             x: xvals,
             y: negative,
@@ -613,6 +624,7 @@ function buildCumsumLines(factorName, perShare, activeYears, activeBaseYears) {{
 function renderBars() {{
   const factorName = sel.value;
   const perShare = document.getElementById("perShareCheckbox").checked;
+  const signMode = document.getElementById("signSelector").value;
 
   const factorMap = factorLookup[factorName];
   let activeYears = getActiveYears();
@@ -654,7 +666,13 @@ function renderBars() {{
   // Merge original + synthetic into adjustedRawData for this render
   adjustedRawData = rawData.concat(syntheticRows);
 
-  const barTraces = buildBarTraces(factorName, perShare, activeYears, activeBaseYears);
+  const barTraces = buildBarTraces(
+    factorName,
+    perShare,
+    activeYears,
+    activeBaseYears,
+    signMode
+  );
   const cumsumLines = buildCumsumLines(factorName, perShare, activeYears, activeBaseYears);
 
   // === Compute per-ticker, per-type cumulative-sum data ===
@@ -829,6 +847,7 @@ function renderBars() {{
 renderBars();
 sel.addEventListener("change", renderBars);
 document.getElementById("perShareCheckbox").addEventListener("change", renderBars);
+document.getElementById("signSelector").addEventListener("change", renderBars);
 function buildShareTraces() {{
   const traces = [];
   for (const ticker of tickers) {{
@@ -1009,6 +1028,7 @@ body {{ font-family: sans-serif; margin: 40px; }}
   <select id=\"factorSelector\"></select>
   <label style=\"margin-left:20px;\">\n    <input type=\"checkbox\" id=\"intangiblesCheckbox\" /> Include intangibles
   </label>
+  <label style=\"margin-left:20px;\">\n    <b>Show:</b>\n    <select id=\"signSelector\">\n      <option value=\"both\">Positive &amp; Negative</option>\n      <option value=\"positive\">Positive Only</option>\n      <option value=\"negative\">Negative Only</option>\n    </select>\n  </label>
   <div id=\"yearToggleContainer\" style=\"margin-top:10px;\"></div>
 </div>
 <div id=\"plotBars\"></div>
@@ -1216,7 +1236,7 @@ function getFactor(factorName, ticker, year) {{
   return (v === undefined || v === null || isNaN(v)) ? NaN : v;
 }}
 
-function buildBarTraces(factorName, activeYears, activeBaseYears) {{
+function buildBarTraces(factorName, activeYears, activeBaseYears, signMode) {{
   const traces = [];
   const positiveBases = {{}};
   const negativeBases = {{}};
@@ -1244,6 +1264,9 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
         const positive = yvals.map(v => (!isNaN(v) && v > 0) ? v : 0);
         const negative = yvals.map(v => (!isNaN(v) && v < 0) ? v : 0);
 
+        const includePos = signMode !== "negative";
+        const includeNeg = signMode !== "positive";
+
         const posBase = activeYears.map((y, idx) => {{
           const v = positive[idx];
           const current = baseFor(positiveBases, ticker, y);
@@ -1253,7 +1276,7 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
           return current;
         }});
 
-        if (positive.some(v => v > 0)) {{
+        if (includePos && positive.some(v => v > 0)) {{
           traces.push({{
             x: xvals,
             y: positive,
@@ -1284,7 +1307,7 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
           return current;
         }});
 
-        if (negative.some(v => v < 0)) {{
+        if (includeNeg && negative.some(v => v < 0)) {{
           traces.push({{
             x: xvals,
             y: negative,
@@ -1370,6 +1393,7 @@ function buildCumsumLines(factorName, activeYears, activeBaseYears) {{
 
 function renderBars() {{
   const factorName = sel.value;
+  const signMode = document.getElementById("signSelector").value;
 
   let activeYears = getActiveYears();
   if (activeYears.length === 0) {{
@@ -1377,7 +1401,7 @@ function renderBars() {{
   }}
   const activeBaseYears = buildBaseYears(activeYears);
 
-  const barTraces = buildBarTraces(factorName, activeYears, activeBaseYears);
+  const barTraces = buildBarTraces(factorName, activeYears, activeBaseYears, signMode);
   const cumsumLines = buildCumsumLines(factorName, activeYears, activeBaseYears);
 
   const cumsumMap = {{}};
@@ -1478,6 +1502,7 @@ function renderBars() {{
 }}
 renderBars();
 sel.addEventListener("change", renderBars);
+document.getElementById("signSelector").addEventListener("change", renderBars);
 </script>
 </body>
 </html>"""
