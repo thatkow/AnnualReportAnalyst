@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
+import tempfile
+import webbrowser
 from typing import Dict, Iterable, List
 
 import pandas as pd
@@ -218,10 +221,14 @@ def compare_stacked_financials(
 
     factor_lookup = _merge_factor_lookups(factor_entries)
 
-    out_path = Path(out_path) if out_path else Path(companies[0].default_visuals_path()).with_name("stacked_comparison.html")
-    visuals_dir = Path(out_path).expanduser().resolve().parent
-    visuals_dir.mkdir(parents=True, exist_ok=True)
-    out_path = visuals_dir / Path(out_path).name
+    if out_path is None:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
+            out_path = Path(tmp.name)
+    else:
+        out_path = Path(out_path)
+        visuals_dir = Path(out_path).expanduser().resolve().parent
+        visuals_dir.mkdir(parents=True, exist_ok=True)
+        out_path = visuals_dir / out_path.name
 
     year_labels = []
     for ticker in tickers:
@@ -483,4 +490,8 @@ renderBars();
 """
 
     out_path.write_text(html, encoding="utf-8")
+    try:
+        webbrowser.open(f"file://{os.path.abspath(out_path)}")
+    except Exception:
+        pass
     return out_path
