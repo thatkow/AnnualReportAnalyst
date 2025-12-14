@@ -100,6 +100,37 @@ body {{ font-family: sans-serif; margin: 40px; }}
   gap: 4px;
   margin-right: 12px;
 }}
+.multiselect {{
+  position: relative;
+  display: inline-block;
+  min-width: 240px;
+}}
+.select-box {{
+  border: 1px solid #ccc;
+  padding: 8px;
+  cursor: pointer;
+  user-select: none;
+  background: #fff;
+  border-radius: 4px;
+}}
+.checkboxes {{
+  display: none;
+  border: 1px solid #ccc;
+  border-top: none;
+  position: absolute;
+  width: 100%;
+  background: #fff;
+  z-index: 2;
+  max-height: 200px;
+  overflow-y: auto;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+}}
+.checkboxes label {{
+  display: block;
+  padding: 6px 8px;
+  cursor: pointer;
+}}
+.checkboxes label:hover {{ background: #f6f6f6; }}
 </style>
 </head>
 <body>
@@ -299,16 +330,22 @@ function initYearCheckboxes() {{
   if (!container) return;
   container.innerHTML = "";
 
-  const title = document.createElement("div");
-  title.style.fontWeight = "bold";
-  title.style.marginBottom = "4px";
-  title.textContent = "Include Years in Stats:";
-  container.appendChild(title);
+  const dropdown = document.createElement("div");
+  dropdown.className = "multiselect";
+
+  const selectBox = document.createElement("div");
+  selectBox.className = "select-box";
+  dropdown.appendChild(selectBox);
+
+  const checkboxPanel = document.createElement("div");
+  checkboxPanel.className = "checkboxes";
+  dropdown.appendChild(checkboxPanel);
 
   const wrap = document.createElement("div");
   wrap.style.display = "flex";
   wrap.style.flexWrap = "wrap";
   wrap.style.gap = "12px";
+  wrap.style.padding = "6px 8px";
 
   tickers.forEach(ticker => {{
     const column = document.createElement("div");
@@ -334,6 +371,7 @@ function initYearCheckboxes() {{
         container.querySelectorAll(`input[data-year='${{y}}']`).forEach(cb => {{
           if (cb !== ev.target) cb.checked = ev.target.checked;
         }});
+        updateLabel();
         renderBars();
       }});
       const span = document.createElement("span");
@@ -346,7 +384,31 @@ function initYearCheckboxes() {{
     wrap.appendChild(column);
   }});
 
-  container.appendChild(wrap);
+  checkboxPanel.appendChild(wrap);
+  container.appendChild(dropdown);
+
+  function closePanel() {{
+    checkboxPanel.style.display = "none";
+  }}
+
+  function togglePanel(ev) {{
+    ev.stopPropagation();
+    checkboxPanel.style.display = checkboxPanel.style.display === "block" ? "none" : "block";
+  }}
+
+  function updateLabel() {{
+    const active = getActiveYears().length;
+    selectBox.textContent = `Include Years in Stats (${{active}}/${{years.length}})`;
+  }}
+
+  document.addEventListener("click", (ev) => {{
+    if (!dropdown.contains(ev.target)) {{
+      closePanel();
+    }}
+  }});
+
+  selectBox.addEventListener("click", togglePanel);
+  updateLabel();
 }}
 
 function updateAdjustmentLabels() {{
@@ -847,6 +909,37 @@ body {{ font-family: sans-serif; margin: 40px; }}
   gap: 4px;
   margin-right: 12px;
 }}
+.multiselect {{
+  position: relative;
+  display: inline-block;
+  min-width: 240px;
+}}
+.select-box {{
+  border: 1px solid #ccc;
+  padding: 8px;
+  cursor: pointer;
+  user-select: none;
+  background: #fff;
+  border-radius: 4px;
+}}
+.checkboxes {{
+  display: none;
+  border: 1px solid #ccc;
+  border-top: none;
+  position: absolute;
+  width: 100%;
+  background: #fff;
+  z-index: 2;
+  max-height: 200px;
+  overflow-y: auto;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+}}
+.checkboxes label {{
+  display: block;
+  padding: 6px 8px;
+  cursor: pointer;
+}}
+.checkboxes label:hover {{ background: #f6f6f6; }}
 </style>
 </head>
 <body>
@@ -952,16 +1045,22 @@ function initYearCheckboxes() {{
   if (!container) return;
   container.innerHTML = "";
 
-  const title = document.createElement("div");
-  title.style.fontWeight = "bold";
-  title.style.marginBottom = "4px";
-  title.textContent = "Include Years in Stats:";
-  container.appendChild(title);
+  const dropdown = document.createElement("div");
+  dropdown.className = "multiselect";
+
+  const selectBox = document.createElement("div");
+  selectBox.className = "select-box";
+  dropdown.appendChild(selectBox);
+
+  const checkboxPanel = document.createElement("div");
+  checkboxPanel.className = "checkboxes";
+  dropdown.appendChild(checkboxPanel);
 
   const wrap = document.createElement("div");
   wrap.style.display = "flex";
   wrap.style.flexWrap = "wrap";
   wrap.style.gap = "12px";
+  wrap.style.padding = "6px 8px";
 
   tickers.forEach(ticker => {{
     const column = document.createElement("div");
@@ -987,6 +1086,7 @@ function initYearCheckboxes() {{
         container.querySelectorAll(`input[data-year='${{y}}']`).forEach(cb => {{
           if (cb !== ev.target) cb.checked = ev.target.checked;
         }});
+        updateLabel();
         renderBars();
       }});
       const span = document.createElement("span");
@@ -999,8 +1099,33 @@ function initYearCheckboxes() {{
     wrap.appendChild(column);
   }});
 
-  container.appendChild(wrap);
+  checkboxPanel.appendChild(wrap);
+  container.appendChild(dropdown);
+
+  function closePanel() {{
+    checkboxPanel.style.display = "none";
+  }}
+
+  function togglePanel(ev) {{
+    ev.stopPropagation();
+    checkboxPanel.style.display = checkboxPanel.style.display === "block" ? "none" : "block";
+  }}
+
+  function updateLabel() {{
+    const active = getActiveYears().length;
+    selectBox.textContent = `Include Years in Stats (${{active}}/${{years.length}})`;
+  }}
+
+  document.addEventListener("click", (ev) => {{
+    if (!dropdown.contains(ev.target)) {{
+      closePanel();
+    }}
+  }});
+
+  selectBox.addEventListener("click", togglePanel);
+  updateLabel();
 }}
+
 
 const sel = document.getElementById("factorSelector");
 const factorNames = Object.keys(factorLookup).filter(f => f !== "");
