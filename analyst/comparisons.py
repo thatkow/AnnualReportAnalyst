@@ -176,7 +176,7 @@ def _render_comparison_report(
         type_offsets[t] = round((i - (len(types) - 1) / 2) * 0.6, 2)
         type_linestyles[t] = "solid" if i % 2 == 0 else "dot"
 
-    html = f"""<!DOCTYPE html>
+    html = """<!DOCTYPE html>
 <html lang=\"en\">
 <head>
 <meta charset=\"utf-8\" />
@@ -204,50 +204,50 @@ body {{ font-family: sans-serif; margin: 40px; }}
 <div id=\"plotBars\"></div>
 
 <script>
-const dateLabels = {json.dumps(date_labels)};
-const baseRawData = {json.dumps(records)};
-const includeIntangiblesDefault = {str(include_intangibles).lower()};
-const typeOffsets = {json.dumps(type_offsets)};
-const typeLineStyles = {json.dumps(type_linestyles)};
-const tickers = {json.dumps(tickers)};
-const pdfSources = {json.dumps(pdf_sources)};
-const factorTooltip = {json.dumps(factor_tooltip)};
+const dateLabels = {date_labels};
+const baseRawData = {records};
+const includeIntangiblesDefault = {include_intangibles_default};
+const typeOffsets = {type_offsets};
+const typeLineStyles = {type_linestyles};
+const tickers = {tickers};
+const pdfSources = {pdf_sources};
+const factorTooltip = {factor_tooltip};
 const yearToggleState = Object.fromEntries(dateLabels.map(lbl => [lbl, true]));
 let hideUncheckedYears = false;
 let includeIntangibles = includeIntangiblesDefault;
 
-function filterIntangibles(data, include) {
+function filterIntangibles(data, include) {{
   if (include) return data.slice();
   return data.filter(r => (r.NOTE || "").toLowerCase() !== "intangibles");
-}
+}}
 
-function initYearCheckboxes() {
+function initYearCheckboxes() {{
   const container = document.getElementById('yearToggleContainer');
   container.innerHTML = '';
-  dateLabels.forEach(lbl => {
+  dateLabels.forEach(lbl => {{
     const wrapper = document.createElement('label');
     wrapper.className = 'year-toggle';
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = yearToggleState[lbl];
-    cb.addEventListener('change', () => {
+    cb.addEventListener('change', () => {{
       yearToggleState[lbl] = cb.checked;
       renderBars();
-    });
+    }});
     wrapper.appendChild(cb);
     const span = document.createElement('span');
     span.textContent = lbl;
     wrapper.appendChild(span);
     container.appendChild(wrapper);
-  });
-}
+  }});
+}}
 
-function getActiveLabels() {
+function getActiveLabels() {{
   if (!hideUncheckedYears) return dateLabels.slice();
   return dateLabels.filter(lbl => yearToggleState[lbl]);
-}
+}}
 
-function humanReadable(val) {
+function humanReadable(val) {{
   if (val === undefined || val === null || isNaN(val)) return '0';
   const abs = Math.abs(val);
   if (abs >= 1e12) return (val / 1e12).toFixed(2) + 'T';
@@ -255,84 +255,93 @@ function humanReadable(val) {
   if (abs >= 1e6)  return (val / 1e6).toFixed(2) + 'M';
   if (abs >= 1e3)  return (val / 1e3).toFixed(2) + 'K';
   return val.toFixed(2);
-}
+}}
 
-function hashColor(str) {
+function hashColor(str) {{
   let hash = 0;
   for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
   const hue = Math.abs(hash) % 360;
-  return `hsl(${hue},70%,55%)`;
-}
+  return `hsl(${{hue}},70%,55%)`;
+}}
 
-function buildTraces(activeData, activeLabels) {
-  const grouped = {};
-  activeData.forEach(r => {
+function buildTraces(activeData, activeLabels) {{
+  const grouped = {{}};
+  activeData.forEach(r => {{
     const keyCandidate = (r.Key4Coloring && r.Key4Coloring.trim()) ? r.Key4Coloring.trim() : (r.ITEM || '');
     const fallback = (r.ITEM && r.ITEM.trim()) ? r.ITEM.trim() : '';
     const key4 = keyCandidate || fallback;
-    const canonicalKey = `${r.TYPE}|${key4}`;
-    if (!grouped[canonicalKey]) grouped[canonicalKey] = {x: [], y: [], text: [], name: key4 || r.ITEM || '', type: r.TYPE, ticker: r.Ticker};
-    activeLabels.forEach(lbl => {
-      grouped[canonicalKey].x.push(`${lbl}`);
+    const canonicalKey = `${{r.TYPE}}|${{key4}}`;
+    if (!grouped[canonicalKey]) grouped[canonicalKey] = {{x: [], y: [], text: [], name: key4 || r.ITEM || '', type: r.TYPE, ticker: r.Ticker}};
+    activeLabels.forEach(lbl => {{
+      grouped[canonicalKey].x.push(`${{lbl}}`);
       grouped[canonicalKey].y.push(r[lbl] || 0);
       const tool = [];
       if (factorTooltip[lbl]) tool.push(...factorTooltip[lbl]);
-      if (pdfSources[lbl]) tool.push(`PDF: ${pdfSources[lbl]}`);
+      if (pdfSources[lbl]) tool.push(`PDF: ${{pdfSources[lbl]}}`);
       grouped[canonicalKey].text.push(tool.join('<br>'));
-    });
-  });
+    }});
+  }});
 
-  return Object.entries(grouped).map(([key, val]) => {
-    return {
+  return Object.entries(grouped).map(([key, val]) => {{
+    return {{
       x: val.x,
       y: val.y,
       text: val.text,
-      hovertemplate: '%{x}<br>%{y}<br>%{text}<extra></extra>',
-      name: `${val.name} (${val.type})`,
+      hovertemplate: '%{{x}}<br>%{{y}}<br>%{{text}}<extra></extra>',
+      name: `${{val.name}} (${{val.type}})`,
       type: 'bar',
-      marker: {color: hashColor(key)},
+      marker: {{color: hashColor(key)}},
       offsetgroup: val.type,
-    };
-  });
-}
+    }};
+  }});
+}}
 
-function renderBars() {
+function renderBars() {{
   const activeLabels = getActiveLabels();
   let data = filterIntangibles(baseRawData, includeIntangibles);
   const traces = buildTraces(data, activeLabels);
-  const layout = {
+  const layout = {{
     barmode: 'relative',
-    xaxis: {title: 'Financial Date - Ticker'},
-    yaxis: {title: 'Per Share Value'},
-    legend: {orientation: 'h'},
-  };
-  Plotly.newPlot('plotBars', traces, layout, {responsive: true});
-}
+    xaxis: {{title: 'Financial Date - Ticker'}},
+    yaxis: {{title: 'Per Share Value'}},
+    legend: {{orientation: 'h'}},
+  }};
+  Plotly.newPlot('plotBars', traces, layout, {{responsive: true}});
+}}
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', () => {{
   const intangiblesCheckbox = document.getElementById('intangiblesCheckbox');
-  if (intangiblesCheckbox) {
+  if (intangiblesCheckbox) {{
     intangiblesCheckbox.checked = includeIntangiblesDefault;
-    intangiblesCheckbox.addEventListener('change', ev => {
+    intangiblesCheckbox.addEventListener('change', ev => {{
       includeIntangibles = ev.target.checked;
       renderBars();
-    });
-  }
+    }});
+  }}
   const hideUncheckedCheckbox = document.getElementById('hideUncheckedYears');
-  if (hideUncheckedCheckbox) {
-    hideUncheckedCheckbox.addEventListener('change', ev => {
+  if (hideUncheckedCheckbox) {{
+    hideUncheckedCheckbox.addEventListener('change', ev => {{
       hideUncheckedYears = ev.target.checked;
       renderBars();
-    });
-  }
+    }});
+  }}
   initYearCheckboxes();
   renderBars();
-});
+}});
 
 </script>
 </body>
 </html>
-"""
+""".format(
+        date_labels=json.dumps(date_labels),
+        records=json.dumps(records),
+        include_intangibles_default=str(include_intangibles).lower(),
+        type_offsets=json.dumps(type_offsets),
+        type_linestyles=json.dumps(type_linestyles),
+        tickers=json.dumps(tickers),
+        pdf_sources=json.dumps(pdf_sources),
+        factor_tooltip=json.dumps(factor_tooltip),
+    )
 
     out_path = Path(out_path).expanduser().resolve()
     out_path.write_text(html, encoding="utf-8")
