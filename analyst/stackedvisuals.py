@@ -120,9 +120,6 @@ body {{ font-family: sans-serif; margin: 40px; }}
     <label style="margin-left:20px;">
       <input type="checkbox" id="intangiblesCheckbox" /> Include intangibles
     </label>
-    <label style="margin-left:20px;">
-      <input type="checkbox" id="hideUncheckedYears" /> Hide unchecked years from plots
-    </label>
     <div id="yearToggleContainer" style="margin-top:10px;"></div>
     <!-- Per-ticker raw adjustment inputs (one per ticker, applied per TYPE to latest year) -->
     <span
@@ -160,7 +157,7 @@ const latestPrice = {json.dumps(latest_price)};
 const yearToggleState = Object.fromEntries(
   years.map((y, idx) => [y, idx !== years.length - 1])
 );
-let hideUncheckedYears = false;
+let hideUncheckedYears = true;
 
 let adjustedRawData = rawData;   // rawData + synthetic adjustment rows
 let sliderState = {{}};
@@ -186,13 +183,6 @@ document.addEventListener("DOMContentLoaded", () => {{
     intangiblesCheckbox.addEventListener("change", (ev) => {{
       includeIntangibles = ev.target.checked;
       rawData = filterIntangibles(baseRawData, includeIntangibles);
-      renderBars();
-    }});
-  }}
-  const hideUncheckedCheckbox = document.getElementById("hideUncheckedYears");
-  if (hideUncheckedCheckbox) {{
-    hideUncheckedCheckbox.addEventListener("change", (ev) => {{
-      hideUncheckedYears = ev.target.checked;
       renderBars();
     }});
   }}
@@ -318,26 +308,42 @@ function initYearCheckboxes() {{
   const wrap = document.createElement("div");
   wrap.style.display = "flex";
   wrap.style.flexWrap = "wrap";
-  wrap.style.rowGap = "4px";
-  wrap.style.columnGap = "12px";
+  wrap.style.gap = "12px";
 
-  years.forEach(year => {{
-    const label = document.createElement("label");
-    label.className = "year-toggle";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = yearToggleState[year];
-    checkbox.dataset.year = year;
-    checkbox.addEventListener("change", (ev) => {{
-      const y = ev.target.dataset.year;
-      yearToggleState[y] = ev.target.checked;
-      renderBars();
+  tickers.forEach(ticker => {{
+    const column = document.createElement("div");
+    column.style.display = "flex";
+    column.style.flexDirection = "column";
+    column.style.rowGap = "4px";
+
+    const heading = document.createElement("div");
+    heading.textContent = ticker;
+    heading.style.fontWeight = "bold";
+    column.appendChild(heading);
+
+    years.forEach(year => {{
+      const label = document.createElement("label");
+      label.className = "year-toggle";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = yearToggleState[year];
+      checkbox.dataset.year = year;
+      checkbox.addEventListener("change", (ev) => {{
+        const y = ev.target.dataset.year;
+        yearToggleState[y] = ev.target.checked;
+        container.querySelectorAll(`input[data-year='${{y}}']`).forEach(cb => {{
+          if (cb !== ev.target) cb.checked = ev.target.checked;
+        }});
+        renderBars();
+      }});
+      const span = document.createElement("span");
+      span.textContent = `${{year}} - ${{ticker}}`;
+      label.appendChild(checkbox);
+      label.appendChild(span);
+      column.appendChild(label);
     }});
-    const span = document.createElement("span");
-    span.textContent = year;
-    label.appendChild(checkbox);
-    label.appendChild(span);
-    wrap.appendChild(label);
+
+    wrap.appendChild(column);
   }});
 
   container.appendChild(wrap);
@@ -442,13 +448,11 @@ function buildCumsumLines(factorName, perShare, activeYears, activeBaseYears) {{
         continue;
       }}
       const xvals = activeBaseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
-      const color = hashColor(ticker + typ);
       lines.push({{
         x: xvals,
         y: perYearTotals,
-        mode: "lines+markers",
-        line: {{ color, dash: typeLineStyles[typ] || "solid", width: 3 }},
-        marker: {{ color, size: 8, symbol: "circle" }},
+        mode: "markers",
+        marker: {{ color: "#000", size: 8, symbol: "circle" }},
         text: activeYears.map((y, i) => {{
           let tooltipArr = factorTooltip?.[y];
           if (!Array.isArray(tooltipArr)) tooltipArr = tooltipArr ? [tooltipArr] : [];
@@ -853,8 +857,6 @@ body {{ font-family: sans-serif; margin: 40px; }}
   <select id=\"factorSelector\"></select>
   <label style=\"margin-left:20px;\">\n    <input type=\"checkbox\" id=\"intangiblesCheckbox\" /> Include intangibles
   </label>
-  <label style=\"margin-left:20px;\">\n    <input type=\"checkbox\" id=\"hideUncheckedYears\" /> Hide unchecked years from plots
-  </label>
   <div id=\"yearToggleContainer\" style=\"margin-top:10px;\"></div>
 </div>
 <div id=\"plotBars\"></div>
@@ -877,7 +879,7 @@ const latestPrice = {json.dumps(latest_price)};
 const yearToggleState = Object.fromEntries(
   years.map((y) => [y, true])
 );
-let hideUncheckedYears = false;
+let hideUncheckedYears = true;
 
 function filterIntangibles(data, include) {{
   if (include) return data.slice();
@@ -898,13 +900,6 @@ document.addEventListener("DOMContentLoaded", () => {{
     intangiblesCheckbox.addEventListener("change", (ev) => {{
       includeIntangibles = ev.target.checked;
       rawData = filterIntangibles(baseRawData, includeIntangibles);
-      renderBars();
-    }});
-  }}
-  const hideUncheckedCheckbox = document.getElementById("hideUncheckedYears");
-  if (hideUncheckedCheckbox) {{
-    hideUncheckedCheckbox.addEventListener("change", (ev) => {{
-      hideUncheckedYears = ev.target.checked;
       renderBars();
     }});
   }}
@@ -966,26 +961,42 @@ function initYearCheckboxes() {{
   const wrap = document.createElement("div");
   wrap.style.display = "flex";
   wrap.style.flexWrap = "wrap";
-  wrap.style.rowGap = "4px";
-  wrap.style.columnGap = "12px";
+  wrap.style.gap = "12px";
 
-  years.forEach(year => {{
-    const label = document.createElement("label");
-    label.className = "year-toggle";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = yearToggleState[year];
-    checkbox.dataset.year = year;
-    checkbox.addEventListener("change", (ev) => {{
-      const y = ev.target.dataset.year;
-      yearToggleState[y] = ev.target.checked;
-      renderBars();
+  tickers.forEach(ticker => {{
+    const column = document.createElement("div");
+    column.style.display = "flex";
+    column.style.flexDirection = "column";
+    column.style.rowGap = "4px";
+
+    const heading = document.createElement("div");
+    heading.textContent = ticker;
+    heading.style.fontWeight = "bold";
+    column.appendChild(heading);
+
+    years.forEach(year => {{
+      const label = document.createElement("label");
+      label.className = "year-toggle";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = yearToggleState[year];
+      checkbox.dataset.year = year;
+      checkbox.addEventListener("change", (ev) => {{
+        const y = ev.target.dataset.year;
+        yearToggleState[y] = ev.target.checked;
+        container.querySelectorAll(`input[data-year='${{y}}']`).forEach(cb => {{
+          if (cb !== ev.target) cb.checked = ev.target.checked;
+        }});
+        renderBars();
+      }});
+      const span = document.createElement("span");
+      span.textContent = `${{year}} - ${{ticker}}`;
+      label.appendChild(checkbox);
+      label.appendChild(span);
+      column.appendChild(label);
     }});
-    const span = document.createElement("span");
-    span.textContent = year;
-    label.appendChild(checkbox);
-    label.appendChild(span);
-    wrap.appendChild(label);
+
+    wrap.appendChild(column);
   }});
 
   container.appendChild(wrap);
@@ -1038,6 +1049,7 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
           x: xvals,
           y: yvals,
           type: "bar",
+          width: 1.2,
           marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
           offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
           text: yvals.map(v => fmt(v)),
@@ -1072,13 +1084,11 @@ function buildCumsumLines(factorName, activeYears, activeBaseYears) {{
         continue;
       }}
       const xvals = activeBaseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
-      const color = hashColor(ticker + typ);
       lines.push({{
         x: xvals,
         y: perYearTotals,
-        mode: "lines+markers",
-        line: {{ color, dash: typeLineStyles[typ] || "solid", width: 3 }},
-        marker: {{ color, size: 8, symbol: "circle" }},
+        mode: "markers",
+        marker: {{ color: "#000", size: 8, symbol: "circle" }},
         text: activeYears.map((y, i) => {{
           let tooltipArr = factorTooltip?.[y];
           if (!Array.isArray(tooltipArr)) tooltipArr = tooltipArr ? [tooltipArr] : [];
@@ -1197,13 +1207,14 @@ function renderBars() {{
   }});
 
   const traces = barTraces.concat(cumsumLines).concat(boxData);
+  const tickText = activeYears.map(y => `${{y}}<br>${{tickers.join(" / ")}}`);
 
   const layout = {{
     height: 750,
     barmode: "stack",
     bargap: 0.15,
     title: "Financial Values",
-    xaxis: {{ tickvals: buildBaseYears(activeYears), ticktext: activeYears, title: "Date" }},
+    xaxis: {{ tickvals: buildBaseYears(activeYears), ticktext: tickText, title: "Date" }},
     yaxis: {{ title: "Value" }},
     hoverlabel: {{ bgcolor: "white", font: {{ family: "Courier New" }} }},
     showlegend: false,
