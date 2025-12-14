@@ -1174,7 +1174,7 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
           x: xvals,
           y: yvals,
           type: "bar",
-          width: 1.2,
+          width: 0.6,
           marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
           offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
           text: yvals.map(v => fmt(v)),
