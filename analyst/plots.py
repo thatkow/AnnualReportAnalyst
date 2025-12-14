@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
@@ -25,6 +26,26 @@ COMBINED_BASE_COLUMNS = [
     "NOTE",
     "Key4Coloring",
 ]
+
+
+def _year_sort_key(label: str) -> tuple[int, object]:
+    if label is None:
+        return (2, "")
+
+    s = str(label).strip()
+    if not s:
+        return (2, "")
+
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d"):
+        try:
+            return (0, datetime.strptime(s, fmt))
+        except ValueError:
+            continue
+
+    try:
+        return (1, float(s.replace(",", "")))
+    except ValueError:
+        return (2, s)
 
 
 def _extract_multiplier(row_df: pd.DataFrame, num_cols: list[str]) -> Dict[str, float]:
@@ -375,6 +396,7 @@ def compare_stacked_financials(
 
     excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
     num_cols = [c for c in combined_all.columns if c not in excluded_cols]
+    num_cols.sort(key=_year_sort_key)
 
     for col in num_cols:
         try:
@@ -527,6 +549,10 @@ def compare_stacked_financials(
         factor_tooltip[year] = entries
 
     combined_df_plot = pd.concat(processed_frames, ignore_index=True, sort=False)
+    ordered_cols = [c for c in COMBINED_BASE_COLUMNS + ["Ticker"] if c in combined_df_plot.columns]
+    ordered_cols.extend([c for c in num_cols if c in combined_df_plot.columns])
+    remaining = [c for c in combined_df_plot.columns if c not in ordered_cols]
+    combined_df_plot = combined_df_plot[ordered_cols + remaining]
 
     if out_path:
         output_path = Path(out_path)
