@@ -471,14 +471,25 @@ function renderBars() {{
         if (yvals.every(v => isNaN(v))) continue;
         const xvals = baseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
         const releaseDates = activeYears.map(year => releaseMap[ticker]?.[year] || "");
+        const maxAbs = Math.max(...yvals.filter(v => !isNaN(v)).map(v => Math.abs(v)));
+        const textThreshold = maxAbs / 3;
+        const texts = yvals.map(v => {{
+          if (isNaN(v)) return "";
+          if (Math.abs(v) < textThreshold) return "";
+          return humanReadable(v);
+        }});
         traces.push({{
           x: xvals,
           y: yvals,
           customdata: releaseDates,
           type: "bar",
+          width: 0.33,
+          text: texts,
+          textposition: "inside",
+          textfont: {{ color: "#fff", size: 10 }},
           marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
           offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
-          hovertemplate: `${{typ}}<br>${{row.ITEM || ''}}<br>${{ticker}}<br>%{{customdata}}<br>%{{y}}<extra></extra>`,
+          hovertemplate: `${{typ}}<br>${{row.ITEM || ''}}<br>${{ticker}}<br>%{{customdata}}<br>%{{y}}<extra></extra>` ,
           _orderKey: Math.min(...xvals),
           _ticker: ticker,
         }});
