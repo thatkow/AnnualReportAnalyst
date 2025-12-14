@@ -237,14 +237,18 @@ function fmt(val, perShare) {{
   return humanReadable(val);
 }}
 
-function hashColor(str) {{
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${{hue}},70%,55%)`;
-}}
+  function hashColor(str) {{
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    const hue = Math.abs(hash) % 360;
+    return `hsl(${{hue}},70%,55%)`;
+  }}
 
-const tickerOffsets = Object.fromEntries(tickers.map((t, i) => [t, (i - ((tickers.length - 1) / 2)) * 0.25]));
+  const tickerColorMap = Object.fromEntries(
+    tickers.map(t => [t, hashColor(`ticker:${{t}}`)])
+  );
+
+  const tickerOffsets = Object.fromEntries(tickers.map((t, i) => [t, (i - ((tickers.length - 1) / 2)) * 0.25]));
 
 function buildBaseYears(yearList) {{
   return yearList.map((_, i) => i * 2.0);
@@ -514,7 +518,7 @@ function buildCumsumLines(factorName, perShare, activeYears, activeBaseYears) {{
         x: xvals,
         y: perYearTotals,
         mode: "markers",
-        marker: {{ color: "#000", size: 8, symbol: "circle" }},
+        marker: {{ color: tickerColorMap[ticker] || "#000", size: 16, symbol: "circle" }},
         text: activeYears.map((y, i) => {{
           let tooltipArr = factorTooltip?.[y];
           if (!Array.isArray(tooltipArr)) tooltipArr = tooltipArr ? [tooltipArr] : [];
@@ -1013,14 +1017,18 @@ function fmt(val) {{
   return humanReadable(val);
 }}
 
-function hashColor(str) {{
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${{hue}},70%,55%)`;
-}}
+  function hashColor(str) {{
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    const hue = Math.abs(hash) % 360;
+    return `hsl(${{hue}},70%,55%)`;
+  }}
 
-const tickerOffsets = Object.fromEntries(tickers.map((t, i) => [t, (i - ((tickers.length - 1) / 2)) * 0.25]));
+  const tickerColorMap = Object.fromEntries(
+    tickers.map(t => [t, hashColor(`ticker:${{t}}`)])
+  );
+
+  const tickerOffsets = Object.fromEntries(tickers.map((t, i) => [t, (i - ((tickers.length - 1) / 2)) * 0.25]));
 
 function buildBaseYears(yearList) {{
   return yearList.map((_, i) => i * 2.0);
@@ -1213,7 +1221,7 @@ function buildCumsumLines(factorName, activeYears, activeBaseYears) {{
         x: xvals,
         y: perYearTotals,
         mode: "markers",
-        marker: {{ color: "#000", size: 8, symbol: "circle" }},
+        marker: {{ color: tickerColorMap[ticker] || "#000", size: 16, symbol: "circle" }},
         text: activeYears.map((y, i) => {{
           let tooltipArr = factorTooltip?.[y];
           if (!Array.isArray(tooltipArr)) tooltipArr = tooltipArr ? [tooltipArr] : [];
