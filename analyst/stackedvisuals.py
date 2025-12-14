@@ -465,28 +465,55 @@ function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
             : baseVal;
         }});
 
-        // If all yvals are NaN, skip this bar entirely
-        if (yvals.every(v => isNaN(v))) {{
+        const hasValid = yvals.some(v => !isNaN(v) && v !== 0);
+        if (!hasValid) {{
           continue;
         }}
         const xvals = activeBaseYears.map(b => b + (tickerOffsets[ticker] || 0));
-        traces.push({{
-          x: xvals,
-          y: yvals,
-          type: "bar",
-          marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
-          offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
-          text: yvals.map(v => fmt(v, perShare)),
-          hovertemplate: "TICKER:" + ticker +
-                         "<br>YEAR:%{{customdata[0]}}" +
-                         "<br>TYPE:" + typ +
-                         "<br>CATEGORY:" + row.CATEGORY +
-                         "<br>SUBCATEGORY:" + row.SUBCATEGORY +
-                         "<br>ITEM:" + row.ITEM +
-                         "<br>VALUE:%{{text}}<extra></extra>",
-          customdata: activeYears.map(y => [y]),
-          legendgroup: ticker
-        }});
+        const baseGroup = ticker + "-" + typ + "-" + row._CANONICAL_KEY;
+
+        const positive = yvals.map(v => (!isNaN(v) && v > 0) ? v : 0);
+        const negative = yvals.map(v => (!isNaN(v) && v < 0) ? v : 0);
+
+        if (positive.some(v => v > 0)) {{
+          traces.push({{
+            x: xvals,
+            y: positive,
+            type: "bar",
+            marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
+            offsetgroup: baseGroup + "-pos",
+            text: yvals.map(v => (!isNaN(v) && v > 0) ? fmt(v, perShare) : ""),
+            hovertemplate: "TICKER:" + ticker +
+                           "<br>YEAR:%{{customdata[0]}}" +
+                           "<br>TYPE:" + typ +
+                           "<br>CATEGORY:" + row.CATEGORY +
+                           "<br>SUBCATEGORY:" + row.SUBCATEGORY +
+                           "<br>ITEM:" + row.ITEM +
+                           "<br>VALUE:%{{text}}<extra></extra>",
+            customdata: activeYears.map(y => [y]),
+            legendgroup: ticker
+          }});
+        }}
+
+        if (negative.some(v => v < 0)) {{
+          traces.push({{
+            x: xvals,
+            y: negative,
+            type: "bar",
+            marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
+            offsetgroup: baseGroup + "-neg",
+            text: yvals.map(v => (!isNaN(v) && v < 0) ? fmt(v, perShare) : ""),
+            hovertemplate: "TICKER:" + ticker +
+                           "<br>YEAR:%{{customdata[0]}}" +
+                           "<br>TYPE:" + typ +
+                           "<br>CATEGORY:" + row.CATEGORY +
+                           "<br>SUBCATEGORY:" + row.SUBCATEGORY +
+                           "<br>ITEM:" + row.ITEM +
+                           "<br>VALUE:%{{text}}<extra></extra>",
+            customdata: activeYears.map(y => [y]),
+            legendgroup: ticker
+          }});
+        }}
       }}
     }}
   }}
@@ -1176,28 +1203,56 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
           return baseVal;
         }});
 
-        if (yvals.every(v => isNaN(v))) {{
+        const hasValid = yvals.some(v => !isNaN(v) && v !== 0);
+        if (!hasValid) {{
           continue;
         }}
         const xvals = activeBaseYears.map(b => b + (tickerOffsets[ticker] || 0));
-        traces.push({{
-          x: xvals,
-          y: yvals,
-          type: "bar",
-          width: 0.6,
-          marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
-          offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
-          text: yvals.map(v => fmt(v)),
-          hovertemplate: "TICKER:" + ticker +
-                         "<br>YEAR:%{{customdata[0]}}" +
-                         "<br>TYPE:" + typ +
-                         "<br>CATEGORY:" + row.CATEGORY +
-                         "<br>SUBCATEGORY:" + row.SUBCATEGORY +
-                         "<br>ITEM:" + row.ITEM +
-                         "<br>VALUE:%{{text}}<extra></extra>",
-          customdata: activeYears.map(y => [y]),
-          legendgroup: ticker
-        }});
+        const baseGroup = ticker + "-" + typ + "-" + row._CANONICAL_KEY;
+        const positive = yvals.map(v => (!isNaN(v) && v > 0) ? v : 0);
+        const negative = yvals.map(v => (!isNaN(v) && v < 0) ? v : 0);
+
+        if (positive.some(v => v > 0)) {{
+          traces.push({{
+            x: xvals,
+            y: positive,
+            type: "bar",
+            width: 0.6,
+            marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
+            offsetgroup: baseGroup + "-pos",
+            text: yvals.map(v => (!isNaN(v) && v > 0) ? fmt(v) : ""),
+            hovertemplate: "TICKER:" + ticker +
+                           "<br>YEAR:%{{customdata[0]}}" +
+                           "<br>TYPE:" + typ +
+                           "<br>CATEGORY:" + row.CATEGORY +
+                           "<br>SUBCATEGORY:" + row.SUBCATEGORY +
+                           "<br>ITEM:" + row.ITEM +
+                           "<br>VALUE:%{{text}}<extra></extra>",
+            customdata: activeYears.map(y => [y]),
+            legendgroup: ticker
+          }});
+        }}
+
+        if (negative.some(v => v < 0)) {{
+          traces.push({{
+            x: xvals,
+            y: negative,
+            type: "bar",
+            width: 0.6,
+            marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
+            offsetgroup: baseGroup + "-neg",
+            text: yvals.map(v => (!isNaN(v) && v < 0) ? fmt(v) : ""),
+            hovertemplate: "TICKER:" + ticker +
+                           "<br>YEAR:%{{customdata[0]}}" +
+                           "<br>TYPE:" + typ +
+                           "<br>CATEGORY:" + row.CATEGORY +
+                           "<br>SUBCATEGORY:" + row.SUBCATEGORY +
+                           "<br>ITEM:" + row.ITEM +
+                           "<br>VALUE:%{{text}}<extra></extra>",
+            customdata: activeYears.map(y => [y]),
+            legendgroup: ticker
+          }});
+        }}
       }}
     }}
   }}
@@ -1346,7 +1401,7 @@ function renderBars() {{
 
   const layout = {{
     height: 750,
-    barmode: "stack",
+    barmode: "relative",
     bargap: 0.15,
     title: "Financial Values",
     xaxis: {{ tickvals: buildBaseYears(activeYears), ticktext: tickText, title: "Date" }},
