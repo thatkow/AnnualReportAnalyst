@@ -255,7 +255,9 @@ def compare_stacked_financials(
     year_labels = []
     for year in sorted_years:
         for ticker in tickers:
-            year_labels.append({"label": f"{year}-{ticker}", "ticker": ticker, "year": year})
+            release_val = release_entries.get(ticker, {}).get(year, "")
+            label_text = f"{year} ({release_val}) - {ticker}" if release_val else f"{year} - {ticker}"
+            year_labels.append({"label": label_text, "ticker": ticker, "year": year})
 
     records = []
     for _, r in combined_df.iterrows():
@@ -329,6 +331,7 @@ const includeIntangiblesDefault = {str(include_intangibles).lower()};
 let includeIntangibles = includeIntangiblesDefault;
 const factorLookup = {factor_json};
 const yearLabels = {year_labels_json};
+const yearLabelMap = Object.fromEntries(yearLabels.map(y => [`${{y.year}}|${{y.ticker}}`, y.label]));
 const releaseMap = {release_json};
 const typeOffsets = {type_offsets_json};
 const tickerOffsets = {ticker_offsets_json};
@@ -452,7 +455,8 @@ function renderBars() {{
       for (const row of subset) {{
         const color = colorMap[row._CANONICAL_KEY];
         const yvals = activeYears.map((year) => {{
-          const label = `${{year}}-${{ticker}}`;
+          const labelKey = `${{year}}|${{ticker}}`;
+          const label = yearLabelMap[labelKey] || `${{year}} - ${{ticker}}`;
           if (!yearToggleState[label]) return NaN;
           const factorTickerMap = factorMap[ticker] || {{}};
           const factorVal = factorTickerMap[year];
@@ -462,14 +466,16 @@ function renderBars() {{
         }});
         if (yvals.every(v => isNaN(v))) continue;
         const xvals = baseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
+        const releaseDates = activeYears.map(year => releaseMap[ticker]?.[year] || "");
         traces.push({{
           x: xvals,
           y: yvals,
+          customdata: releaseDates,
           type: "bar",
           marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
           offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
-          hovertemplate: `${{typ}}<br>${{row.ITEM || ''}}<br>${{ticker}}<br>%{{y}}<extra></extra>`,
-          _orderKey: baseYears[0],
+          hovertemplate: `${{typ}}<br>${{row.ITEM || ''}}<br>${{ticker}}<br>%{{customdata}}<br>%{{y}}<extra></extra>`,
+          _orderKey: Math.min(...xvals),
         }});
       }}
     }}
