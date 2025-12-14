@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, Iterable, List
 
@@ -141,9 +145,15 @@ def compare_stacked_financials(
 
     date_labels = [f"{year}-{ticker}" for year in year_cols for ticker in tickers]
 
-    visuals_dir = Path(out_path).expanduser().resolve().parent if out_path else companies_list[0].default_visuals_path().parent
-    visuals_dir.mkdir(parents=True, exist_ok=True)
-    out_path = Path(out_path) if out_path else visuals_dir / "stacked_comparison.html"
+    if out_path:
+        out_path = Path(out_path).expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        temp_file = tempfile.NamedTemporaryFile(
+            prefix="stacked_comparison_", suffix=".html", delete=False
+        )
+        out_path = Path(temp_file.name)
+        temp_file.close()
 
     _render_comparison_report(
         records,
@@ -155,7 +165,21 @@ def compare_stacked_financials(
         out_path,
     )
 
+    _open_with_default(out_path)
+
     return Path(out_path)
+
+
+def _open_with_default(path: Path) -> None:
+    if sys.platform.startswith("win"):
+        os.startfile(path)  # type: ignore[attr-defined]
+        return
+
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    try:
+        subprocess.run([opener, str(path)], check=False)
+    except FileNotFoundError:
+        pass
 
 
 def _render_comparison_report(
