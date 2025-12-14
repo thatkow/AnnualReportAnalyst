@@ -103,6 +103,16 @@ def _prepare_company_financials(company: Company, include_intangibles: bool) -> 
     }
 
 
+def _sort_financial_dates(dates: Iterable[str]) -> List[str]:
+    def sort_key(val: str):
+        dt = pd.to_datetime(val, errors="coerce")
+        if pd.isna(dt):
+            return (1, str(val))
+        return (0, dt.value)
+
+    return sorted(dates, key=sort_key)
+
+
 def compare_stacked_financials(
     companies: Iterable[Company], *, out_path: str | Path | None = None, include_intangibles: bool = True
 ) -> Path:
@@ -115,7 +125,8 @@ def compare_stacked_financials(
     dfs = [entry["df"] for entry in processed]
     combined = pd.concat(dfs, ignore_index=True)
 
-    year_cols = [c for c in combined.columns if c not in set(COMBINED_BASE_COLUMNS + ["Ticker"])]
+    year_cols_raw = [c for c in combined.columns if c not in set(COMBINED_BASE_COLUMNS + ["Ticker"])]
+    sorted_years = _sort_financial_dates(year_cols_raw)
     tickers = [c.ticker for c in companies_list]
 
     pdf_sources = {}
@@ -139,11 +150,11 @@ def compare_stacked_financials(
             "NOTE": row.get("NOTE"),
             "Key4Coloring": row.get("Key4Coloring"),
         }
-        for year in year_cols:
+        for year in sorted_years:
             rec[f"{year}-{row.get('Ticker')}"] = float(row.get(year)) if pd.notna(row.get(year)) else 0.0
         records.append(rec)
 
-    date_labels = [f"{year}-{ticker}" for year in year_cols for ticker in tickers]
+    date_labels = [f"{year}-{ticker}" for year in sorted_years for ticker in tickers]
 
     if out_path:
         out_path = Path(out_path).expanduser().resolve()
@@ -208,21 +219,29 @@ def _render_comparison_report(
 <script src=\"https://cdn.plot.ly/plotly-2.31.1.min.js\"></script>
 <style>
 body {{ font-family: sans-serif; margin: 40px; }}
-#controls {{ margin: 15px 0; }}
-.year-toggle {{ display: inline-flex; align-items: center; gap: 4px; margin-right: 12px; }}
+#controls {{ margin: 15px 0; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }}
+.multiselect {{ position: relative; min-width: 260px; }}
+.select-box {{ border: 1px solid #ccc; padding: 8px; cursor: pointer; user-select: none; background: #fff; }}
+.checkboxes {{ display: none; border: 1px solid #ccc; border-top: none; position: absolute; width: 100%; background: #fff; z-index: 1; max-height: 200px; overflow-y: auto; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }}
+.checkboxes label {{ display: block; padding: 6px 8px; cursor: pointer; }}
+.checkboxes label:hover {{ background: #f1f1f1; }}
+.pill {{ display: inline-flex; align-items: center; gap: 4px; margin-right: 12px; }}
 </style>
 </head>
 <body>
 <h2>Financial Comparison (Per Share)</h2>
 
-<div id=\"controls\">
-  <label style=\"margin-right: 20px;\">
+<div id=\"controls\"> 
+  <label class=\"pill\"> 
     <input type=\"checkbox\" id=\"intangiblesCheckbox\" /> Include intangibles
   </label>
-  <label style=\"margin-right:20px;\">
+  <label class=\"pill\"> 
     <input type=\"checkbox\" id=\"hideUncheckedYears\" /> Hide unchecked years from plots
   </label>
-  <div id=\"yearToggleContainer\" style=\"margin-top:10px;\"></div>
+  <div class=\"multiselect\"> 
+    <div class=\"select-box\" id=\"yearSelectBox\" onclick=\"toggleCheckboxes()\">Include Years in Stats</div>
+    <div id=\"checkboxes\" class=\"checkboxes\"></div>
+  </div>
 </div>
 
 <div id=\"plotBars\"></div>
@@ -239,31 +258,55 @@ const factorTooltip = {factor_tooltip};
 const yearToggleState = Object.fromEntries(dateLabels.map(lbl => [lbl, true]));
 let hideUncheckedYears = false;
 let includeIntangibles = includeIntangiblesDefault;
+let checkboxesVisible = false;
+
+function toggleCheckboxes() {{
+  const list = document.getElementById('checkboxes');
+  checkboxesVisible = !checkboxesVisible;
+  list.style.display = checkboxesVisible ? 'block' : 'none';
+}}
+
+document.addEventListener('click', function (e) {{
+  if (!e.target.closest('.multiselect')) {{
+    const list = document.getElementById('checkboxes');
+    list.style.display = 'none';
+    checkboxesVisible = false;
+  }}
+}});
 
 function filterIntangibles(data, include) {{
   if (include) return data.slice();
   return data.filter(r => (r.NOTE || "").toLowerCase() !== "intangibles");
 }}
 
-function initYearCheckboxes() {{
-  const container = document.getElementById('yearToggleContainer');
+function renderYearCheckboxes() {{
+  const container = document.getElementById('checkboxes');
   container.innerHTML = '';
   dateLabels.forEach(lbl => {{
-    const wrapper = document.createElement('label');
-    wrapper.className = 'year-toggle';
+    const label = document.createElement('label');
     const cb = document.createElement('input');
     cb.type = 'checkbox';
+    cb.value = lbl;
     cb.checked = yearToggleState[lbl];
     cb.addEventListener('change', () => {{
       yearToggleState[lbl] = cb.checked;
+      updateYearSelectLabel();
       renderBars();
     }});
-    wrapper.appendChild(cb);
+    label.appendChild(cb);
     const span = document.createElement('span');
-    span.textContent = lbl;
-    wrapper.appendChild(span);
-    container.appendChild(wrapper);
+    span.textContent = ' ' + lbl;
+    label.appendChild(span);
+    container.appendChild(label);
   }});
+  updateYearSelectLabel();
+}}
+
+function updateYearSelectLabel() {{
+  const selectBox = document.getElementById('yearSelectBox');
+  const total = dateLabels.length;
+  const active = dateLabels.filter(lbl => yearToggleState[lbl]).length;
+  selectBox.textContent = `Include Years in Stats (${{active}}/${{total}})`;
 }}
 
 function getActiveLabels() {{
@@ -349,7 +392,7 @@ document.addEventListener('DOMContentLoaded', () => {{
       renderBars();
     }});
   }}
-  initYearCheckboxes();
+  renderYearCheckboxes();
   renderBars();
 }});
 
