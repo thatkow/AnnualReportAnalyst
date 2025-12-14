@@ -480,6 +480,7 @@ function renderBars() {{
           offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
           hovertemplate: `${{typ}}<br>${{row.ITEM || ''}}<br>${{ticker}}<br>%{{customdata}}<br>%{{y}}<extra></extra>`,
           _orderKey: Math.min(...xvals),
+          _ticker: ticker,
         }});
       }}
     }}
@@ -488,6 +489,7 @@ function renderBars() {{
   traces.sort((a, b) => (a._orderKey ?? 0) - (b._orderKey ?? 0));
 
   const baseSums = new Map();
+  const stackTotals = new Map();
   traces.forEach(tr => {{
     const bases = [];
     tr.x.forEach((xVal, idx) => {{
@@ -506,9 +508,40 @@ function renderBars() {{
       }}
       baseSums.set(key, current);
       bases.push(baseVal);
+
+      if (tr._ticker) {{
+        const totalKey = `${{xVal}}|${{tr._ticker}}`;
+        const totals = stackTotals.get(totalKey) || {{ sum: 0, has: false }};
+        totals.sum += yVal;
+        totals.has = true;
+        stackTotals.set(totalKey, totals);
+      }}
     }});
     tr.base = bases;
     delete tr._orderKey;
+  }});
+
+  const dotByTicker = new Map();
+  stackTotals.forEach((totals, key) => {{
+    if (!totals.has) return;
+    const [xStr, ticker] = key.split("|");
+    const xVal = Number(xStr);
+    if (!dotByTicker.has(ticker)) dotByTicker.set(ticker, {{ x: [], y: [] }});
+    const entry = dotByTicker.get(ticker);
+    entry.x.push(xVal);
+    entry.y.push(totals.sum);
+  }});
+
+  dotByTicker.forEach((vals, ticker) => {{
+    traces.push({{
+      x: vals.x,
+      y: vals.y,
+      type: "scatter",
+      mode: "markers",
+      marker: {{ color: hashColor(ticker), size: 12 }},
+      hovertemplate: `${{ticker}}<br>Total: %{{y}}<extra></extra>`,
+      showlegend: false,
+    }});
   }});
 
   const annotations = activeYears.map((year, idx) => {{
