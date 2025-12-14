@@ -301,8 +301,11 @@ def compare_stacked_financials(
 
     combined_frames: list[pd.DataFrame] = []
     factor_lookup: Dict[str, Dict[str, float]] = {}
-    factor_tooltip: Dict[str, list[str]] = {}
     pdf_sources: Dict[str, str] = {}
+    release_lines: Dict[str, str] = {}
+    price_tooltips: Dict[str, Dict[str, str]] = {}
+    allowed_shifts = ["-30", "-10", "-1", "0", "1", "10", "30"]
+    common_shifts: set[str] = set(allowed_shifts)
 
     for company in companies:
         combined_df = company.combined
@@ -377,6 +380,7 @@ def compare_stacked_financials(
         ].copy()
         for year in num_cols:
             price_rows[year] = pd.to_numeric(price_rows[year], errors="coerce")
+        available_shifts: set[str] = set()
 
         release_map = _release_date_map(df_all, num_cols, company)
         pdf_map = _pdf_source_map(df_all, num_cols)
@@ -411,24 +415,45 @@ def compare_stacked_financials(
         for original_year, new_year in renamed_cols.items():
             factor_lookup.setdefault("", {})[new_year] = 1.0
             release_date = release_map.get(original_year, "")
-            entries = [f"Release Date: {release_date + ' days' if release_date else 'NA'}"]
+            release_lines[new_year] = f"Release Date: {release_date + ' days' if release_date else 'NA'}"
             for _, prow in price_rows.iterrows():
-                label = str(prow.get("SUBCATEGORY", "")).strip() or "Price"
-                label = f"{ticker} {label}".strip()
-                factor_lookup.setdefault(label, {})
+                label_raw = str(prow.get("SUBCATEGORY", "")).strip() or "Price"
+                if label_raw not in allowed_shifts:
+                    continue
+                available_shifts.add(label_raw)
+                label = f"{ticker} {label_raw}".strip()
+                factor_lookup.setdefault(label_raw, {})
                 price_val = pd.to_numeric(prow.get(original_year, ""), errors="coerce")
                 if pd.isna(price_val) or price_val <= 0:
-                    factor_lookup[label][new_year] = float("nan")
-                    entries.append(f"{label}: NaN")
+                    factor_lookup[label_raw][new_year] = float("nan")
+                    tooltip_line = f"{label}: NaN"
                 else:
-                    factor_lookup[label][new_year] = 1.0 / float(price_val)
-                    entries.append(f"{label}: {price_val:.3f}")
-            factor_tooltip[new_year] = entries
+                    factor_lookup[label_raw][new_year] = 1.0 / float(price_val)
+                    tooltip_line = f"{label}: {price_val:.3f}"
+                price_tooltips.setdefault(new_year, {})[label_raw] = tooltip_line
             pdf_name = pdf_map.get(original_year)
             if pdf_name:
                 pdf_sources[new_year] = pdf_name
 
         combined_frames.append(df_plot)
+        common_shifts &= available_shifts
+
+    if not common_shifts:
+        raise ValueError("No common Release Date Shift values across all companies.")
+
+    factor_lookup = {k: v for k, v in factor_lookup.items() if k == "" or k in common_shifts}
+
+    factor_tooltip: Dict[str, list[str]] = {}
+    for year, release_line in release_lines.items():
+        entries = [release_line]
+        price_entries = price_tooltips.get(year, {})
+        for shift in allowed_shifts:
+            if shift not in common_shifts:
+                continue
+            tooltip_line = price_entries.get(shift)
+            if tooltip_line:
+                entries.append(tooltip_line)
+        factor_tooltip[year] = entries
 
     combined_df_plot = pd.concat(combined_frames, ignore_index=True)
 
