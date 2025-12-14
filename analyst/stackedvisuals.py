@@ -69,7 +69,8 @@ def render_stacked_annual_report(
             rec[y] = float(val) if pd.notna(val) else 0.0
         records.append(rec)
 
-    type_offsets = {t: round((i - (len(types) - 1) / 2) * 0.6, 2) for i, t in enumerate(types)}
+    # Keep comparison stacks aligned per ticker by avoiding per-type offsets
+    type_offsets = {t: 0 for t in types}
     type_linestyles = {t: ("solid" if i % 2 == 0 else "dot") for i, t in enumerate(types)}
 
     html = f"""<!DOCTYPE html>
@@ -468,7 +469,7 @@ function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
         if (yvals.every(v => isNaN(v))) {{
           continue;
         }}
-        const xvals = activeBaseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
+        const xvals = activeBaseYears.map(b => b + (tickerOffsets[ticker] || 0));
         traces.push({{
           x: xvals,
           y: yvals,
@@ -513,7 +514,7 @@ function buildCumsumLines(factorName, perShare, activeYears, activeBaseYears) {{
       if (perYearTotals.every(v => isNaN(v))) {{
         continue;
       }}
-      const xvals = activeBaseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
+      const xvals = activeBaseYears.map(b => b + (tickerOffsets[ticker] || 0));
       lines.push({{
         x: xvals,
         y: perYearTotals,
@@ -895,7 +896,8 @@ def render_stacked_comparison(
             rec[y] = float(val) if pd.notna(val) else 0.0
         records.append(rec)
 
-    type_offsets = {t: round((i - (len(types) - 1) / 2) * 0.6, 2) for i, t in enumerate(types)}
+    # Keep comparison stacks aligned per ticker by avoiding per-type offsets
+    type_offsets = {t: 0 for t in types}
     type_linestyles = {t: ("solid" if i % 2 == 0 else "dot") for i, t in enumerate(types)}
 
     html = f"""<!DOCTYPE html>
@@ -1177,7 +1179,7 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
         if (yvals.every(v => isNaN(v))) {{
           continue;
         }}
-        const xvals = activeBaseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
+        const xvals = activeBaseYears.map(b => b + (tickerOffsets[ticker] || 0));
         traces.push({{
           x: xvals,
           y: yvals,
@@ -1216,7 +1218,7 @@ function buildCumsumLines(factorName, activeYears, activeBaseYears) {{
       if (perYearTotals.every(v => isNaN(v))) {{
         continue;
       }}
-      const xvals = activeBaseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
+      const xvals = activeBaseYears.map(b => b + (tickerOffsets[ticker] || 0));
       lines.push({{
         x: xvals,
         y: perYearTotals,
