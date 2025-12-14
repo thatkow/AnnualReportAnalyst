@@ -486,7 +486,30 @@ function renderBars() {{
   }}
 
   traces.sort((a, b) => (a._orderKey ?? 0) - (b._orderKey ?? 0));
-  traces.forEach(tr => delete tr._orderKey);
+
+  const baseSums = new Map();
+  traces.forEach(tr => {{
+    const bases = [];
+    tr.x.forEach((xVal, idx) => {{
+      const yVal = tr.y[idx];
+      if (yVal === null || Number.isNaN(yVal)) {{
+        bases.push(NaN);
+        return;
+      }}
+      const key = `${{xVal}}|${{tr.offsetgroup || ''}}`;
+      const current = baseSums.get(key) || {{ pos: 0, neg: 0 }};
+      const baseVal = yVal >= 0 ? current.pos : current.neg;
+      if (yVal >= 0) {{
+        current.pos += yVal;
+      }} else {{
+        current.neg += yVal;
+      }}
+      baseSums.set(key, current);
+      bases.push(baseVal);
+    }});
+    tr.base = bases;
+    delete tr._orderKey;
+  }});
 
   const annotations = activeYears.map((year, idx) => {{
     const baseX = baseYears[idx];
