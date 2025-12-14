@@ -38,11 +38,11 @@ def _extract_multiplier(row_df: pd.DataFrame, num_cols: list[str]) -> Dict[str, 
             if val.notna().any():
                 val = val[val.notna()].iloc[0]
             else:
-                raise ValueError(f"Multiplier for column '{col}' is empty or NaN.")
+                return 1.0
 
         s = str(val).strip()
         if s == "":
-            raise ValueError(f"Multiplier for column '{col}' is blank.")
+            return 1.0
 
         try:
             return float(s)
