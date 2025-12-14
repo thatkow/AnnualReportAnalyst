@@ -447,8 +447,6 @@ if (numericFactors.length) {{
 function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
   const factorMap = factorLookup[factorName];
   const traces = [];
-  const positiveStack = new Map();
-  const negativeStack = new Map();
   for (const ticker of tickers) {{
     for (const typ of types) {{
       const subset = adjustedRawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
@@ -472,28 +470,17 @@ function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
           continue;
         }}
         const xvals = activeBaseYears.map(b => b + (tickerOffsets[ticker] || 0));
-        const baseGroup = ticker + "-" + typ + "-" + row._CANONICAL_KEY;
 
         const positive = yvals.map(v => (!isNaN(v) && v > 0) ? v : 0);
         const negative = yvals.map(v => (!isNaN(v) && v < 0) ? v : 0);
 
         if (positive.some(v => v > 0)) {{
-          const base = xvals.map((x, idx) => {{
-            const key = String(x);
-            const current = positiveStack.get(key) || 0;
-            const y = positive[idx] || 0;
-            if (y) {{
-              positiveStack.set(key, current + y);
-            }}
-            return current;
-          }});
           traces.push({{
             x: xvals,
             y: positive,
             type: "bar",
             marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
-            base,
-            offsetgroup: baseGroup + "-pos",
+            offsetgroup: ticker + "-pos",
             text: yvals.map(v => (!isNaN(v) && v > 0) ? fmt(v, perShare) : ""),
             hovertemplate: "TICKER:" + ticker +
                            "<br>YEAR:%{{customdata[0]}}" +
@@ -508,22 +495,12 @@ function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
         }}
 
         if (negative.some(v => v < 0)) {{
-          const base = xvals.map((x, idx) => {{
-            const key = String(x);
-            const current = negativeStack.get(key) || 0;
-            const y = negative[idx] || 0;
-            if (y) {{
-              negativeStack.set(key, current + y);
-            }}
-            return current;
-          }});
           traces.push({{
             x: xvals,
             y: negative,
             type: "bar",
             marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
-            base,
-            offsetgroup: baseGroup + "-neg",
+            offsetgroup: ticker + "-neg",
             text: yvals.map(v => (!isNaN(v) && v < 0) ? fmt(v, perShare) : ""),
             hovertemplate: "TICKER:" + ticker +
                            "<br>YEAR:%{{customdata[0]}}" +
@@ -1214,8 +1191,6 @@ function getFactor(factorName, ticker, year) {{
 
 function buildBarTraces(factorName, activeYears, activeBaseYears) {{
   const traces = [];
-  const positiveStack = new Map();
-  const negativeStack = new Map();
   for (const ticker of tickers) {{
     for (const typ of types) {{
       const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
@@ -1232,28 +1207,17 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
           continue;
         }}
         const xvals = activeBaseYears.map(b => b + (tickerOffsets[ticker] || 0));
-        const baseGroup = ticker + "-" + typ + "-" + row._CANONICAL_KEY;
         const positive = yvals.map(v => (!isNaN(v) && v > 0) ? v : 0);
         const negative = yvals.map(v => (!isNaN(v) && v < 0) ? v : 0);
 
         if (positive.some(v => v > 0)) {{
-          const base = xvals.map((x, idx) => {{
-            const key = String(x);
-            const current = positiveStack.get(key) || 0;
-            const y = positive[idx] || 0;
-            if (y) {{
-              positiveStack.set(key, current + y);
-            }}
-            return current;
-          }});
           traces.push({{
             x: xvals,
             y: positive,
             type: "bar",
             width: 0.6,
             marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
-            base,
-            offsetgroup: baseGroup + "-pos",
+            offsetgroup: ticker + "-pos",
             text: yvals.map(v => (!isNaN(v) && v > 0) ? fmt(v) : ""),
             hovertemplate: "TICKER:" + ticker +
                            "<br>YEAR:%{{customdata[0]}}" +
@@ -1268,23 +1232,13 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
         }}
 
         if (negative.some(v => v < 0)) {{
-          const base = xvals.map((x, idx) => {{
-            const key = String(x);
-            const current = negativeStack.get(key) || 0;
-            const y = negative[idx] || 0;
-            if (y) {{
-              negativeStack.set(key, current + y);
-            }}
-            return current;
-          }});
           traces.push({{
             x: xvals,
             y: negative,
             type: "bar",
             width: 0.6,
             marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
-            base,
-            offsetgroup: baseGroup + "-neg",
+            offsetgroup: ticker + "-neg",
             text: yvals.map(v => (!isNaN(v) && v < 0) ? fmt(v) : ""),
             hovertemplate: "TICKER:" + ticker +
                            "<br>YEAR:%{{customdata[0]}}" +
