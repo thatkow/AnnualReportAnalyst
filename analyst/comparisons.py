@@ -31,7 +31,7 @@ REQUIRED_COMMON_ROWS = [
 ]
 
 
-def _validate_required_rows(df: pd.DataFrame, ticker: str) -> None:
+def _validate_required_rows(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     missing: List[tuple[str, str, str, str, str]] = []
     for row in REQUIRED_COMMON_ROWS:
         type_val, cat_val, sub_val, item_val, note_val = row
@@ -43,10 +43,31 @@ def _validate_required_rows(df: pd.DataFrame, ticker: str) -> None:
         mask &= df["NOTE"].astype(str).str.strip().str.lower() == note_val.lower()
         if not mask.any():
             missing.append(row)
-    if missing:
-        raise ValueError(
-            f"Missing required rows for {ticker}: {missing}. Ensure combined data contains these entries."
-        )
+    if not missing:
+        return df
+
+    # Fill missing common rows with placeholder entries so comparisons still render
+    # even when a source omits the excluded rows. These placeholders remain filtered
+    # out of visuals because they retain the "excluded" note.
+    placeholders: list[dict[str, object]] = []
+    for type_val, cat_val, sub_val, item_val, note_val in missing:
+        entry: dict[str, object] = {
+            "TYPE": type_val,
+            "CATEGORY": cat_val,
+            "SUBCATEGORY": sub_val,
+            "ITEM": item_val,
+            "NOTE": note_val,
+        }
+        placeholders.append(entry)
+
+    for entry in placeholders:
+        for col in df.columns:
+            entry.setdefault(col, "")
+
+    df_placeholder = pd.DataFrame(placeholders, columns=df.columns)
+    df_placeholder["Ticker"] = ticker
+    combined = pd.concat([df, df_placeholder], ignore_index=True)
+    return combined
 
 
 def _prepare_company_dataframe(
@@ -59,7 +80,7 @@ def _prepare_company_dataframe(
         raise ValueError(f"Combined dataframe is empty for {ticker}; generate data first.")
 
     df_all = combined_df.copy().fillna("")
-    _validate_required_rows(df_all, ticker)
+    df_all = _validate_required_rows(df_all, ticker)
 
     excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
     num_cols = [c for c in df_all.columns if c not in excluded_cols]
