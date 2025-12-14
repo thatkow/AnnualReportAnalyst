@@ -341,7 +341,7 @@ function getPlotHeight() {{
   const padding = 80; // remaining padding/margins
   const desired = window.innerHeight - controlsHeight - headerHeight - padding;
   return Math.max(desired, 500);
-}
+  }}
 
 function hashColor(str) {{
   let hash = 0;
