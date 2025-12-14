@@ -371,7 +371,7 @@ function renderBars() {{
     barmode: 'relative',
     xaxis: {{title: 'Financial Date - Ticker'}},
     yaxis: {{title: 'Per Share Value'}},
-    legend: {{orientation: 'h'}},
+    showlegend: false,
   }};
   Plotly.newPlot('plotBars', traces, layout, {{responsive: true}});
 }}
