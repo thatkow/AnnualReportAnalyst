@@ -12,7 +12,7 @@ from analyst.stats import (
     financials_boxplots,
     financials_violin_comparison,
 )
-from .stackedvisuals import render_stacked_annual_report
+from .stackedvisuals import render_stacked_annual_report, render_stacked_comparison
 from . import yahoo
 
 # Base, non-date columns present in the combined dataset
@@ -288,3 +288,170 @@ def plot_stacked_financials(
 
 # Backwards compatibility
 plot_stacked_visuals = plot_stacked_financials
+
+
+def compare_stacked_financials(
+    companies: list[Company],
+    *,
+    out_path: str | Path | None = None,
+    include_intangibles: bool = True,
+) -> Path:
+    if not companies:
+        raise ValueError("No companies provided for comparison.")
+
+    combined_frames: list[pd.DataFrame] = []
+    factor_lookup: Dict[str, Dict[str, float]] = {}
+    factor_tooltip: Dict[str, list[str]] = {}
+    pdf_sources: Dict[str, str] = {}
+
+    for company in companies:
+        combined_df = company.combined
+        ticker = company.ticker
+
+        if combined_df.empty:
+            raise ValueError(f"Combined dataframe is empty for {ticker}; generate data first.")
+
+        df_all = combined_df.copy().fillna("")
+        excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
+        num_cols = [c for c in df_all.columns if c not in excluded_cols]
+
+        for col in num_cols:
+            try:
+                series = df_all[col]
+                if not hasattr(series, "dtype"):
+                    raise TypeError(
+                        f"Column '{col}' returned a non-Series object "
+                        f"(possible duplicate column names or invalid selection)."
+                    )
+
+                df_all[col] = series.astype(str).str.replace(",", "", regex=False)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Error while processing column '{col}'. "
+                    f"Column type = {type(series)}. "
+                    f"Columns in DataFrame = {list(df_all.columns)}. "
+                    f"Details: {e}"
+                )
+
+        share_mult = _extract_multiplier(
+            df_all[df_all["CATEGORY"].str.lower() == "shares multiplier"], num_cols
+        )
+        stock_mult = _extract_multiplier(
+            df_all[df_all["CATEGORY"].str.lower() == "stock multiplier"], num_cols
+        )
+        fin_mult = _extract_multiplier(
+            df_all[df_all["CATEGORY"].str.lower() == "financial multiplier"], num_cols
+        )
+        inc_mult = _extract_multiplier(
+            df_all[df_all["CATEGORY"].str.lower() == "income multiplier"], num_cols
+        )
+
+        df_all["Ticker"] = ticker
+
+        notes_lower = df_all["NOTE"].astype(str).str.lower()
+        mask = notes_lower != "excluded"
+
+        df = df_all[mask].copy()
+        for col in num_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        neg_idx = df["NOTE"].str.lower() == "negated"
+        df.loc[neg_idx, num_cols] = df.loc[neg_idx, num_cols].map(
+            lambda x: -1.0 * x if pd.notna(x) else x
+        )
+
+        def _apply_row_multiplier(mask: pd.Series, factors: Dict[str, float]) -> None:
+            for year in num_cols:
+                factor = factors.get(year, 1.0)
+                if factor == 1.0:
+                    continue
+                df.loc[mask, year] = df.loc[mask, year] * factor
+
+        _apply_row_multiplier(df["TYPE"].str.lower() == "financial", fin_mult)
+        _apply_row_multiplier(df["TYPE"].str.lower() == "income", inc_mult)
+        _apply_row_multiplier(df["TYPE"].str.lower() == "shares", share_mult)
+        _apply_row_multiplier(df["TYPE"].str.lower() == "shares", stock_mult)
+
+        price_rows = df_all[
+            (df_all["TYPE"].str.lower() == "stock")
+            & (df_all["CATEGORY"].str.lower() == "prices")
+        ].copy()
+        for year in num_cols:
+            price_rows[year] = pd.to_numeric(price_rows[year], errors="coerce")
+
+        release_map = _release_date_map(df_all, num_cols, company)
+        pdf_map = _pdf_source_map(df_all, num_cols)
+
+        year_cols = [c for c in df.columns if c not in excluded_cols]
+
+        share_counts: Dict[str, float] = {}
+        share_rows = df[df["ITEM"].str.lower().str.contains("number of shares", na=False)]
+        if not share_rows.empty:
+            row = share_rows.iloc[0]
+            for year in year_cols:
+                raw_val = row.get(year)
+                if pd.notna(raw_val):
+                    numeric_val = float(raw_val)
+                    share_counts[year] = round(numeric_val, 2)
+                else:
+                    raise ValueError(f"Number of shares for year '{year}' is missing or NaN for {ticker}.")
+        else:
+            share_counts = {year: 1.0 for year in year_cols}
+
+        df_plot = df[~df["ITEM"].str.lower().str.contains("number of shares", na=False)].copy()
+
+        for col in year_cols:
+            shares = share_counts.get(col, 1.0)
+            if shares == 0 or pd.isna(shares):
+                raise ValueError(f"Share count for {ticker} and year '{col}' is invalid: {shares}")
+            df_plot[col] = df_plot[col] / shares
+
+        renamed_cols = {col: f"{col}-{ticker}" for col in year_cols}
+        df_plot = df_plot.rename(columns=renamed_cols)
+
+        for original_year, new_year in renamed_cols.items():
+            factor_lookup.setdefault("", {})[new_year] = 1.0
+            release_date = release_map.get(original_year, "")
+            entries = [f"Release Date: {release_date + ' days' if release_date else 'NA'}"]
+            for _, prow in price_rows.iterrows():
+                label = str(prow.get("SUBCATEGORY", "")).strip() or "Price"
+                label = f"{ticker} {label}".strip()
+                factor_lookup.setdefault(label, {})
+                price_val = pd.to_numeric(prow.get(original_year, ""), errors="coerce")
+                if pd.isna(price_val) or price_val <= 0:
+                    factor_lookup[label][new_year] = float("nan")
+                    entries.append(f"{label}: NaN")
+                else:
+                    factor_lookup[label][new_year] = 1.0 / float(price_val)
+                    entries.append(f"{label}: {price_val:.3f}")
+            factor_tooltip[new_year] = entries
+            pdf_name = pdf_map.get(original_year)
+            if pdf_name:
+                pdf_sources[new_year] = pdf_name
+
+        combined_frames.append(df_plot)
+
+    combined_df_plot = pd.concat(combined_frames, ignore_index=True)
+
+    if out_path:
+        output_path = Path(out_path)
+    else:
+        base = companies[0].default_visuals_path()
+        output_path = base.with_name("stacked_comparison_report.html")
+
+    visuals_dir = output_path.expanduser().resolve().parent
+    visuals_dir.mkdir(parents=True, exist_ok=True)
+    output_path = visuals_dir / output_path.name
+
+    render_stacked_comparison(
+        combined_df_plot,
+        title="Financial/Income Comparison",
+        factor_lookup=factor_lookup,
+        factor_label="Release Date Shift",
+        factor_tooltip=factor_tooltip,
+        factor_tooltip_label="Prices",
+        pdf_sources=pdf_sources,
+        out_path=output_path,
+        include_intangibles=include_intangibles,
+    )
+
+    return output_path

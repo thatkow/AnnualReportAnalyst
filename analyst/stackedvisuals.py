@@ -774,6 +774,459 @@ document.getElementById("tabShare").onclick = () => activateTab("Share");
     print(f"✅ HTML report written to {out_path}")
     webbrowser.open(f"file://{os.path.abspath(out_path)}")
 
+    return out_path
+
+
+def render_stacked_comparison(
+    df: pd.DataFrame,
+    title: str = "Stacked Financial Comparison",
+    factor_lookup: dict | None = None,
+    factor_label: str = "Adjustment Factor",
+    factor_tooltip: dict | None = None,
+    factor_tooltip_label: str = "Stock Factors",
+    pdf_sources: dict | None = None,
+    out_path: str = "stacked_comparison_report.html",
+    include_intangibles: bool = True,
+    latest_price: float | None = None,
+):
+    if pdf_sources is None:
+        pdf_sources = {}
+
+    year_cols = [c for c in df.columns if c[:2].isdigit() or c.startswith("31.")]
+    tickers = sorted(df["Ticker"].dropna().unique())
+    types = sorted(df["TYPE"].dropna().unique())
+
+    factor_lookup = factor_lookup or {}
+    if not factor_lookup:
+        factor_lookup = {"": {y: 1.0 for y in year_cols}}
+
+    for k, v in list(factor_lookup.items()):
+        if isinstance(v, (int, float)):
+            factor_lookup[k] = {y: float(v) for y in year_cols}
+
+    records = []
+    for _, r in df.iterrows():
+        rec = {
+            "Ticker": r.get("Ticker"),
+            "TYPE": r.get("TYPE"),
+            "CATEGORY": r.get("CATEGORY"),
+            "SUBCATEGORY": r.get("SUBCATEGORY"),
+            "ITEM": r.get("ITEM"),
+            "NOTE": r.get("NOTE"),
+            "Key4Coloring": r.get("Key4Coloring"),
+        }
+        for y in year_cols:
+            val = r.get(y)
+            rec[y] = float(val) if pd.notna(val) else 0.0
+        records.append(rec)
+
+    type_offsets = {t: round((i - (len(types) - 1) / 2) * 0.6, 2) for i, t in enumerate(types)}
+    type_linestyles = {t: ("solid" if i % 2 == 0 else "dot") for i, t in enumerate(types)}
+
+    html = f"""<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+<meta charset=\"utf-8\" />
+<title>{title}</title>
+<script src=\"https://cdn.plot.ly/plotly-2.31.1.min.js\"></script>
+<style>
+body {{ font-family: sans-serif; margin: 40px; }}
+#controls {{ margin: 15px 0; }}
+.year-toggle {{
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 12px;
+}}
+</style>
+</head>
+<body>
+<h2>{title}</h2>
+
+<div id=\"controls\">
+  <label><b>Factor:</b></label>
+  <select id=\"factorSelector\"></select>
+  <label style=\"margin-left:20px;\">\n    <input type=\"checkbox\" id=\"intangiblesCheckbox\" /> Include intangibles
+  </label>
+  <label style=\"margin-left:20px;\">\n    <input type=\"checkbox\" id=\"hideUncheckedYears\" /> Hide unchecked years from plots
+  </label>
+  <div id=\"yearToggleContainer\" style=\"margin-top:10px;\"></div>
+</div>
+<div id=\"plotBars\"></div>
+
+<script>
+const years = {json.dumps(year_cols)};
+const tickers = {json.dumps(tickers)};
+const types = {json.dumps(types)};
+const baseRawData = {json.dumps(records)};
+const includeIntangiblesDefault = {str(include_intangibles).lower()};
+let includeIntangibles = includeIntangiblesDefault;
+let rawData = filterIntangibles(baseRawData, includeIntangibles);
+const factorLookup = {json.dumps(factor_lookup)};
+const factorTooltip = {json.dumps(factor_tooltip or {})};
+const factorTooltipLabel = {json.dumps(factor_tooltip_label)};
+const pdfSources = {json.dumps(pdf_sources)};
+const typeOffsets = {json.dumps(type_offsets)};
+const typeLineStyles = {json.dumps(type_linestyles)};
+const latestPrice = {json.dumps(latest_price)};
+const yearToggleState = Object.fromEntries(
+  years.map((y) => [y, true])
+);
+let hideUncheckedYears = false;
+
+function filterIntangibles(data, include) {{
+  if (include) return data.slice();
+  return data.filter(r => (r.NOTE || "").toLowerCase() !== "intangibles");
+}}
+
+function getActiveYears() {{
+  if (!hideUncheckedYears) return years.slice();
+  return years.filter(y => yearToggleState[y]);
+}}
+
+const factorLabel = {json.dumps(factor_label)};
+document.addEventListener("DOMContentLoaded", () => {{
+  document.querySelector('label b').textContent = factorLabel + ":";
+  const intangiblesCheckbox = document.getElementById("intangiblesCheckbox");
+  if (intangiblesCheckbox) {{
+    intangiblesCheckbox.checked = includeIntangiblesDefault;
+    intangiblesCheckbox.addEventListener("change", (ev) => {{
+      includeIntangibles = ev.target.checked;
+      rawData = filterIntangibles(baseRawData, includeIntangibles);
+      renderBars();
+    }});
+  }}
+  const hideUncheckedCheckbox = document.getElementById("hideUncheckedYears");
+  if (hideUncheckedCheckbox) {{
+    hideUncheckedCheckbox.addEventListener("change", (ev) => {{
+      hideUncheckedYears = ev.target.checked;
+      renderBars();
+    }});
+  }}
+  initYearCheckboxes();
+}});
+
+function humanReadable(val) {{
+  if (val === undefined || val === null || isNaN(val)) return "0";
+  const abs = Math.abs(val);
+  if (abs >= 1e12) return (val / 1e12).toFixed(2) + 'T';
+  if (abs >= 1e9)  return (val / 1e9).toFixed(2) + 'B';
+  if (abs >= 1e6)  return (val / 1e6).toFixed(2) + 'M';
+  if (abs >= 1e3)  return (val / 1e3).toFixed(2) + 'K';
+  return val.toFixed(2);
+}}
+
+function fmt(val) {{
+  return humanReadable(val);
+}}
+
+function hashColor(str) {{
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${{hue}},70%,55%)`;
+}}
+
+const tickerOffsets = Object.fromEntries(tickers.map((t, i) => [t, (i - ((tickers.length - 1) / 2)) * 0.25]));
+
+function buildBaseYears(yearList) {{
+  return yearList.map((_, i) => i * 2.0);
+}}
+
+const colorMap = {{}};
+baseRawData.forEach(r => {{
+  const keyCandidate = (r.Key4Coloring && r.Key4Coloring.trim()) ? r.Key4Coloring.trim() : (r.ITEM || "");
+  const fallback = (r.ITEM && r.ITEM.trim()) ? r.ITEM.trim() : "";
+  const key4 = keyCandidate || fallback;
+  const canonicalKey = `${{r.TYPE}}|${{key4}}`;
+
+  if (!colorMap[canonicalKey]) {{
+    colorMap[canonicalKey] = hashColor(canonicalKey);
+  }}
+
+  r._CANONICAL_KEY = canonicalKey;
+}});
+
+function initYearCheckboxes() {{
+  const container = document.getElementById("yearToggleContainer");
+  if (!container) return;
+  container.innerHTML = "";
+
+  const title = document.createElement("div");
+  title.style.fontWeight = "bold";
+  title.style.marginBottom = "4px";
+  title.textContent = "Include Years in Stats:";
+  container.appendChild(title);
+
+  const wrap = document.createElement("div");
+  wrap.style.display = "flex";
+  wrap.style.flexWrap = "wrap";
+  wrap.style.rowGap = "4px";
+  wrap.style.columnGap = "12px";
+
+  years.forEach(year => {{
+    const label = document.createElement("label");
+    label.className = "year-toggle";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = yearToggleState[year];
+    checkbox.dataset.year = year;
+    checkbox.addEventListener("change", (ev) => {{
+      const y = ev.target.dataset.year;
+      yearToggleState[y] = ev.target.checked;
+      renderBars();
+    }});
+    const span = document.createElement("span");
+    span.textContent = year;
+    label.appendChild(checkbox);
+    label.appendChild(span);
+    wrap.appendChild(label);
+  }});
+
+  container.appendChild(wrap);
+}}
+
+const sel = document.getElementById("factorSelector");
+const blankOpt = document.createElement("option");
+blankOpt.value = "";
+blankOpt.textContent = "";
+sel.appendChild(blankOpt);
+Object.keys(factorLookup).forEach(f => {{
+  if (f === "") return;
+  const opt = document.createElement("option");
+  opt.value = f;
+  opt.textContent = f;
+  sel.appendChild(opt);
+}});
+sel.value = "";
+
+function buildBarTraces(factorName, activeYears, activeBaseYears) {{
+  const factorMap = factorLookup[factorName];
+  const traces = [];
+  for (const ticker of tickers) {{
+    for (const typ of types) {{
+      const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
+      for (const row of subset) {{
+        const color = colorMap[row._CANONICAL_KEY];
+        const yvals = activeYears.map(y => {{
+          const factor = factorMap[y];
+          if (factor === undefined || factor === null || isNaN(factor)) {{
+            return NaN;
+          }}
+          const baseVal = (row[y] || 0) * factor;
+          return baseVal;
+        }});
+
+        if (yvals.every(v => isNaN(v))) {{
+          continue;
+        }}
+        const xvals = activeBaseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
+        traces.push({{
+          x: xvals,
+          y: yvals,
+          type: "bar",
+          marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
+          offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
+          text: yvals.map(v => fmt(v)),
+          hovertemplate: "TICKER:" + ticker +
+                         "<br>YEAR:%{{customdata[0]}}" +
+                         "<br>TYPE:" + typ +
+                         "<br>CATEGORY:" + row.CATEGORY +
+                         "<br>SUBCATEGORY:" + row.SUBCATEGORY +
+                         "<br>ITEM:" + row.ITEM +
+                         "<br>VALUE:%{{text}}<extra></extra>",
+          customdata: activeYears.map(y => [y]),
+          legendgroup: ticker
+        }});
+      }}
+    }}
+  }}
+  return traces;
+}}
+
+function buildCumsumLines(factorName, activeYears, activeBaseYears) {{
+  const factorMap = factorLookup[factorName];
+  const lines = [];
+  for (const ticker of tickers) {{
+    for (const typ of types) {{
+      const perYearTotals = activeYears.map(y => {{
+        const factor = factorMap[y];
+        if (factor === undefined || factor === null || isNaN(factor)) {{
+          return NaN;
+        }}
+        const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
+        const sum = subset.reduce((acc, r) => acc + (r[y] || 0) * factor, 0);
+        return sum;
+      }});
+
+      if (perYearTotals.every(v => isNaN(v))) {{
+        continue;
+      }}
+      const xvals = activeBaseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
+      const color = hashColor(ticker + typ);
+      lines.push({{
+        x: xvals,
+        y: perYearTotals,
+        mode: "lines+markers",
+        line: {{ color, dash: typeLineStyles[typ] || "solid", width: 3 }},
+        marker: {{ color, size: 8, symbol: "circle" }},
+        text: activeYears.map((y, i) => {{
+          let tooltipArr = factorTooltip?.[y];
+          if (!Array.isArray(tooltipArr)) tooltipArr = tooltipArr ? [tooltipArr] : [];
+          const tooltipFormatted = tooltipArr.length
+            ? `<br><b>${{factorTooltipLabel}}:</b><br>` + tooltipArr.join("<br>")
+            : "";
+          const pdfName = pdfSources[y];
+          const pdfPath = (pdfName && ticker)
+            ? encodeURI(`../${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
+            : "";
+          const pdfHint = pdfPath
+            ? "<br><i>Double-click point to open PDF</i>"
+            : "";
+          return (
+            "TICKER:" + ticker +
+            "<br>YEAR:" + y +
+            "<br>TYPE:" + typ +
+            tooltipFormatted +
+            "<br>TOTAL:" + fmt(perYearTotals[i]) +
+            pdfHint
+          );
+        }}),
+        hoverinfo: "text",
+        customdata: activeYears.map(y => {{
+          const pdfName = pdfSources[y];
+          const pdfPath = (pdfName && ticker)
+            ? encodeURI(`../${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
+            : "";
+          return [y, pdfPath];
+        }}),
+        showlegend: false
+      }});
+    }}
+  }}
+  return lines;
+}}
+
+function renderBars() {{
+  const factorName = sel.value;
+
+  let activeYears = getActiveYears();
+  if (activeYears.length === 0) {{
+    activeYears = years.slice();
+  }}
+  const activeBaseYears = buildBaseYears(activeYears);
+
+  const barTraces = buildBarTraces(factorName, activeYears, activeBaseYears);
+  const cumsumLines = buildCumsumLines(factorName, activeYears, activeBaseYears);
+
+  const cumsumMap = {{}};
+  for (const ticker of tickers) {{
+    for (const typ of types) {{
+      const key = ticker + "::" + typ;
+      const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
+      if (subset.length === 0) continue;
+      const vals = years.map(y => {{
+        const sum = subset.reduce((acc, r) => acc + (r[y] || 0) * (factorLookup[factorName][y] || 1), 0);
+        return sum;
+      }});
+      const filteredPairs = [];
+      years.forEach((y, i) => {{
+        if (!yearToggleState[y]) {{
+          return;
+        }}
+        const factor = factorLookup[factorName][y];
+        const v = vals[i];
+        if (factor !== undefined && factor !== null && !isNaN(factor) && v !== undefined && v !== null && !isNaN(v)) {{
+          filteredPairs.push({{ year: y, value: v }});
+        }}
+      }});
+
+      if (filteredPairs.length === 0) {{
+        continue;
+      }}
+
+      const cleanedVals = filteredPairs.slice().map(p => p.value);
+      if (cleanedVals.length === 0) {{
+        continue;
+      }}
+
+      cleanedVals.sort((a, b) => a - b);
+      const median = cleanedVals[Math.floor(cleanedVals.length / 2)];
+      const q1 = cleanedVals[Math.floor(cleanedVals.length / 4)];
+      const q3 = cleanedVals[Math.floor((cleanedVals.length * 3) / 4)];
+      const min = Math.min(...cleanedVals);
+      const max = Math.max(...cleanedVals);
+
+      cumsumMap[key] = {{
+        median,
+        q1,
+        q3,
+        min,
+        max,
+        years: filteredPairs.map(p => p.year)
+      }};
+    }}
+  }}
+
+  const boxData = Object.entries(cumsumMap).map(([key, stats]) => {{
+    const [ticker, typ] = key.split("::");
+    const color = hashColor(ticker + typ);
+    const label = `${{typ}} (${{ticker}})`;
+    return {{
+      type: "box",
+      boxpoints: "all",
+      y: stats.years,
+      x: [stats.median, stats.q1, stats.q3, stats.min, stats.max],
+      marker: {{ color }},
+      line: {{ color }},
+      name: label,
+      hovertemplate: "TYPE:" + typ +
+                     "<br>TICKER:" + ticker +
+                     "<br>MEDIAN:%{{x}}<extra></extra>",
+      orientation: "h"
+    }};
+  }});
+
+  const traces = barTraces.concat(cumsumLines).concat(boxData);
+
+  const layout = {{
+    height: 750,
+    barmode: "stack",
+    bargap: 0.15,
+    title: "Financial Values",
+    xaxis: {{ tickvals: buildBaseYears(activeYears), ticktext: activeYears, title: "Date" }},
+    yaxis: {{ title: "Value" }},
+    hoverlabel: {{ bgcolor: "white", font: {{ family: "Courier New" }} }},
+    showlegend: false,
+    cliponaxis: false,
+    margin: {{ l: 80, r: 80, t: 80, b: 80 }}
+  }};
+
+  Plotly.newPlot("plotBars", traces, layout);
+  const barsDiv = document.getElementById("plotBars");
+  barsDiv.on("plotly_click", evt => {{
+    const point = evt?.points?.[0];
+    if (!point) return;
+    const clickCount = evt.event?.detail || 0;
+    if (clickCount < 2) return;
+    const pdfPath = point.customdata?.[1];
+    if (!pdfPath) return;
+    window.open(pdfPath, "_blank", "noopener,noreferrer");
+  }});
+}}
+renderBars();
+sel.addEventListener("change", renderBars);
+</script>
+</body>
+</html>"""
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"✅ Comparison HTML written to {out_path}")
+    webbrowser.open(f"file://{os.path.abspath(out_path)}")
+
+    return out_path
+
 
 if __name__ == "__main__":
     df = pd.DataFrame({
