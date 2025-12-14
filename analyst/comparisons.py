@@ -253,8 +253,8 @@ def compare_stacked_financials(
     )
 
     year_labels = []
-    for ticker in tickers:
-        for year in sorted_years:
+    for year in sorted_years:
+        for ticker in tickers:
             year_labels.append({"label": f"{year}-{ticker}", "ticker": ticker, "year": year})
 
     records = []
@@ -312,8 +312,8 @@ body {{ font-family: sans-serif; margin: 40px; box-sizing: border-box; }}
       <input type=\"checkbox\" id=\"hideUncheckedYears\" /> Hide unchecked years from plots
     </label>
   </div>
-  <div>
-    <details id=\"yearToggleDetails\" open>
+    <div>
+    <details id=\"yearToggleDetails\">
       <summary style=\"font-weight:bold; cursor:pointer;\">Include Years in Stats</summary>
       <div id=\"yearToggleContainer\" style=\"display:flex; flex-wrap:wrap; row-gap:4px; column-gap:12px; padding-top:4px;\"></div>
     </details>
@@ -469,10 +469,14 @@ function renderBars() {{
           marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
           offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
           hovertemplate: `${{typ}}<br>${{row.ITEM || ''}}<br>${{ticker}}<br>%{{y}}<extra></extra>`,
+          _orderKey: baseYears[0],
         }});
       }}
     }}
   }}
+
+  traces.sort((a, b) => (a._orderKey ?? 0) - (b._orderKey ?? 0));
+  traces.forEach(tr => delete tr._orderKey);
 
   const annotations = activeYears.map((year, idx) => {{
     const baseX = baseYears[idx];
