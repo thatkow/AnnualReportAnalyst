@@ -245,12 +245,16 @@ def compare_stacked_financials(
         visuals_dir.mkdir(parents=True, exist_ok=True)
         out_path = visuals_dir / out_path.name
 
-    sorted_years = sorted(
-        year_cols,
-        key=lambda y: float(y)
-        if str(y).replace(".", "", 1).lstrip("-+").isdigit()
-        else str(y),
-    )
+    def _year_sort_key(val: str) -> tuple[int, float | str]:
+        ts = pd.to_datetime(val, errors="coerce")
+        if pd.notna(ts):
+            return (0, ts.timestamp())
+        numeric_str = str(val)
+        if numeric_str.replace(".", "", 1).lstrip("-+").isdigit():
+            return (1, float(numeric_str))
+        return (2, str(val))
+
+    sorted_years = sorted(year_cols, key=_year_sort_key)
 
     year_labels = []
     for year in sorted_years:
