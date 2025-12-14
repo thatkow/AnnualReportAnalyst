@@ -108,8 +108,8 @@ def _prepare_company_dataframe(
     for col in num_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     neg_idx = df["NOTE"].str.lower() == "negated"
-    df.loc[neg_idx, num_cols] = df.loc[neg_idx, num_cols].applymap(
-        lambda x: -1.0 * x if pd.notna(x) else x
+    df.loc[neg_idx, num_cols] = df.loc[neg_idx, num_cols].apply(
+        lambda col: col.map(lambda x: -1.0 * x if pd.notna(x) else x)
     )
 
     def _apply_row_multiplier(mask_series: pd.Series, factors: Dict[str, float]) -> None:
