@@ -292,9 +292,11 @@ def compare_stacked_financials(
 <title>Stacked Financial Comparison</title>
 <script src=\"https://cdn.plot.ly/plotly-2.31.1.min.js\"></script>
 <style>
-body {{ font-family: sans-serif; margin: 40px; }}
+html, body {{ height: 100%; }}
+body {{ font-family: sans-serif; margin: 40px; box-sizing: border-box; }}
 #controls {{ margin: 15px 0; display: flex; flex-direction: column; gap: 8px; }}
 .year-toggle {{ display: inline-flex; align-items: center; gap: 4px; margin-right: 12px; }}
+#plotBars {{ width: 100%; min-height: 400px; }}
 </style>
 </head>
 <body>
@@ -332,6 +334,14 @@ const typeOffsets = {type_offsets_json};
 const tickerOffsets = {ticker_offsets_json};
 const yearToggleState = Object.fromEntries(yearLabels.map((y, idx) => [y.label, idx !== yearLabels.length - 1]));
 let hideUncheckedYears = false;
+
+function getPlotHeight() {{
+  const controlsHeight = document.getElementById("controls")?.offsetHeight || 0;
+  const headerHeight = document.querySelector("h2")?.offsetHeight || 0;
+  const padding = 80; // remaining padding/margins
+  const desired = window.innerHeight - controlsHeight - headerHeight - padding;
+  return Math.max(desired, 500);
+}
 
 function hashColor(str) {{
   let hash = 0;
@@ -484,6 +494,7 @@ function renderBars() {{
   Plotly.newPlot('plotBars', traces, {{
     title: 'Financial Values (per share)',
     barmode: 'stack',
+    height: getPlotHeight(),
     xaxis: {{
       tickmode: 'array',
       tickvals: baseYears,
@@ -512,6 +523,11 @@ if (hideUncheckedCheckbox) {{
     renderBars();
   }});
 }}
+
+window.addEventListener("resize", () => {{
+  Plotly.relayout('plotBars', {{ height: getPlotHeight() }});
+  Plotly.Plots.resize('plotBars');
+}});
 
 initFactorSelector();
 initYearCheckboxes();
