@@ -1,0 +1,465 @@
+from __future__ import annotations
+
+from pathlib import Path
+import json
+from typing import Dict, Iterable, List
+
+import pandas as pd
+
+from analyst.data import Company
+from analyst.plots import (
+    COMBINED_BASE_COLUMNS,
+    _extract_multiplier,
+    _pdf_source_map,
+    _release_date_map,
+)
+
+REQUIRED_COMMON_ROWS = [
+    ("Meta", "PDF source", "", "", "excluded"),
+    ("Financial", "Financial Multiplier", "", "", "excluded"),
+    ("Income", "Income Multiplier", "", "", "excluded"),
+    ("Shares", "Shares Multiplier", "", "", "excluded"),
+    ("Meta", "Stock Multiplier", "", "", "excluded"),
+    ("Meta", "ReleaseDate", "", "", "excluded"),
+    ("Stock", "Prices", "-30", "", "excluded"),
+    ("Stock", "Prices", "-7", "", "excluded"),
+    ("Stock", "Prices", "-1", "", "excluded"),
+    ("Stock", "Prices", "0", "", "excluded"),
+    ("Stock", "Prices", "1", "", "excluded"),
+    ("Stock", "Prices", "7", "", "excluded"),
+    ("Stock", "Prices", "30", "", "excluded"),
+]
+
+
+def _validate_required_rows(df: pd.DataFrame, ticker: str) -> None:
+    missing: List[tuple[str, str, str, str, str]] = []
+    for row in REQUIRED_COMMON_ROWS:
+        type_val, cat_val, sub_val, item_val, note_val = row
+        mask = (
+            df["TYPE"].astype(str).str.strip().str.lower() == type_val.lower()
+        ) & (df["CATEGORY"].astype(str).str.strip().str.lower() == cat_val.lower())
+        mask &= df["SUBCATEGORY"].astype(str).str.strip().str.lower() == sub_val.lower()
+        mask &= df["ITEM"].astype(str).str.strip().str.lower() == item_val.lower()
+        mask &= df["NOTE"].astype(str).str.strip().str.lower() == note_val.lower()
+        if not mask.any():
+            missing.append(row)
+    if missing:
+        raise ValueError(
+            f"Missing required rows for {ticker}: {missing}. Ensure combined data contains these entries."
+        )
+
+
+def _prepare_company_dataframe(
+    company: Company,
+) -> tuple[pd.DataFrame, Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, str]]:
+    combined_df = company.combined
+    ticker = company.ticker
+
+    if combined_df.empty:
+        raise ValueError(f"Combined dataframe is empty for {ticker}; generate data first.")
+
+    df_all = combined_df.copy().fillna("")
+    _validate_required_rows(df_all, ticker)
+
+    excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
+    num_cols = [c for c in df_all.columns if c not in excluded_cols]
+
+    for col in num_cols:
+        df_all[col] = df_all[col].astype(str).str.replace(",", "", regex=False)
+
+    share_mult = _extract_multiplier(
+        df_all[df_all["CATEGORY"].str.lower() == "shares multiplier"], num_cols
+    )
+    stock_mult = _extract_multiplier(
+        df_all[df_all["CATEGORY"].str.lower() == "stock multiplier"], num_cols
+    )
+    fin_mult = _extract_multiplier(
+        df_all[df_all["CATEGORY"].str.lower() == "financial multiplier"], num_cols
+    )
+    inc_mult = _extract_multiplier(
+        df_all[df_all["CATEGORY"].str.lower() == "income multiplier"], num_cols
+    )
+
+    df_all["Ticker"] = ticker
+
+    mask = df_all["NOTE"].astype(str).str.lower() != "excluded"
+    df = df_all[mask].copy()
+    for col in num_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    neg_idx = df["NOTE"].str.lower() == "negated"
+    df.loc[neg_idx, num_cols] = df.loc[neg_idx, num_cols].map(
+        lambda x: -1.0 * x if pd.notna(x) else x
+    )
+
+    def _apply_row_multiplier(mask_series: pd.Series, factors: Dict[str, float]) -> None:
+        for year in num_cols:
+            factor = factors.get(year, 1.0)
+            if factor == 1.0:
+                continue
+            df.loc[mask_series, year] = df.loc[mask_series, year] * factor
+
+    _apply_row_multiplier(df["TYPE"].str.lower() == "financial", fin_mult)
+    _apply_row_multiplier(df["TYPE"].str.lower() == "income", inc_mult)
+    _apply_row_multiplier(df["TYPE"].str.lower() == "shares", share_mult)
+    _apply_row_multiplier(df["TYPE"].str.lower() == "shares", stock_mult)
+
+    price_rows = df_all[
+        (df_all["TYPE"].str.lower() == "stock")
+        & (df_all["CATEGORY"].str.lower() == "prices")
+    ].copy()
+    for year in num_cols:
+        price_rows[year] = pd.to_numeric(price_rows[year], errors="coerce")
+
+    release_map = _release_date_map(df_all, num_cols, company)
+    _ = _pdf_source_map(df_all, num_cols)  # retained for parity with plot_stacked_financials
+
+    share_counts: Dict[str, float] = {}
+    share_rows = df[df["ITEM"].str.lower().str.contains("number of shares", na=False)]
+    if not share_rows.empty:
+        row = share_rows.iloc[0]
+        for year in num_cols:
+            raw_val = row.get(year)
+            if pd.notna(raw_val):
+                share_counts[year] = float(raw_val)
+            else:
+                share_counts[year] = 1.0
+    else:
+        share_counts = {year: 1.0 for year in num_cols}
+
+    df_plot = df[~df["ITEM"].str.lower().str.contains("number of shares", na=False)].copy()
+
+    # Divide all numeric values by share counts (per-share values only)
+    for year in num_cols:
+        divisor = share_counts.get(year, 1.0) or 1.0
+        df_plot[year] = df_plot[year] / divisor
+
+    # Build factor lookup using price rows (release date shifts)
+    factor_lookup: Dict[str, Dict[str, float]] = {"": {}}
+    for year in num_cols:
+        factor_lookup[""][year] = 1.0
+
+    for _, prow in price_rows.iterrows():
+        label = str(prow.get("SUBCATEGORY", "")).strip() or "Price"
+        factor_lookup.setdefault(label, {})
+        for year in num_cols:
+            price_val = pd.to_numeric(prow.get(year, ""), errors="coerce")
+            if pd.isna(price_val) or price_val <= 0:
+                factor_lookup[label][year] = float("nan")
+            else:
+                factor_lookup[label][year] = 1.0 / float(price_val)
+
+    df_plot["Ticker"] = ticker
+
+    return df_plot, factor_lookup, {year: release_map.get(year, "") for year in num_cols}, share_counts
+
+
+def _merge_factor_lookups(factors: Iterable[tuple[str, Dict[str, Dict[str, float]]]]) -> Dict[str, Dict[str, Dict[str, float]]]:
+    merged: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for ticker, lookup in factors:
+        for label, year_map in lookup.items():
+            merged.setdefault(label, {})
+            merged[label].setdefault(ticker, {})
+            for year, factor in year_map.items():
+                merged[label][ticker][year] = factor
+    return merged
+
+
+def compare_stacked_financials(
+    companies: list[Company],
+    *,
+    out_path: str | Path | None = None,
+    include_intangibles: bool = True,
+) -> Path:
+    if not companies:
+        raise ValueError("At least one company is required for comparison.")
+
+    prepared_frames = []
+    factor_entries = []
+    release_entries: Dict[str, Dict[str, str]] = {}
+
+    for company in companies:
+        df_plot, factors, release_map, shares = _prepare_company_dataframe(company)
+        prepared_frames.append(df_plot)
+        factor_entries.append((company.ticker, factors))
+        release_entries[company.ticker] = release_map
+
+    combined_df = pd.concat(prepared_frames, join="outer", ignore_index=True, sort=False)
+
+    excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
+    year_cols = [c for c in combined_df.columns if c not in excluded_cols]
+
+    combined_df[COMBINED_BASE_COLUMNS + ["Ticker"]] = combined_df[COMBINED_BASE_COLUMNS + ["Ticker"]].fillna("")
+    for col in year_cols:
+        combined_df[col] = pd.to_numeric(combined_df[col], errors="coerce").fillna(0)
+
+    tickers = sorted({c.ticker for c in companies})
+    types = sorted(combined_df["TYPE"].dropna().unique())
+
+    factor_lookup = _merge_factor_lookups(factor_entries)
+
+    out_path = Path(out_path) if out_path else Path(companies[0].default_visuals_path()).with_name("stacked_comparison.html")
+    visuals_dir = Path(out_path).expanduser().resolve().parent
+    visuals_dir.mkdir(parents=True, exist_ok=True)
+    out_path = visuals_dir / Path(out_path).name
+
+    year_labels = []
+    for ticker in tickers:
+        for year in year_cols:
+            year_labels.append({"label": f"{year}-{ticker}", "ticker": ticker, "year": year})
+
+    records = []
+    for _, r in combined_df.iterrows():
+        rec = {
+            "Ticker": r.get("Ticker"),
+            "TYPE": r.get("TYPE"),
+            "CATEGORY": r.get("CATEGORY"),
+            "SUBCATEGORY": r.get("SUBCATEGORY"),
+            "ITEM": r.get("ITEM"),
+            "NOTE": r.get("NOTE"),
+            "Key4Coloring": r.get("Key4Coloring"),
+        }
+        for y in year_cols:
+            rec[y] = float(r.get(y, 0) or 0)
+        records.append(rec)
+
+    type_offsets = {t: round((i - (len(types) - 1) / 2) * 0.6, 2) for i, t in enumerate(types)}
+    ticker_offsets = {t: (i - ((len(tickers) - 1) / 2)) * 0.25 for i, t in enumerate(tickers)}
+
+    years_json = json.dumps(year_cols)
+    tickers_json = json.dumps(tickers)
+    types_json = json.dumps(types)
+    records_json = json.dumps(records)
+    factor_json = json.dumps(factor_lookup)
+    year_labels_json = json.dumps(year_labels)
+    release_json = json.dumps(release_entries)
+    type_offsets_json = json.dumps(type_offsets)
+    ticker_offsets_json = json.dumps(ticker_offsets)
+
+    html = f"""<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+<meta charset=\"utf-8\" />
+<title>Stacked Financial Comparison</title>
+<script src=\"https://cdn.plot.ly/plotly-2.31.1.min.js\"></script>
+<style>
+body {{ font-family: sans-serif; margin: 40px; }}
+#controls {{ margin: 15px 0; display: flex; flex-direction: column; gap: 8px; }}
+.year-toggle {{ display: inline-flex; align-items: center; gap: 4px; margin-right: 12px; }}
+</style>
+</head>
+<body>
+<h2>Stacked Financial Comparison</h2>
+<div id=\"controls\">
+  <div>
+    <label><b>Release Date Shift:</b></label>
+    <select id=\"factorSelector\"></select>
+    <label style=\"margin-left:20px;\">
+      <input type=\"checkbox\" id=\"intangiblesCheckbox\" { 'checked' if include_intangibles else '' } /> Include intangibles
+    </label>
+    <label style=\"margin-left:20px;\">
+      <input type=\"checkbox\" id=\"hideUncheckedYears\" /> Hide unchecked years from plots
+    </label>
+  </div>
+  <div>
+    <div style=\"font-weight:bold; margin-bottom:4px;\">Include Years in Stats:</div>
+    <div id=\"yearToggleContainer\" style=\"display:flex; flex-wrap:wrap; row-gap:4px; column-gap:12px;\"></div>
+  </div>
+</div>
+<div id=\"plotBars\"></div>
+<script>
+const years = {years_json};
+const tickers = {tickers_json};
+const types = {types_json};
+const baseRawData = {records_json};
+const includeIntangiblesDefault = {str(include_intangibles).lower()};
+let includeIntangibles = includeIntangiblesDefault;
+const factorLookup = {factor_json};
+const yearLabels = {year_labels_json};
+const releaseMap = {release_json};
+const typeOffsets = {type_offsets_json};
+const tickerOffsets = {ticker_offsets_json};
+const yearToggleState = Object.fromEntries(yearLabels.map((y, idx) => [y.label, idx !== yearLabels.length - 1]));
+let hideUncheckedYears = false;
+
+function hashColor(str) {{
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${{hue}},70%,55%)`;
+}}
+
+function humanReadable(val) {{
+  if (val === undefined || val === null || isNaN(val)) return "0";
+  const abs = Math.abs(val);
+  if (abs >= 1e12) return (val / 1e12).toFixed(2) + 'T';
+  if (abs >= 1e9)  return (val / 1e9).toFixed(2) + 'B';
+  if (abs >= 1e6)  return (val / 1e6).toFixed(2) + 'M';
+  if (abs >= 1e3)  return (val / 1e3).toFixed(2) + 'K';
+  return val.toFixed(2);
+}}
+
+function filterIntangibles(data, include) {{
+  if (include) return data.slice();
+  return data.filter(r => (r.NOTE || "").toLowerCase() !== "intangibles");
+}}
+
+let rawData = filterIntangibles(baseRawData, includeIntangibles);
+
+const colorMap = {{}};
+rawData.forEach(r => {{
+  const keyCandidate = (r.Key4Coloring && r.Key4Coloring.trim()) ? r.Key4Coloring.trim() : (r.ITEM || "");
+  const fallback = (r.ITEM && r.ITEM.trim()) ? r.ITEM.trim() : "";
+  const key4 = keyCandidate || fallback;
+  const canonicalKey = `${{r.TYPE}}|${{key4}}`;
+  if (!colorMap[canonicalKey]) {{
+    colorMap[canonicalKey] = hashColor(canonicalKey);
+  }}
+  r._CANONICAL_KEY = canonicalKey;
+}});
+
+function initFactorSelector() {{
+  const sel = document.getElementById("factorSelector");
+  const blankOpt = document.createElement("option");
+  blankOpt.value = "";
+  blankOpt.textContent = "";
+  sel.appendChild(blankOpt);
+  Object.keys(factorLookup).forEach(f => {{
+    if (f === "") return;
+    const opt = document.createElement("option");
+    opt.value = f;
+    opt.textContent = f;
+    sel.appendChild(opt);
+  }});
+  sel.value = "";
+  sel.addEventListener("change", renderBars);
+}}
+
+function initYearCheckboxes() {{
+  const container = document.getElementById("yearToggleContainer");
+  container.innerHTML = "";
+  yearLabels.forEach(entry => {{
+    const label = document.createElement("label");
+    label.className = "year-toggle";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = yearToggleState[entry.label];
+    checkbox.dataset.year = entry.year;
+    checkbox.dataset.ticker = entry.ticker;
+    checkbox.dataset.label = entry.label;
+    checkbox.addEventListener("change", (ev) => {{
+      const lbl = ev.target.dataset.label;
+      yearToggleState[lbl] = ev.target.checked;
+      renderBars();
+    }});
+    const span = document.createElement("span");
+    span.textContent = entry.label;
+    label.appendChild(checkbox);
+    label.appendChild(span);
+    container.appendChild(label);
+  }});
+}}
+
+function getActiveYears() {{
+  if (!hideUncheckedYears) return years.slice();
+  const active = new Set();
+  yearLabels.forEach(entry => {{
+    if (yearToggleState[entry.label]) active.add(entry.year);
+  }});
+  return years.filter(y => active.has(y));
+}}
+
+function renderBars() {{
+  const factorName = document.getElementById("factorSelector").value || "";
+  const factorMap = factorLookup[factorName] || {{}};
+  const activeYears = getActiveYears();
+  const baseYears = activeYears.map((_, i) => i * 2.0);
+
+  const data = rawData.filter(r => (r.NOTE || "").toLowerCase() !== "excluded");
+  const traces = [];
+  for (const ticker of tickers) {{
+    for (const typ of types) {{
+      const subset = data.filter(r => r.Ticker === ticker && r.TYPE === typ);
+      for (const row of subset) {{
+        const color = colorMap[row._CANONICAL_KEY];
+        const yvals = activeYears.map((year) => {{
+          const label = `${{year}}-${{ticker}}`;
+          if (!yearToggleState[label]) return NaN;
+          const factorTickerMap = factorMap[ticker] || {{}};
+          const factorVal = factorTickerMap[year];
+          if (factorVal === undefined || factorVal === null || isNaN(factorVal)) return NaN;
+          const baseVal = row[year] || 0;
+          return baseVal * factorVal;
+        }});
+        if (yvals.every(v => isNaN(v))) continue;
+        const xvals = baseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
+        traces.push({{
+          x: xvals,
+          y: yvals,
+          type: "bar",
+          marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
+          offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
+          hovertemplate: `${{typ}}<br>${{row.ITEM || ''}}<br>${{ticker}}<br>%{{y}}<extra></extra>`,
+        }});
+      }}
+    }}
+  }}
+
+  const annotations = activeYears.map((year, idx) => {{
+    const baseX = baseYears[idx];
+    const parts = tickers.map(t => `${{year}}-${{t}}: ${{releaseMap[t]?.[year] || ''}}`).join('<br>');
+    return {{
+      x: baseX,
+      y: 0,
+      xref: 'x',
+      yref: 'paper',
+      text: parts,
+      showarrow: false,
+      xanchor: 'center',
+      yanchor: 'top',
+      font: {{ size: 10, color: '#555' }},
+      yshift: -30,
+    }};
+  }});
+
+  Plotly.newPlot('plotBars', traces, {{
+    title: 'Financial Values (per share)',
+    barmode: 'stack',
+    xaxis: {{
+      tickmode: 'array',
+      tickvals: baseYears,
+      ticktext: activeYears,
+    }},
+    hovermode: 'closest',
+    showlegend: false,
+    annotations,
+  }});
+}}
+
+const intangiblesCheckbox = document.getElementById("intangiblesCheckbox");
+if (intangiblesCheckbox) {{
+  intangiblesCheckbox.checked = includeIntangiblesDefault;
+  intangiblesCheckbox.addEventListener("change", (ev) => {{
+    includeIntangibles = ev.target.checked;
+    rawData = filterIntangibles(baseRawData, includeIntangibles);
+    renderBars();
+  }});
+}}
+
+const hideUncheckedCheckbox = document.getElementById("hideUncheckedYears");
+if (hideUncheckedCheckbox) {{
+  hideUncheckedCheckbox.addEventListener("change", (ev) => {{
+    hideUncheckedYears = ev.target.checked;
+    renderBars();
+  }});
+}}
+
+initFactorSelector();
+initYearCheckboxes();
+renderBars();
+</script>
+</body>
+</html>
+"""
+
+    out_path.write_text(html, encoding="utf-8")
+    return out_path
