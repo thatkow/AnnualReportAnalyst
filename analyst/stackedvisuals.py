@@ -353,18 +353,23 @@ function updateAdjustmentLabels() {{
 }}
 
 const sel = document.getElementById("factorSelector");
-const blankOpt = document.createElement("option");
-blankOpt.value = "";
-blankOpt.textContent = "";
-sel.appendChild(blankOpt);
-Object.keys(factorLookup).forEach(f => {{
-  if (f === "") return;
+const factorNames = Object.keys(factorLookup).filter(f => f !== "");
+if (!factorNames.length && factorLookup.hasOwnProperty("")) {{
+  factorNames.push("");
+}}
+factorNames.forEach(f => {{
   const opt = document.createElement("option");
   opt.value = f;
   opt.textContent = f;
   sel.appendChild(opt);
 }});
-sel.value = "";
+const numericFactors = factorNames.map(f => ({{ name: f, num: Number(f) }})).filter(({{ num }}) => !Number.isNaN(num));
+if (numericFactors.length) {{
+  numericFactors.sort((a, b) => a.num - b.num);
+  sel.value = numericFactors[numericFactors.length - 1].name;
+}} else if (factorNames.length) {{
+  sel.value = factorNames[0];
+}}
 
 function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
   const factorMap = factorLookup[factorName];
@@ -987,18 +992,23 @@ function initYearCheckboxes() {{
 }}
 
 const sel = document.getElementById("factorSelector");
-const blankOpt = document.createElement("option");
-blankOpt.value = "";
-blankOpt.textContent = "";
-sel.appendChild(blankOpt);
-Object.keys(factorLookup).forEach(f => {{
-  if (f === "") return;
+const factorNames = Object.keys(factorLookup).filter(f => f !== "");
+if (!factorNames.length && factorLookup.hasOwnProperty("")) {{
+  factorNames.push("");
+}}
+factorNames.forEach(f => {{
   const opt = document.createElement("option");
   opt.value = f;
   opt.textContent = f;
-sel.appendChild(opt);
+  sel.appendChild(opt);
 }});
-sel.value = "";
+const numericFactors = factorNames.map(f => ({{ name: f, num: Number(f) }})).filter(({{ num }}) => !Number.isNaN(num));
+if (numericFactors.length) {{
+  numericFactors.sort((a, b) => a.num - b.num);
+  sel.value = numericFactors[numericFactors.length - 1].name;
+}} else if (factorNames.length) {{
+  sel.value = factorNames[0];
+}}
 
 function getFactor(factorName, ticker, year) {{
   const factorMap = factorLookup[factorName] || {{}};
