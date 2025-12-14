@@ -93,6 +93,13 @@ def _prepare_company_dataframe(
         raise ValueError(f"Combined dataframe is empty for {ticker}; generate data first.")
 
     df_all = combined_df.copy().fillna("")
+
+    price_mask = (
+        df_all["TYPE"].str.lower() == "stock"
+    ) & (df_all["CATEGORY"].str.lower() == "prices")
+    df_all.loc[price_mask, "SUBCATEGORY"] = df_all.loc[price_mask, "SUBCATEGORY"].map(
+        _normalize_shift_label
+    )
     df_all = _validate_required_rows(df_all, ticker)
 
     excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
@@ -168,10 +175,7 @@ def _prepare_company_dataframe(
         df_plot[year] = df_plot[year] / divisor
 
     # Build factor lookup using price rows (release date shifts)
-    factor_lookup: Dict[str, Dict[str, float]] = {"": {}}
-    for year in num_cols:
-        factor_lookup[""][year] = 1.0
-
+    factor_lookup: Dict[str, Dict[str, float]] = {}
     for _, prow in price_rows.iterrows():
         raw_label = str(prow.get("SUBCATEGORY", "")).strip() or "Price"
         label = _normalize_shift_label(raw_label)
@@ -365,34 +369,30 @@ rawData.forEach(r => {{
   r._CANONICAL_KEY = canonicalKey;
 }});
 
-function initFactorSelector() {{
-  const sel = document.getElementById("factorSelector");
-  const keys = Object.keys(factorLookup);
-  const noneOpt = document.createElement("option");
-  noneOpt.value = "";
-  noneOpt.textContent = "None";
-  sel.appendChild(noneOpt);
-  keys
-    .filter(f => f !== "")
-    .sort((a, b) => {{
-      const na = Number(a);
-      const nb = Number(b);
-      const aNum = !isNaN(na);
-      const bNum = !isNaN(nb);
-      if (aNum && bNum) return na - nb;
-      if (aNum) return -1;
-      if (bNum) return 1;
-      return String(a).localeCompare(String(b));
-    }})
-    .forEach(f => {{
+  function initFactorSelector() {{
+    const sel = document.getElementById("factorSelector");
+    const keys = Object.keys(factorLookup).filter(f => f !== "");
+    const sortedKeys = keys
+      .sort((a, b) => {{
+        const na = Number(a);
+        const nb = Number(b);
+        const aNum = !isNaN(na);
+        const bNum = !isNaN(nb);
+        if (aNum && bNum) return na - nb;
+        if (aNum) return -1;
+        if (bNum) return 1;
+        return String(a).localeCompare(String(b));
+      }});
+    sortedKeys.forEach(f => {{
       const opt = document.createElement("option");
       opt.value = f;
       opt.textContent = f;
       sel.appendChild(opt);
     }});
-  sel.value = "";
-  sel.addEventListener("change", renderBars);
-}}
+    const defaultKey = sortedKeys.length ? sortedKeys[sortedKeys.length - 1] : "";
+    sel.value = defaultKey;
+    sel.addEventListener("change", renderBars);
+  }}
 
 function initYearCheckboxes() {{
   const container = document.getElementById("yearToggleContainer");
