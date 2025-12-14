@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Dict
 
@@ -315,8 +316,31 @@ def compare_stacked_financials(
         {"TYPE": "Stock", "CATEGORY": "Prices", "SUBCATEGORY": "30", "ITEM": "", "NOTE": "excluded"},
     ]
 
+    def _normalize_cell(val: object) -> str:
+        if pd.isna(val):
+            return ""
+
+        if isinstance(val, (int, float)):
+            if isinstance(val, float) and not math.isfinite(val):
+                return ""
+            return str(int(val)) if float(val).is_integer() else str(val)
+
+        if isinstance(val, str):
+            stripped = val.strip()
+            if not stripped:
+                return ""
+            try:
+                numeric = float(stripped)
+                if math.isfinite(numeric) and numeric.is_integer():
+                    return str(int(numeric))
+            except ValueError:
+                pass
+            return stripped.lower()
+
+        return str(val).strip().lower()
+
     def _signature(row: dict) -> tuple[str, ...]:
-        return tuple(str(row.get(col, "")).strip().lower() for col in COMBINED_BASE_COLUMNS)
+        return tuple(_normalize_cell(row.get(col, "")) for col in COMBINED_BASE_COLUMNS)
 
     required_signatures = {_signature(r) for r in required_common_rows}
 
@@ -456,7 +480,7 @@ def compare_stacked_financials(
             release_lines.setdefault(year, []).append(release_entry)
 
             for _, prow in price_rows.iterrows():
-                label_raw = str(prow.get("SUBCATEGORY", "")).strip() or "Price"
+                label_raw = _normalize_cell(prow.get("SUBCATEGORY", "")) or "Price"
                 if label_raw not in allowed_shifts:
                     continue
                 price_val = pd.to_numeric(prow.get(year, ""), errors="coerce")
