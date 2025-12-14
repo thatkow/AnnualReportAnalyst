@@ -447,6 +447,13 @@ if (numericFactors.length) {{
 function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
   const factorMap = factorLookup[factorName];
   const traces = [];
+  const positiveBases = {{}};
+  const negativeBases = {{}};
+  const baseFor = (map, ticker, year) => {{
+    if (!map[ticker]) map[ticker] = {{}};
+    if (!map[ticker][year]) map[ticker][year] = 0;
+    return map[ticker][year];
+  }};
   for (const ticker of tickers) {{
     for (const typ of types) {{
       const subset = adjustedRawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
@@ -474,10 +481,20 @@ function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
         const positive = yvals.map(v => (!isNaN(v) && v > 0) ? v : 0);
         const negative = yvals.map(v => (!isNaN(v) && v < 0) ? v : 0);
 
+        const posBase = activeYears.map((y, idx) => {{
+          const v = positive[idx];
+          const current = baseFor(positiveBases, ticker, y);
+          if (!isNaN(v) && v > 0) {{
+            positiveBases[ticker][y] += v;
+          }}
+          return current;
+        }});
+
         if (positive.some(v => v > 0)) {{
           traces.push({{
             x: xvals,
             y: positive,
+            base: posBase,
             type: "bar",
             marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
             offsetgroup: ticker + "-pos",
@@ -494,10 +511,20 @@ function buildBarTraces(factorName, perShare, activeYears, activeBaseYears) {{
           }});
         }}
 
+        const negBase = activeYears.map((y, idx) => {{
+          const v = negative[idx];
+          const current = baseFor(negativeBases, ticker, y);
+          if (!isNaN(v) && v < 0) {{
+            negativeBases[ticker][y] += v;
+          }}
+          return current;
+        }});
+
         if (negative.some(v => v < 0)) {{
           traces.push({{
             x: xvals,
             y: negative,
+            base: negBase,
             type: "bar",
             marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
             offsetgroup: ticker + "-neg",
@@ -1191,6 +1218,13 @@ function getFactor(factorName, ticker, year) {{
 
 function buildBarTraces(factorName, activeYears, activeBaseYears) {{
   const traces = [];
+  const positiveBases = {{}};
+  const negativeBases = {{}};
+  const baseFor = (map, ticker, year) => {{
+    if (!map[ticker]) map[ticker] = {{}};
+    if (!map[ticker][year]) map[ticker][year] = 0;
+    return map[ticker][year];
+  }};
   for (const ticker of tickers) {{
     for (const typ of types) {{
       const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
@@ -1210,10 +1244,20 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
         const positive = yvals.map(v => (!isNaN(v) && v > 0) ? v : 0);
         const negative = yvals.map(v => (!isNaN(v) && v < 0) ? v : 0);
 
+        const posBase = activeYears.map((y, idx) => {{
+          const v = positive[idx];
+          const current = baseFor(positiveBases, ticker, y);
+          if (!isNaN(v) && v > 0) {{
+            positiveBases[ticker][y] += v;
+          }}
+          return current;
+        }});
+
         if (positive.some(v => v > 0)) {{
           traces.push({{
             x: xvals,
             y: positive,
+            base: posBase,
             type: "bar",
             width: 0.6,
             marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
@@ -1231,10 +1275,20 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
           }});
         }}
 
+        const negBase = activeYears.map((y, idx) => {{
+          const v = negative[idx];
+          const current = baseFor(negativeBases, ticker, y);
+          if (!isNaN(v) && v < 0) {{
+            negativeBases[ticker][y] += v;
+          }}
+          return current;
+        }});
+
         if (negative.some(v => v < 0)) {{
           traces.push({{
             x: xvals,
             y: negative,
+            base: negBase,
             type: "bar",
             width: 0.6,
             marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
