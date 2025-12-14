@@ -299,14 +299,36 @@ def compare_stacked_financials(
     if not companies:
         raise ValueError("No companies provided for comparison.")
 
-    combined_frames: list[pd.DataFrame] = []
-    factor_lookup: Dict[str, Dict[str, float]] = {}
+    required_common_rows = [
+        {"TYPE": "Meta", "CATEGORY": "PDF source", "SUBCATEGORY": "", "ITEM": "", "NOTE": "excluded"},
+        {"TYPE": "Financial", "CATEGORY": "Financial Multiplier", "SUBCATEGORY": "", "ITEM": "", "NOTE": "excluded"},
+        {"TYPE": "Income", "CATEGORY": "Income Multiplier", "SUBCATEGORY": "", "ITEM": "", "NOTE": "excluded"},
+        {"TYPE": "Shares", "CATEGORY": "Shares Multiplier", "SUBCATEGORY": "", "ITEM": "", "NOTE": "excluded"},
+        {"TYPE": "Meta", "CATEGORY": "Stock Multiplier", "SUBCATEGORY": "", "ITEM": "", "NOTE": "excluded"},
+        {"TYPE": "Meta", "CATEGORY": "ReleaseDate", "SUBCATEGORY": "", "ITEM": "", "NOTE": "excluded"},
+        {"TYPE": "Stock", "CATEGORY": "Prices", "SUBCATEGORY": "-30", "ITEM": "", "NOTE": "excluded"},
+        {"TYPE": "Stock", "CATEGORY": "Prices", "SUBCATEGORY": "-7", "ITEM": "", "NOTE": "excluded"},
+        {"TYPE": "Stock", "CATEGORY": "Prices", "SUBCATEGORY": "-1", "ITEM": "", "NOTE": "excluded"},
+        {"TYPE": "Stock", "CATEGORY": "Prices", "SUBCATEGORY": "0", "ITEM": "", "NOTE": "excluded"},
+        {"TYPE": "Stock", "CATEGORY": "Prices", "SUBCATEGORY": "1", "ITEM": "", "NOTE": "excluded"},
+        {"TYPE": "Stock", "CATEGORY": "Prices", "SUBCATEGORY": "7", "ITEM": "", "NOTE": "excluded"},
+        {"TYPE": "Stock", "CATEGORY": "Prices", "SUBCATEGORY": "30", "ITEM": "", "NOTE": "excluded"},
+    ]
+
+    def _signature(row: dict) -> tuple[str, ...]:
+        return tuple(str(row.get(col, "")).strip().lower() for col in COMBINED_BASE_COLUMNS)
+
+    required_signatures = {_signature(r) for r in required_common_rows}
+
+    prepared_frames: list[pd.DataFrame] = []
+    available_shifts_per_ticker: dict[str, set[str]] = {}
+    factor_lookup: Dict[str, Dict[str, Dict[str, float]]] = {}
     pdf_sources: Dict[str, str] = {}
-    release_lines: Dict[str, str] = {}
+    release_lines: Dict[str, list[str]] = {}
     price_tooltips: Dict[str, Dict[str, str]] = {}
     allowed_shifts = ["-30", "-10", "-1", "0", "1", "10", "30"]
-    common_shifts: set[str] = set(allowed_shifts)
 
+    # Build a combined frame via outer concatenation first
     for company in companies:
         combined_df = company.combined
         ticker = company.ticker
@@ -315,26 +337,45 @@ def compare_stacked_financials(
             raise ValueError(f"Combined dataframe is empty for {ticker}; generate data first.")
 
         df_all = combined_df.copy().fillna("")
-        excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
-        num_cols = [c for c in df_all.columns if c not in excluded_cols]
+        df_all["Ticker"] = ticker
+        prepared_frames.append(df_all)
 
-        for col in num_cols:
-            try:
-                series = df_all[col]
-                if not hasattr(series, "dtype"):
-                    raise TypeError(
-                        f"Column '{col}' returned a non-Series object "
-                        f"(possible duplicate column names or invalid selection)."
-                    )
+        sigs = {_signature(row) for row in df_all.to_dict(orient="records")}
+        missing = required_signatures - sigs
+        if missing:
+            raise ValueError(
+                f"Company {ticker} is missing required rows: {missing}."
+            )
 
-                df_all[col] = series.astype(str).str.replace(",", "", regex=False)
-            except Exception as e:
-                raise RuntimeError(
-                    f"Error while processing column '{col}'. "
-                    f"Column type = {type(series)}. "
-                    f"Columns in DataFrame = {list(df_all.columns)}. "
-                    f"Details: {e}"
+    combined_all = pd.concat(prepared_frames, ignore_index=True, join="outer", sort=False).fillna("")
+
+    excluded_cols = set(COMBINED_BASE_COLUMNS + ["Ticker"])
+    num_cols = [c for c in combined_all.columns if c not in excluded_cols]
+
+    for col in num_cols:
+        try:
+            series = combined_all[col]
+            if not hasattr(series, "dtype"):
+                raise TypeError(
+                    f"Column '{col}' returned a non-Series object "
+                    f"(possible duplicate column names or invalid selection)."
                 )
+
+            combined_all[col] = series.astype(str).str.replace(",", "", regex=False)
+        except Exception as e:
+            raise RuntimeError(
+                f"Error while processing column '{col}'. "
+                f"Column type = {type(series)}. "
+                f"Columns in DataFrame = {list(combined_all.columns)}. "
+                f"Details: {e}"
+            )
+
+    processed_frames: list[pd.DataFrame] = []
+    share_counts: Dict[str, Dict[str, float]] = {}
+
+    for company in companies:
+        ticker = company.ticker
+        df_all = combined_all[combined_all["Ticker"] == ticker].copy()
 
         share_mult = _extract_multiplier(
             df_all[df_all["CATEGORY"].str.lower() == "shares multiplier"], num_cols
@@ -348,8 +389,6 @@ def compare_stacked_financials(
         inc_mult = _extract_multiplier(
             df_all[df_all["CATEGORY"].str.lower() == "income multiplier"], num_cols
         )
-
-        df_all["Ticker"] = ticker
 
         notes_lower = df_all["NOTE"].astype(str).str.lower()
         mask = notes_lower != "excluded"
@@ -380,14 +419,13 @@ def compare_stacked_financials(
         ].copy()
         for year in num_cols:
             price_rows[year] = pd.to_numeric(price_rows[year], errors="coerce")
-        available_shifts: set[str] = set()
 
         release_map = _release_date_map(df_all, num_cols, company)
         pdf_map = _pdf_source_map(df_all, num_cols)
 
-        year_cols = [c for c in df.columns if c not in excluded_cols]
+        year_cols = [c for c in num_cols if df[c].notna().any()]
 
-        share_counts: Dict[str, float] = {}
+        share_counts[ticker] = {}
         share_rows = df[df["ITEM"].str.lower().str.contains("number of shares", na=False)]
         if not share_rows.empty:
             row = share_rows.iloc[0]
@@ -395,48 +433,56 @@ def compare_stacked_financials(
                 raw_val = row.get(year)
                 if pd.notna(raw_val):
                     numeric_val = float(raw_val)
-                    share_counts[year] = round(numeric_val, 2)
+                    share_counts[ticker][year] = round(numeric_val, 2)
                 else:
                     raise ValueError(f"Number of shares for year '{year}' is missing or NaN for {ticker}.")
         else:
-            share_counts = {year: 1.0 for year in year_cols}
+            share_counts[ticker] = {year: 1.0 for year in year_cols}
 
         df_plot = df[~df["ITEM"].str.lower().str.contains("number of shares", na=False)].copy()
 
         for col in year_cols:
-            shares = share_counts.get(col, 1.0)
+            shares = share_counts[ticker].get(col, 1.0)
             if shares == 0 or pd.isna(shares):
                 raise ValueError(f"Share count for {ticker} and year '{col}' is invalid: {shares}")
             df_plot[col] = df_plot[col] / shares
 
-        renamed_cols = {col: f"{col}-{ticker}" for col in year_cols}
-        df_plot = df_plot.rename(columns=renamed_cols)
+        df_plot["Ticker"] = ticker
 
-        for original_year, new_year in renamed_cols.items():
-            factor_lookup.setdefault("", {})[new_year] = 1.0
-            release_date = release_map.get(original_year, "")
-            release_lines[new_year] = f"Release Date: {release_date + ' days' if release_date else 'NA'}"
+        for year in year_cols:
+            factor_lookup.setdefault("", {}).setdefault(ticker, {})[year] = 1.0
+            release_date = release_map.get(year, "")
+            release_entry = f"{ticker} Release Date: {release_date + ' days' if release_date else 'NA'}"
+            release_lines.setdefault(year, []).append(release_entry)
+
             for _, prow in price_rows.iterrows():
                 label_raw = str(prow.get("SUBCATEGORY", "")).strip() or "Price"
                 if label_raw not in allowed_shifts:
                     continue
-                available_shifts.add(label_raw)
-                label = f"{ticker} {label_raw}".strip()
-                factor_lookup.setdefault(label_raw, {})
-                price_val = pd.to_numeric(prow.get(original_year, ""), errors="coerce")
+                price_val = pd.to_numeric(prow.get(year, ""), errors="coerce")
+                price_entry = f"{ticker} {label_raw}: "
                 if pd.isna(price_val) or price_val <= 0:
-                    factor_lookup[label_raw][new_year] = float("nan")
-                    tooltip_line = f"{label}: NaN"
+                    factor_lookup.setdefault(label_raw, {}).setdefault(ticker, {})[year] = float("nan")
+                    price_entry += "NaN"
                 else:
-                    factor_lookup[label_raw][new_year] = 1.0 / float(price_val)
-                    tooltip_line = f"{label}: {price_val:.3f}"
-                price_tooltips.setdefault(new_year, {})[label_raw] = tooltip_line
-            pdf_name = pdf_map.get(original_year)
-            if pdf_name:
-                pdf_sources[new_year] = pdf_name
+                    factor_lookup.setdefault(label_raw, {}).setdefault(ticker, {})[year] = 1.0 / float(price_val)
+                    price_entry += f"{price_val:.3f}"
+                price_tooltips.setdefault(year, {})[f"{ticker}:{label_raw}"] = price_entry
+                available_shifts_per_ticker.setdefault(ticker, set()).add(label_raw)
 
-        combined_frames.append(df_plot)
-        common_shifts &= available_shifts
+            pdf_name = pdf_map.get(year)
+            if pdf_name:
+                pdf_sources[f"{year}:{ticker}"] = pdf_name
+
+        processed_frames.append(df_plot)
+
+    # Determine common shifts across all tickers
+    if not available_shifts_per_ticker:
+        raise ValueError("No release date shift data available for comparison.")
+
+    common_shifts = set(allowed_shifts)
+    for shifts in available_shifts_per_ticker.values():
+        common_shifts &= shifts
 
     if not common_shifts:
         raise ValueError("No common Release Date Shift values across all companies.")
@@ -444,18 +490,19 @@ def compare_stacked_financials(
     factor_lookup = {k: v for k, v in factor_lookup.items() if k == "" or k in common_shifts}
 
     factor_tooltip: Dict[str, list[str]] = {}
-    for year, release_line in release_lines.items():
-        entries = [release_line]
+    for year, releases in release_lines.items():
+        entries = releases.copy()
         price_entries = price_tooltips.get(year, {})
-        for shift in allowed_shifts:
-            if shift not in common_shifts:
-                continue
-            tooltip_line = price_entries.get(shift)
-            if tooltip_line:
-                entries.append(tooltip_line)
+        for ticker, shifts in available_shifts_per_ticker.items():
+            for shift in allowed_shifts:
+                if shift not in common_shifts or shift not in shifts:
+                    continue
+                tooltip_line = price_entries.get(f"{ticker}:{shift}")
+                if tooltip_line:
+                    entries.append(tooltip_line)
         factor_tooltip[year] = entries
 
-    combined_df_plot = pd.concat(combined_frames, ignore_index=True)
+    combined_df_plot = pd.concat(processed_frames, ignore_index=True, sort=False)
 
     if out_path:
         output_path = Path(out_path)

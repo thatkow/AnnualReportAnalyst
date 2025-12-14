@@ -450,7 +450,7 @@ function buildCumsumLines(factorName, perShare, activeYears, activeBaseYears) {{
           const tooltipFormatted = tooltipArr.length
             ? `<br><b>${{factorTooltipLabel}}:</b><br>` + tooltipArr.join("<br>")
             : "";
-          const pdfName = pdfSources[y];
+          const pdfName = pdfSources[`${{y}}:${{ticker}}`] || pdfSources[y];
           const pdfPath = (pdfName && ticker)
             ? encodeURI(`../${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
             : "";
@@ -468,7 +468,7 @@ function buildCumsumLines(factorName, perShare, activeYears, activeBaseYears) {{
         }}),
         hoverinfo: "text",
         customdata: activeYears.map(y => {{
-          const pdfName = pdfSources[y];
+          const pdfName = pdfSources[`${{y}}:${{ticker}}`] || pdfSources[y];
           const pdfPath = (pdfName && ticker)
             ? encodeURI(`../${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
             : "";
@@ -996,12 +996,18 @@ Object.keys(factorLookup).forEach(f => {{
   const opt = document.createElement("option");
   opt.value = f;
   opt.textContent = f;
-  sel.appendChild(opt);
+sel.appendChild(opt);
 }});
 sel.value = "";
 
+function getFactor(factorName, ticker, year) {{
+  const factorMap = factorLookup[factorName] || {{}};
+  const perTicker = factorMap[ticker] || {{}};
+  const v = perTicker[year];
+  return (v === undefined || v === null || isNaN(v)) ? NaN : v;
+}}
+
 function buildBarTraces(factorName, activeYears, activeBaseYears) {{
-  const factorMap = factorLookup[factorName];
   const traces = [];
   for (const ticker of tickers) {{
     for (const typ of types) {{
@@ -1009,10 +1015,7 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
       for (const row of subset) {{
         const color = colorMap[row._CANONICAL_KEY];
         const yvals = activeYears.map(y => {{
-          const factor = factorMap[y];
-          if (factor === undefined || factor === null || isNaN(factor)) {{
-            return NaN;
-          }}
+          const factor = getFactor(factorName, ticker, y);
           const baseVal = (row[y] || 0) * factor;
           return baseVal;
         }});
@@ -1045,15 +1048,11 @@ function buildBarTraces(factorName, activeYears, activeBaseYears) {{
 }}
 
 function buildCumsumLines(factorName, activeYears, activeBaseYears) {{
-  const factorMap = factorLookup[factorName];
   const lines = [];
   for (const ticker of tickers) {{
     for (const typ of types) {{
       const perYearTotals = activeYears.map(y => {{
-        const factor = factorMap[y];
-        if (factor === undefined || factor === null || isNaN(factor)) {{
-          return NaN;
-        }}
+        const factor = getFactor(factorName, ticker, y);
         const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
         const sum = subset.reduce((acc, r) => acc + (r[y] || 0) * factor, 0);
         return sum;
@@ -1076,7 +1075,7 @@ function buildCumsumLines(factorName, activeYears, activeBaseYears) {{
           const tooltipFormatted = tooltipArr.length
             ? `<br><b>${{factorTooltipLabel}}:</b><br>` + tooltipArr.join("<br>")
             : "";
-          const pdfName = pdfSources[y];
+            const pdfName = pdfSources[`${{y}}:${{ticker}}`] || pdfSources[y];
           const pdfPath = (pdfName && ticker)
             ? encodeURI(`../${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
             : "";
@@ -1094,7 +1093,7 @@ function buildCumsumLines(factorName, activeYears, activeBaseYears) {{
         }}),
         hoverinfo: "text",
         customdata: activeYears.map(y => {{
-          const pdfName = pdfSources[y];
+          const pdfName = pdfSources[`${{y}}:${{ticker}}`] || pdfSources[y];
           const pdfPath = (pdfName && ticker)
             ? encodeURI(`../${{ticker}}/openapiscrape/${{pdfName}}/PDF_FOLDER/${{typ}}.pdf`)
             : "";
@@ -1126,7 +1125,7 @@ function renderBars() {{
       const subset = rawData.filter(r => r.TYPE === typ && r.Ticker === ticker);
       if (subset.length === 0) continue;
       const vals = years.map(y => {{
-        const sum = subset.reduce((acc, r) => acc + (r[y] || 0) * (factorLookup[factorName][y] || 1), 0);
+        const sum = subset.reduce((acc, r) => acc + (r[y] || 0) * (getFactor(factorName, ticker, y) || 1), 0);
         return sum;
       }});
       const filteredPairs = [];
@@ -1134,7 +1133,7 @@ function renderBars() {{
         if (!yearToggleState[y]) {{
           return;
         }}
-        const factor = factorLookup[factorName][y];
+        const factor = getFactor(factorName, ticker, y);
         const v = vals[i];
         if (factor !== undefined && factor !== null && !isNaN(factor) && v !== undefined && v !== null && !isNaN(v)) {{
           filteredPairs.push({{ year: y, value: v }});
