@@ -17,6 +17,16 @@ from analyst.plots import (
     _release_date_map,
 )
 
+def _normalize_shift_label(label: str) -> str:
+    try:
+        numeric = float(label)
+    except (TypeError, ValueError):
+        return str(label).strip()
+    if numeric.is_integer():
+        return str(int(numeric))
+    return str(numeric)
+
+
 REQUIRED_COMMON_ROWS = [
     ("Meta", "PDF source", "", "", "excluded"),
     ("Financial", "Financial Multiplier", "", "", "excluded"),
@@ -163,7 +173,8 @@ def _prepare_company_dataframe(
         factor_lookup[""][year] = 1.0
 
     for _, prow in price_rows.iterrows():
-        label = str(prow.get("SUBCATEGORY", "")).strip() or "Price"
+        raw_label = str(prow.get("SUBCATEGORY", "")).strip() or "Price"
+        label = _normalize_shift_label(raw_label)
         factor_lookup.setdefault(label, {})
         for year in num_cols:
             price_val = pd.to_numeric(prow.get(year, ""), errors="coerce")
@@ -230,9 +241,16 @@ def compare_stacked_financials(
         visuals_dir.mkdir(parents=True, exist_ok=True)
         out_path = visuals_dir / out_path.name
 
+    sorted_years = sorted(
+        year_cols,
+        key=lambda y: float(y)
+        if str(y).replace(".", "", 1).lstrip("-+").isdigit()
+        else str(y),
+    )
+
     year_labels = []
     for ticker in tickers:
-        for year in year_cols:
+        for year in sorted_years:
             year_labels.append({"label": f"{year}-{ticker}", "ticker": ticker, "year": year})
 
     records = []
@@ -253,7 +271,7 @@ def compare_stacked_financials(
     type_offsets = {t: round((i - (len(types) - 1) / 2) * 0.6, 2) for i, t in enumerate(types)}
     ticker_offsets = {t: (i - ((len(tickers) - 1) / 2)) * 0.25 for i, t in enumerate(tickers)}
 
-    years_json = json.dumps(year_cols)
+    years_json = json.dumps(sorted_years)
     tickers_json = json.dumps(tickers)
     types_json = json.dumps(types)
     records_json = json.dumps(records)
@@ -289,8 +307,10 @@ body {{ font-family: sans-serif; margin: 40px; }}
     </label>
   </div>
   <div>
-    <div style=\"font-weight:bold; margin-bottom:4px;\">Include Years in Stats:</div>
-    <div id=\"yearToggleContainer\" style=\"display:flex; flex-wrap:wrap; row-gap:4px; column-gap:12px;\"></div>
+    <details id=\"yearToggleDetails\" open>
+      <summary style=\"font-weight:bold; cursor:pointer;\">Include Years in Stats</summary>
+      <div id=\"yearToggleContainer\" style=\"display:flex; flex-wrap:wrap; row-gap:4px; column-gap:12px; padding-top:4px;\"></div>
+    </details>
   </div>
 </div>
 <div id=\"plotBars\"></div>
@@ -347,17 +367,29 @@ rawData.forEach(r => {{
 
 function initFactorSelector() {{
   const sel = document.getElementById("factorSelector");
-  const blankOpt = document.createElement("option");
-  blankOpt.value = "";
-  blankOpt.textContent = "";
-  sel.appendChild(blankOpt);
-  Object.keys(factorLookup).forEach(f => {{
-    if (f === "") return;
-    const opt = document.createElement("option");
-    opt.value = f;
-    opt.textContent = f;
-    sel.appendChild(opt);
-  }});
+  const keys = Object.keys(factorLookup);
+  const noneOpt = document.createElement("option");
+  noneOpt.value = "";
+  noneOpt.textContent = "None";
+  sel.appendChild(noneOpt);
+  keys
+    .filter(f => f !== "")
+    .sort((a, b) => {{
+      const na = Number(a);
+      const nb = Number(b);
+      const aNum = !isNaN(na);
+      const bNum = !isNaN(nb);
+      if (aNum && bNum) return na - nb;
+      if (aNum) return -1;
+      if (bNum) return 1;
+      return String(a).localeCompare(String(b));
+    }})
+    .forEach(f => {{
+      const opt = document.createElement("option");
+      opt.value = f;
+      opt.textContent = f;
+      sel.appendChild(opt);
+    }});
   sel.value = "";
   sel.addEventListener("change", renderBars);
 }}
