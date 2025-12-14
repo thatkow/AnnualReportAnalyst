@@ -492,6 +492,8 @@ function renderBars() {{
           hovertemplate: `${{typ}}<br>${{row.ITEM || ''}}<br>${{ticker}}<br>%{{customdata}}<br>%{{y}}<extra></extra>` ,
           _orderKey: Math.min(...xvals),
           _ticker: ticker,
+          _type: typ,
+          _years: activeYears,
         }});
       }}
     }}
@@ -501,6 +503,7 @@ function renderBars() {{
 
   const baseSums = new Map();
   const stackTotals = new Map();
+  const stackMeta = new Map();
   traces.forEach(tr => {{
     const bases = [];
     tr.x.forEach((xVal, idx) => {{
@@ -526,6 +529,15 @@ function renderBars() {{
         totals.sum += yVal;
         totals.has = true;
         stackTotals.set(totalKey, totals);
+        if (!stackMeta.has(totalKey)) {{
+          const years = Array.isArray(tr._years) ? tr._years : [];
+          const releases = Array.isArray(tr.customdata) ? tr.customdata : [];
+          stackMeta.set(totalKey, {{
+            year: years[idx],
+            release: releases[idx],
+            type: tr._type,
+          }});
+        }}
       }}
     }});
     tr.base = bases;
@@ -537,20 +549,26 @@ function renderBars() {{
     if (!totals.has) return;
     const [xStr, ticker] = key.split("|");
     const xVal = Number(xStr);
-    if (!dotByTicker.has(ticker)) dotByTicker.set(ticker, {{ x: [], y: [] }});
+    if (!dotByTicker.has(ticker)) dotByTicker.set(ticker, {{ x: [], y: [], year: [], release: [], type: [] }});
     const entry = dotByTicker.get(ticker);
     entry.x.push(xVal);
     entry.y.push(totals.sum);
+    const meta = stackMeta.get(key) || {{}};
+    entry.year.push(meta.year);
+    entry.release.push(meta.release);
+    entry.type.push(meta.type);
   }});
 
   dotByTicker.forEach((vals, ticker) => {{
+    const customdata = vals.year.map((yr, idx) => [yr, vals.release[idx], vals.type[idx]]);
     traces.push({{
       x: vals.x,
       y: vals.y,
+      customdata,
       type: "scatter",
       mode: "markers",
       marker: {{ color: hashColor(ticker), size: 12 }},
-      hovertemplate: `${{ticker}}<br>Total: %{{y}}<extra></extra>`,
+      hovertemplate: `${{ticker}}<br>%{{customdata[2] || ''}}<br>%{{customdata[0] || ''}}<br>Release: %{{customdata[1] || ''}}<br>Total: %{{y}}<extra></extra>`,
       showlegend: false,
     }});
   }});
