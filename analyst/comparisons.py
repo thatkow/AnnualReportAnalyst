@@ -315,6 +315,9 @@ body {{ font-family: sans-serif; margin: 40px; box-sizing: border-box; }}
       <input type=\"checkbox\" id=\"intangiblesCheckbox\" { 'checked' if include_intangibles else '' } /> Include intangibles
     </label>
     <label style=\"margin-left:20px;\">
+      <input type=\"checkbox\" id=\"showBarsCheckbox\" checked /> Display bars
+    </label>
+    <label style=\"margin-left:20px;\">
       <input type=\"checkbox\" id=\"hideUncheckedYears\" /> Hide unchecked years from plots
     </label>
   </div>
@@ -333,6 +336,7 @@ const types = {types_json};
 const baseRawData = {records_json};
 const includeIntangiblesDefault = {str(include_intangibles).lower()};
 let includeIntangibles = includeIntangiblesDefault;
+let showBars = true;
 const factorLookup = {factor_json};
 const yearLabels = {year_labels_json};
 const yearLabelMap = Object.fromEntries(yearLabels.map(y => [`${{y.year}}|${{y.ticker}}`, y.label]));
@@ -491,6 +495,7 @@ function renderBars() {{
           marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
           offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
           hovertemplate: `${{typ}}<br>${{row.ITEM || ''}}<br>${{ticker}}<br>%{{customdata[0]}}<br>%{{customdata[1]}}<extra></extra>` ,
+          visible: showBars,
           _orderKey: Math.min(...xvals),
           _ticker: ticker,
           _type: typ,
@@ -619,7 +624,16 @@ if (intangiblesCheckbox) {{
   }});
 }}
 
-const hideUncheckedCheckbox = document.getElementById("hideUncheckedYears");
+const showBarsCheckbox = document.getElementById("showBarsCheckbox");
+if (showBarsCheckbox) {{
+  showBarsCheckbox.checked = true;
+  showBarsCheckbox.addEventListener("change", (ev) => {{
+    showBars = ev.target.checked;
+    renderBars();
+  }});
+}}
+
+  const hideUncheckedCheckbox = document.getElementById("hideUncheckedYears");
 if (hideUncheckedCheckbox) {{
   hideUncheckedCheckbox.addEventListener("change", (ev) => {{
     hideUncheckedYears = ev.target.checked;
