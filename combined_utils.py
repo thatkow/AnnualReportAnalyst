@@ -299,7 +299,9 @@ Each row represents the financial year-end date for a company.
 Your task:
 For each year-end date, conduct a **thorough, exhaustive, multi-source search** to determine
 the **public release date** of that year’s Annual Report (or equivalent filing containing
-the full audited annual financial statements).
+the full audited annual financial statements). If you cannot confidently find the release
+date for the most recent year-end, assume it is a quarterly report and instead determine
+the release date for the latest quarterly filing.
 
 Your search MUST include, at minimum:
 • Stock exchange announcements from every exchange the company is or was listed on
