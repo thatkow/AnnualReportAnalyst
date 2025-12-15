@@ -280,6 +280,17 @@ def compare_stacked_financials(
 
     type_offsets = {t: round((i - (len(types) - 1) / 2) * 0.6, 2) for i, t in enumerate(types)}
     ticker_offsets = {t: (i - ((len(tickers) - 1) / 2)) * 0.25 for i, t in enumerate(tickers)}
+    marker_symbols = [
+        "circle",
+        "star",
+        "square",
+        "diamond",
+        "triangle-up",
+        "triangle-down",
+        "cross",
+        "x",
+    ]
+    type_symbol_map = {t: marker_symbols[i % len(marker_symbols)] for i, t in enumerate(types)}
 
     years_json = json.dumps(sorted_years)
     tickers_json = json.dumps(tickers)
@@ -290,6 +301,7 @@ def compare_stacked_financials(
     release_json = json.dumps(release_entries)
     type_offsets_json = json.dumps(type_offsets)
     ticker_offsets_json = json.dumps(ticker_offsets)
+    type_symbol_json = json.dumps(type_symbol_map)
 
     html = f"""<!DOCTYPE html>
 <html lang=\"en\">
@@ -343,6 +355,7 @@ const yearLabelMap = Object.fromEntries(yearLabels.map(y => [`${{y.year}}|${{y.t
 const releaseMap = {release_json};
 const typeOffsets = {type_offsets_json};
 const tickerOffsets = {ticker_offsets_json};
+const typeSymbolMap = {type_symbol_json};
 const yearToggleState = Object.fromEntries(yearLabels.map((y, idx) => [y.label, idx !== yearLabels.length - 1]));
 let hideUncheckedYears = false;
 
@@ -570,13 +583,14 @@ function renderBars() {{
   dotByTicker.forEach((vals, ticker) => {{
     const customdata = vals.year.map((yr, idx) => [yr ?? "", vals.release[idx] ?? "", vals.type[idx] ?? ""]);
     const dotHoverTemplate = `${{ticker}}<br>%{{customdata[2]}}<br>%{{customdata[0]}}<br>Release: %{{customdata[1]}}<br>Total: %{{y}}<extra></extra>`;
+    const symbols = vals.type.map(tp => typeSymbolMap[tp] || "circle");
     traces.push({{
       x: vals.x,
       y: vals.y,
       customdata,
       type: "scatter",
       mode: "markers",
-      marker: {{ color: hashColor(ticker), size: 12 }},
+      marker: {{ color: hashColor(ticker), size: 12, symbol: symbols }},
       hovertemplate: dotHoverTemplate,
       showlegend: false,
     }});
