@@ -1753,8 +1753,8 @@ class CombinedUIMixin:
         self.combined_rows = reordered_rows
         self._populate_combined_table(sorted_columns, reordered_rows)
 
-        # Auto-save Combined.csv when the table is generated
-        self.save_combined_to_csv()
+        # Auto-save Combined.csv silently when the table is generated
+        self.save_combined_to_csv(quiet=True)
 
 
     # === New: Load Combined.csv for a specific company ===
