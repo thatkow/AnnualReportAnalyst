@@ -133,6 +133,44 @@ class ScrapeResultPanel:
         cycle_btn = ttk.Button(multiplier_box, text="Cycle", command=_cycle_multiplier)
         cycle_btn.pack(side=tk.LEFT, padx=(8, 0))
 
+        def _multiply_multiplier(factor: float) -> None:
+            current_raw = self.multiplier_var.get().strip()
+            try:
+                current_val = float(current_raw) if current_raw else 0.0
+            except ValueError:
+                messagebox.showerror(
+                    "Multiplier",
+                    f"Current multiplier '{current_raw}' is not a number and cannot be scaled.",
+                )
+                return
+
+            new_value = current_val * factor
+            display_val = f"{new_value:g}"
+            self._set_multiplier(display_val)
+            try:
+                self.save_multiplier()
+            except Exception as exc:
+                import traceback
+
+                traceback.print_exc()
+                messagebox.showerror(
+                    "Multiplier", f"Failed to save multiplier:\n{exc}"
+                )
+
+        scale_1333_btn = ttk.Button(
+            multiplier_box,
+            text="1.333x",
+            command=lambda: _multiply_multiplier(1.333),
+        )
+        scale_1333_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        scale_2x_btn = ttk.Button(
+            multiplier_box,
+            text="2x",
+            command=lambda: _multiply_multiplier(2.0),
+        )
+        scale_2x_btn.pack(side=tk.LEFT, padx=(8, 0))
+
         def _open_multiplier_txt() -> None:
             try:
                 base_csv = self.model.csv_path
