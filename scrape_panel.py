@@ -302,15 +302,6 @@ class ScrapeResultPanel:
         elif index < 0 or index >= column_count:
             return
 
-        column_name = self.view.current_columns[index]
-        confirm = messagebox.askyesno(
-            "Delete Column",
-            f"Delete column '{column_name}'?\nThis cannot be undone.",
-            parent=self.frame,
-        )
-        if not confirm:
-            return
-
         new_columns = (
             self.view.current_columns[:index]
             + self.view.current_columns[index + 1 :]
