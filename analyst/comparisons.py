@@ -512,7 +512,7 @@ function renderBars() {{
         bases.push(NaN);
         return;
       }}
-      const key = `${{xVal}}|${{tr.offsetgroup || ''}}`;
+      const key = `${{xVal}}`;
       const current = baseSums.get(key) || {{ pos: 0, neg: 0 }};
       const baseVal = yVal >= 0 ? current.pos : current.neg;
       if (yVal >= 0) {{
