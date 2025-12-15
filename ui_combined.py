@@ -1434,7 +1434,18 @@ class CombinedUIMixin:
                     lambda e, tr=tree: self._on_note_conflict_double_click(e, tr),
                 )
 
-            ttk.Button(viewer, text="Close", command=viewer.destroy).pack(pady=8)
+            def _recheck_and_close() -> None:
+                try:
+                    viewer.destroy()
+                finally:
+                    # Re-run Generate Table after closing the viewer
+                    self.create_combined_dataset()
+
+            ttk.Button(
+                viewer,
+                text="Recheck or Close",
+                command=_recheck_and_close,
+            ).pack(pady=8)
 
             try:
                 viewer.transient(self.root)
