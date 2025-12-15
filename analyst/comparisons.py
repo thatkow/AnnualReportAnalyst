@@ -564,7 +564,7 @@ function renderBars() {{
 
   dotByTicker.forEach((vals, ticker) => {{
     const customdata = vals.year.map((yr, idx) => [yr, vals.release[idx], vals.type[idx]]);
-    const dotHoverTemplate = `${{ticker}}<br>%{{customdata[2] || ''}}<br>%{{customdata[0] || ''}}<br>Release: %{{customdata[1] || ''}}<br>Total: %{{y}}<extra></extra>`;
+    const dotHoverTemplate = `${{ticker}}<br>%{{customdata[2]|default("")}}<br>%{{customdata[0]|default("")}}<br>Release: %{{customdata[1]|default("")}}<br>Total: %{{y}}<extra></extra>`;
     traces.push({{
       x: vals.x,
       y: vals.y,
