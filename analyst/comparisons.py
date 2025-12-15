@@ -471,6 +471,7 @@ function renderBars() {{
         if (yvals.every(v => isNaN(v))) continue;
         const xvals = baseYears.map(b => b + (typeOffsets[typ] || 0) + (tickerOffsets[ticker] || 0));
         const releaseDates = activeYears.map(year => releaseMap[ticker]?.[year] || "");
+        const customdata = activeYears.map((year, idx) => [releaseDates[idx], yvals[idx], year]);
         const maxAbs = Math.max(...yvals.filter(v => !isNaN(v)).map(v => Math.abs(v)));
         const textThreshold = maxAbs / 3;
         const texts = yvals.map(v => {{
@@ -481,7 +482,7 @@ function renderBars() {{
         traces.push({{
           x: xvals,
           y: yvals,
-          customdata: releaseDates,
+          customdata,
           type: "bar",
           width: 0.33,
           text: texts,
@@ -489,7 +490,7 @@ function renderBars() {{
           textfont: {{ color: "#fff", size: 10 }},
           marker: {{ color, line: {{ width: 0.3, color: "#333" }} }},
           offsetgroup: ticker + "-" + typ + "-" + row._CANONICAL_KEY,
-          hovertemplate: `${{typ}}<br>${{row.ITEM || ''}}<br>${{ticker}}<br>%{{customdata}}<br>%{{y}}<extra></extra>` ,
+          hovertemplate: `${{typ}}<br>${{row.ITEM || ''}}<br>${{ticker}}<br>%{{customdata[0]}}<br>%{{customdata[1]}}<extra></extra>` ,
           _orderKey: Math.min(...xvals),
           _ticker: ticker,
           _type: typ,
@@ -531,7 +532,9 @@ function renderBars() {{
         stackTotals.set(totalKey, totals);
         if (!stackMeta.has(totalKey)) {{
           const years = Array.isArray(tr._years) ? tr._years : [];
-          const releases = Array.isArray(tr.customdata) ? tr.customdata : [];
+          const releases = Array.isArray(tr.customdata)
+            ? tr.customdata.map(entry => Array.isArray(entry) ? entry[0] : entry)
+            : [];
           stackMeta.set(totalKey, {{
             year: years[idx],
             release: releases[idx],
