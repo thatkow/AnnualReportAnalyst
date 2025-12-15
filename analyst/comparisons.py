@@ -246,7 +246,7 @@ def compare_stacked_financials(
         out_path = visuals_dir / out_path.name
 
     def _year_sort_key(val: str) -> tuple[int, float | str]:
-        ts = pd.to_datetime(val, errors="coerce")
+        ts = pd.to_datetime(val, errors="coerce", dayfirst=True)
         if pd.notna(ts):
             return (0, ts.timestamp())
         numeric_str = str(val)
