@@ -1310,7 +1310,7 @@ class CombinedUIMixin:
         if company_name:
             mapping_lookup = self._load_key4color_lookup(company_name)
 
-        conflicts = []
+        conflicts_by_key: Dict[Tuple[str, str, str, str], List[str]] = {}
         duplicate_tracker: Dict[
             Tuple[str, str], Dict[Tuple[str, str, str], List[Dict[str, str]]]
         ] = {}
@@ -1350,7 +1350,13 @@ class CombinedUIMixin:
                     if note_val:
                         existing_note = record.get("NOTE")
                         if existing_note and existing_note.strip().lower() != note_val.strip().lower():
-                            conflicts.append((key, [existing_note, note_val]))
+                            entries = conflicts_by_key.setdefault(key, [])
+                            seen = {v.lower() for v in entries}
+                            for candidate in (existing_note, note_val):
+                                candidate_str = str(candidate)
+                                if candidate_str.lower() not in seen:
+                                    entries.append(candidate_str)
+                                    seen.add(candidate_str.lower())
                         else:
                             record["NOTE"] = note_val
                     col_list = record.setdefault("values_by_dyn", {})
@@ -1441,6 +1447,7 @@ class CombinedUIMixin:
             viewer.protocol("WM_DELETE_WINDOW", viewer.destroy)
             return
 
+        conflicts = list(conflicts_by_key.items())
         if conflicts:
             # === Build interactive NOTE Conflict Viewer ===
             viewer = tk.Toplevel(self.root)
