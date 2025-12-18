@@ -586,12 +586,18 @@ class FinancialViolins:
 
 
 def financials_boxplots(
-    companies: Sequence[Company], *, include_intangibles: bool = True, shared_price_labels: Sequence[str | int] | None = None
+    companies: Sequence[Company], *, include_intangibles: bool = True, price_labels: Sequence[str | int] | None = None
 ) -> FinancialBoxplots:
     """Generate interlaced boxplots for all provided companies.
 
     When ``include_intangibles`` is ``True`` both include/exclude intangibles
     series are plotted side-by-side with a faded style for the exclude variant.
+
+    Args:
+        companies: Companies to plot.
+        include_intangibles: Whether to display the include/exclude intangibles views.
+        price_labels: Specific price columns to include. When ``None`` (default),
+            all shared price labels across the given companies are plotted.
     """
 
     if not companies:
@@ -639,16 +645,13 @@ def financials_boxplots(
     if not shared_available:
         raise ValueError("No shared stock price labels found between companies")
 
-    requested_labels = shared_price_labels
-    if requested_labels is None:
-        requested_labels = [-30, 0, 30]
-
+    requested_labels = shared_available if price_labels is None else price_labels
     requested_labels = [normalise(label) for label in requested_labels]
 
     missing = [label for label in requested_labels if label not in shared_available]
     if missing:
         raise ValueError(
-            f"Requested shared_price_labels not found in data: {', '.join(map(str, missing))}"
+            f"Requested price_labels not found in data: {', '.join(map(str, missing))}"
         )
 
     shared_price_labels = requested_labels
@@ -902,4 +905,3 @@ def financials_violin_comparison(companies: Sequence[Company]) -> FinancialVioli
     )
 
     return FinancialViolins(fig_fin=fig_fin, fig_inc=fig_inc)
-
