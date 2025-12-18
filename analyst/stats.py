@@ -222,6 +222,7 @@ def render_interlaced_boxplots(
     hlines: list[tuple[float, str, str]] | None = None,
     exclude_ticker_groups: Sequence[tuple[str, Sequence[Sequence[float]], str]] | None = None,
     hline_lookup: dict[str, dict[str, float | None]] | None = None,
+    height: float = 6.0,
 ):
     """Render interlaced boxplots for ``n`` tickers.
 
@@ -284,7 +285,7 @@ def render_interlaced_boxplots(
                 positions.append(len(positions) + 1)
                 box_meta.append((ticker, "include"))
 
-    fig, ax = plt.subplots(figsize=(16, 6))
+    fig, ax = plt.subplots(figsize=(16, height))
     bp = ax.boxplot(
         inter_groups,
         labels=inter_labels,
@@ -586,7 +587,7 @@ class FinancialViolins:
 
 
 def financials_boxplots(
-    companies: Sequence[Company], *, include_intangibles: bool = True, price_labels: Sequence[str | int] | None = None
+    companies: Sequence[Company], *, include_intangibles: bool = True, price_labels: Sequence[str | int] | None = None, height: float = 6.0
 ) -> FinancialBoxplots:
     """Generate interlaced boxplots for all provided companies.
 
@@ -598,6 +599,7 @@ def financials_boxplots(
         include_intangibles: Whether to display the include/exclude intangibles views.
         price_labels: Specific price columns to include. When ``None`` (default),
             all shared price labels across the given companies are plotted.
+        height: Height of the generated boxplots in inches.
     """
 
     if not companies:
@@ -753,6 +755,7 @@ def financials_boxplots(
         hlines=fin_hlines,
         exclude_ticker_groups=fin_ticker_groups_exclude if include_intangibles else None,
         hline_lookup=fin_line_lookup,
+        height=height,
     )
 
     fig_inc = render_interlaced_boxplots(
@@ -762,6 +765,7 @@ def financials_boxplots(
         hlines=inc_hlines,
         exclude_ticker_groups=inc_ticker_groups_exclude if include_intangibles else None,
         hline_lookup=inc_line_lookup,
+        height=height,
     )
 
     return FinancialBoxplots(fig_fin=fig_fin, fig_inc=fig_inc)
