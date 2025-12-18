@@ -33,7 +33,9 @@ Output first line:
 ═══════════════════════════════════════════════════════════════════════════════
 3. DATE COLUMN DETECTION
 You MUST detect **one date for every numeric column**, even if the textual
-dates repeat (e.g., ALX and ATLAX columns for the same year).
+dates repeat (e.g., ALX and ATLAX columns for the same year). Do NOT combine
+separate statements just because their columns share identical dates—treat
+each column as distinct even when dates match.
 
 Rules:
 • Each numeric column = one detected date.  
@@ -47,14 +49,15 @@ Example:
 both normalized to 31.12.2019.
 
 ═══════════════════════════════════════════════════════════════════════════════
-4. COLUMN SUMMATION RULE (AFTER EXTRACTION)
+4. COLUMN HANDLING (AFTER EXTRACTION)
 After extracting all columns:
 
-• Columns with the same normalized date must be summed together.  
-• Missing/blank = 0  
-• Parentheses → negative  
-• Do not scale values.  
-• Final output contains exactly one column per unique normalized date.
+• Do NOT merge or sum columns just because they share the same normalized
+  date. Keep every detected date column separate to avoid combining
+  statements that happen to repeat identical dates.
+• Missing/blank = 0
+• Parentheses → negative
+• Do not scale values.
 
 ═══════════════════════════════════════════════════════════════════════════════
 5. STRUCTURE

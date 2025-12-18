@@ -8,6 +8,7 @@ from analyst.plots import (
     plot_stacked_financials,
     plot_stacked_visuals,
 )
+from analyst.comparisons import compare_stacked_financials
 
 __all__ = [
     "Company",
@@ -20,4 +21,5 @@ __all__ = [
     "financials_violin_comparison",
     "plot_stacked_financials",
     "plot_stacked_visuals",
+    "compare_stacked_financials",
 ]
