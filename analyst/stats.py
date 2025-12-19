@@ -649,6 +649,13 @@ def financials_boxplots(
         index_lookup = {label: i for i, label in enumerate(available_labels)}
         return [groups[index_lookup[label]] for label in target_labels]
 
+    def omit_latest_date(groups: Sequence[Sequence[float]]):
+        trimmed: list[np.ndarray] = []
+        for group in groups:
+            arr = np.asarray(group)
+            trimmed.append(arr[:-1])
+        return trimmed
+
     colors = [plt.cm.tab10(i % 10) for i in range(len(companies))]
 
     fin_ticker_groups = []
@@ -683,10 +690,18 @@ def financials_boxplots(
             adj_exc["divisors"], adj_exc["subcats"], shared_price_labels
         )
 
-        fin_ticker_groups.append((company.ticker, fin_groups_inc, color))
-        inc_ticker_groups.append((company.ticker, inc_groups_inc, color))
-        fin_ticker_groups_exclude.append((company.ticker, fin_groups_exc, color))
-        inc_ticker_groups_exclude.append((company.ticker, inc_groups_exc, color))
+        fin_ticker_groups.append(
+            (company.ticker, omit_latest_date(fin_groups_inc), color)
+        )
+        inc_ticker_groups.append(
+            (company.ticker, omit_latest_date(inc_groups_inc), color)
+        )
+        fin_ticker_groups_exclude.append(
+            (company.ticker, omit_latest_date(fin_groups_exc), color)
+        )
+        inc_ticker_groups_exclude.append(
+            (company.ticker, omit_latest_date(inc_groups_exc), color)
+        )
 
         base_fin_groups = fin_groups_inc if include_intangibles else fin_groups_exc
         base_inc_groups = inc_groups_inc if include_intangibles else inc_groups_exc
