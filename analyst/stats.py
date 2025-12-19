@@ -368,8 +368,9 @@ def render_interlaced_boxplots(
                     hline_value,
                     color=_darken_color(color),
                     edgecolor="black",
+                    marker="*",
                     zorder=5,
-                    s=25,
+                    s=75,
                 )
 
     ax.set_xlabel(xlabel)
