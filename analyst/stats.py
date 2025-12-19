@@ -294,6 +294,7 @@ def render_interlaced_boxplots(
         positions=positions,
         widths=0.25,
         showmeans=True,
+        showfliers=False,
         meanline=False,
         meanprops={
             "marker": "x",
