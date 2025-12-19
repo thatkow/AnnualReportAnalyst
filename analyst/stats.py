@@ -4,8 +4,9 @@ from typing import Iterable, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.patches import Patch
 from matplotlib.colors import to_rgba
+from matplotlib.patches import Patch
+from matplotlib.ticker import MultipleLocator
 
 from analyst.data import Company
 from . import yahoo
@@ -370,12 +371,16 @@ def render_interlaced_boxplots(
                     edgecolor="black",
                     marker="*",
                     zorder=5,
-                    s=75,
+                    s=300,
                 )
 
     ax.set_xlabel(xlabel)
     plt.xticks(rotation=45, ha="right")
     plt.title(xlabel)
+    ax.yaxis.set_major_locator(MultipleLocator(0.1))
+    ax.yaxis.set_minor_locator(MultipleLocator(0.5))
+    ax.grid(which="major", axis="y", alpha=0.6)
+    ax.grid(which="minor", axis="y", alpha=0.3)
     plt.tight_layout()
 
     return fig
