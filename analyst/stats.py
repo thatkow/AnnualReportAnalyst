@@ -311,6 +311,16 @@ def render_interlaced_boxplots(
 
     if hline_lookup:
         y_min, y_max = ax.get_ylim()
+        line_values = [
+            v
+            for ticker_lookup in hline_lookup.values()
+            for v in ticker_lookup.values()
+            if v is not None and not np.isnan(v)
+        ]
+        if line_values:
+            y_max = max(y_max, max(line_values))
+            y_min = min(y_min, min(line_values))
+
         y_pad = 0.12 * (y_max - y_min)
         ax.set_ylim(y_min, y_max + y_pad)
         y_text = y_max + y_pad - 0.02 * (y_max - y_min)
@@ -337,59 +347,30 @@ def render_interlaced_boxplots(
 
             mean_pct = _pct(hline_value, mean_val)
             median_pct = _pct(hline_value, median_val)
+            ticker_label = ticker.upper()
+            includes_intangibles = exclude_ticker_groups is not None and variant == "include"
+            if includes_intangibles:
+                ticker_label = f"{ticker_label} (I)"
 
             ax.text(
                 pos,
                 y_text,
-                f"{mean_pct}\n{median_pct}\nn={n_points}",
+                f"{ticker_label}\n{mean_pct}\n{median_pct}\nn={n_points}",
                 ha="center",
                 va="top",
                 fontsize=8,
                 color=_darken_color(color),
             )
 
-    legend_handles = [
-        Patch(color=color, label=f"{ticker.upper()} (incl. intangibles)")
-        for ticker, _, color in ticker_groups
-    ]
-
-    if exclude_ticker_groups:
-        legend_handles.extend(
-            Patch(color=_fade_color(color), label=f"{ticker.upper()} (ex intg)")
-            for ticker, _, color in exclude_ticker_groups
-            if exclude_usage.get(ticker)
-        )
-
-    line_handles: list[plt.Line2D] = []
-
-    if hlines:
-        for value, color, label in hlines:
-            if value is None or np.isnan(value):
-                continue
-            line = ax.axhline(
-                value, color=color, linestyle="--", linewidth=1.5, label=label
-            )
-            line_handles.append(line)
-
-    handles: list[Patch | plt.Line2D] = []
-    labels: list[str] = []
-
-    for handle, label in zip(legend_handles + line_handles, [
-        h.get_label() for h in legend_handles + line_handles
-    ]):
-        if label in labels or label == "_nolegend_":
-            continue
-        handles.append(handle)
-        labels.append(label)
-
-    ax.legend(
-        handles=handles,
-        labels=labels,
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
-        borderaxespad=0.0,
-    )
-    fig.subplots_adjust(right=0.78)
+            if hline_value is not None and not np.isnan(hline_value):
+                ax.scatter(
+                    pos,
+                    hline_value,
+                    color=_darken_color(color),
+                    edgecolor="black",
+                    zorder=5,
+                    s=25,
+                )
 
     ax.set_xlabel(xlabel)
     plt.xticks(rotation=45, ha="right")
