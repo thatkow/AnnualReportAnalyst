@@ -23,7 +23,14 @@ Annual Report Analyst is a desktop (Tkinter) application that helps analysts ing
    - The Combined tab reads the saved scrape outputs, builds a unified dataset, and appends dynamic columns (date columns derived from PDFs). 
    - The combined output is rendered in the UI and automatically saved as `Combined.csv`, enabling downstream analysis and reporting workflows.
 
+6. **Post-pipeline analysis (analyst package)**
+   - After `Combined.csv` is generated, the `analyst` package provides a data analysis layer that loads one or more companies into structured `Company` objects and supports downstream visuals and comparisons. 
+   - Single-company analysis uses stacked financial visuals to normalize values (multipliers, per-share conversion, release-date shifts) and render interactive HTML reports. 
+   - Multi-company analysis merges normalized datasets and produces comparative stacked visuals across tickers, ensuring required meta rows are present so like-for-like comparisons are consistent. 
+   - Additional analytical helpers compute adjusted values, release-date-aware statistics, and diagnostic plots such as boxplots/violins for financial distributions.
+
 ## Key artifacts produced
 - `assigned.json`: curated page selections per PDF/category (review checkpoint).
 - `openapiscrape/`: AI extraction outputs and supporting PDF slices.
 - `Combined.csv`: consolidated dataset ready for analysis.
+- `visuals/*.html`: optional analyst visual outputs generated from the combined data.
