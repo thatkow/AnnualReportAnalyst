@@ -4,8 +4,9 @@ from typing import Iterable, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.patches import Patch
 from matplotlib.colors import to_rgba
+from matplotlib.patches import Patch
+from matplotlib.ticker import MultipleLocator
 
 from analyst.data import Company
 from . import yahoo
@@ -293,6 +294,7 @@ def render_interlaced_boxplots(
         positions=positions,
         widths=0.25,
         showmeans=True,
+        showfliers=False,
         meanline=False,
         meanprops={
             "marker": "x",
@@ -370,12 +372,26 @@ def render_interlaced_boxplots(
                     edgecolor="black",
                     marker="*",
                     zorder=5,
-                    s=75,
+                    s=150,
+                )
+
+                ax.text(
+                    pos + 0.08,
+                    hline_value,
+                    f"{hline_value:.2f}",
+                    ha="left",
+                    va="center",
+                    fontsize=8,
+                    color=_darken_color(color),
                 )
 
     ax.set_xlabel(xlabel)
     plt.xticks(rotation=45, ha="right")
     plt.title(xlabel)
+    ax.yaxis.set_major_locator(MultipleLocator(0.1))
+    ax.yaxis.set_minor_locator(MultipleLocator(0.5))
+    ax.grid(which="major", axis="y", alpha=0.6)
+    ax.grid(which="minor", axis="y", alpha=0.3)
     plt.tight_layout()
 
     return fig
@@ -644,6 +660,13 @@ def financials_boxplots(
         index_lookup = {label: i for i, label in enumerate(available_labels)}
         return [groups[index_lookup[label]] for label in target_labels]
 
+    def omit_latest_date(groups: Sequence[Sequence[float]]):
+        trimmed: list[np.ndarray] = []
+        for group in groups:
+            arr = np.asarray(group)
+            trimmed.append(arr[:-1])
+        return trimmed
+
     colors = [plt.cm.tab10(i % 10) for i in range(len(companies))]
 
     fin_ticker_groups = []
@@ -678,10 +701,18 @@ def financials_boxplots(
             adj_exc["divisors"], adj_exc["subcats"], shared_price_labels
         )
 
-        fin_ticker_groups.append((company.ticker, fin_groups_inc, color))
-        inc_ticker_groups.append((company.ticker, inc_groups_inc, color))
-        fin_ticker_groups_exclude.append((company.ticker, fin_groups_exc, color))
-        inc_ticker_groups_exclude.append((company.ticker, inc_groups_exc, color))
+        fin_ticker_groups.append(
+            (company.ticker, omit_latest_date(fin_groups_inc), color)
+        )
+        inc_ticker_groups.append(
+            (company.ticker, omit_latest_date(inc_groups_inc), color)
+        )
+        fin_ticker_groups_exclude.append(
+            (company.ticker, omit_latest_date(fin_groups_exc), color)
+        )
+        inc_ticker_groups_exclude.append(
+            (company.ticker, omit_latest_date(inc_groups_exc), color)
+        )
 
         base_fin_groups = fin_groups_inc if include_intangibles else fin_groups_exc
         base_inc_groups = inc_groups_inc if include_intangibles else inc_groups_exc
