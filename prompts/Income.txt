@@ -118,9 +118,35 @@ Multiplier: <value>
 Then:
 CATEGORY,SUBCATEGORY,ITEM,NOTE,<date1>,<date2>,...
 
-• CATEGORY, SUBCATEGORY, ITEM in UPPERCASE and wrapped in quotes
+• CATEGORY, SUBCATEGORY, ITEM must ALWAYS be wrapped in double quotes
 • Comma-separated  
 • Include every line-item row, even those marked excluded  
+
+═══════════════════════════════════════════════════════════════════════════════
+10. ROW COMPLETENESS RULE (CRITICAL)
+
+You must preserve ALL line items that belong to the detected statement,
+even if a row is messy, wrapped, partially blank, repeated, or difficult
+to classify.
+
+Do NOT omit a row merely because:
+• some numeric cells are blank
+• the row contains dashes
+• the wording is unusual
+• the row looks like a subtotal
+• the row spans multiple visual lines
+• the row contains OCR noise
+• the row has no obvious CATEGORY/SUBCATEGORY
+
+If a statement row is present, output it.
+
+For uncertain rows:
+• keep the ITEM text as faithfully as possible
+• set missing numeric cells to 0
+• use the best-fit CATEGORY
+• use NOTE = excluded if unsure whether asis or negated
+
+Omission is worse than imperfect classification.
 
 ═══════════════════════════════════════════════════════════════════════════════
 END OF PROMPT

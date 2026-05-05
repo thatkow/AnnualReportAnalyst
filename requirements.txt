@@ -4,3 +4,6 @@ openai
 requests
 matplotlib
 platformdirs
+PIP
+pandas
+yfinance
